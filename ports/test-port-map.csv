@@ -1789,7 +1789,7 @@ nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/orders/mod.rs
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/orders/mod.rs,test_order_life_cycle_fills_with_negative_prices,1520,,,unit,discovered,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/orders/mod.rs,test_order_life_cycle_to_filled,1497,,,unit,discovered,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/orders/mod.rs,test_order_life_cycle_to_partially_filled,2046,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/orders/mod.rs,test_order_opposite_side,1422,internal/order/enums_test.go,TestOrderSideOpposite,unit,ported-failing,
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/orders/mod.rs,test_order_opposite_side,1422,internal/order/enums_test.go,TestOrderSideOpposite,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/orders/mod.rs,test_order_state_transition_denied,1482,,,unit,discovered,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/orders/mod.rs,test_order_state_transition_to_canceled,2032,,,unit,discovered,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/orders/mod.rs,test_order_updated_default_is_quote_quantity_clears_flag,2667,,,unit,discovered,
