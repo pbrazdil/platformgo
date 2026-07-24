@@ -292,6 +292,9 @@ func persistDecision(
 	input engine.InputEnvelope,
 	decision engine.Decision,
 ) error {
+	if err := persistCommandResult(ctx, tx, input, decision.CommandResult); err != nil {
+		return err
+	}
 	for _, change := range decision.InstrumentChanges {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO trading.instruments (
@@ -409,6 +412,34 @@ func persistDecision(
 		return err
 	}
 	return persistOutbox(ctx, tx, decision.Events)
+}
+
+func persistCommandResult(
+	ctx context.Context,
+	tx pgx.Tx,
+	input engine.InputEnvelope,
+	result engine.CommandResult,
+) error {
+	if input.Kind != engine.InputKindCommand {
+		return nil
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("encode command %s result: %w", input.InputID, err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE trading.commands
+		   SET status = $2,
+		       result = $3,
+		       completed_at = clock_timestamp()
+		 WHERE command_id = $1 AND status = 'pending'`,
+		input.InputID.String(),
+		string(result.Status),
+		encoded,
+	); err != nil {
+		return fmt.Errorf("persist command %s result: %w", input.InputID, err)
+	}
+	return nil
 }
 
 func persistLedger(

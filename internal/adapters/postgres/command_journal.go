@@ -58,6 +58,8 @@ type BeginCommandRequest struct {
 	CommandType      string
 	SchemaVersion    uint32
 	CanonicalPayload []byte
+	OutboxSubject    string
+	OutboxPayload    []byte
 	LogicalTime      time.Time
 	ExpiresAt        time.Time
 }
@@ -142,6 +144,17 @@ func (journal *CommandJournal) Begin(
 		); insertErr != nil {
 			return BeginCommandResult{}, fmt.Errorf("insert durable command: %w", insertErr)
 		}
+		if _, insertErr := tx.Exec(ctx, `
+			INSERT INTO messaging.outbox (
+				message_id, subject, schema_version, payload
+			) VALUES ($1,$2,$3,$4)`,
+			request.CommandID.String(),
+			request.OutboxSubject,
+			request.SchemaVersion,
+			request.OutboxPayload,
+		); insertErr != nil {
+			return BeginCommandResult{}, fmt.Errorf("insert command outbox: %w", insertErr)
+		}
 		if commitErr := tx.Commit(ctx); commitErr != nil {
 			return BeginCommandResult{}, fmt.Errorf("commit new command: %w", commitErr)
 		}
@@ -188,6 +201,10 @@ func validateBeginCommand(request BeginCommandRequest) error {
 		return errors.New("begin command: schema version is required")
 	case !json.Valid(request.CanonicalPayload):
 		return errors.New("begin command: canonical payload is not JSON")
+	case request.OutboxSubject == "":
+		return errors.New("begin command: outbox subject is required")
+	case !json.Valid(request.OutboxPayload):
+		return errors.New("begin command: outbox payload is not JSON")
 	case request.ExpiresAt.IsZero():
 		return errors.New("begin command: expiration is required")
 	default:

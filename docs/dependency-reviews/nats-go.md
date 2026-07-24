@@ -6,7 +6,7 @@ publish acknowledgments, pull consumers, stream management, or NATS message-ID
 deduplication.
 
 API surface used:
-`jetstream.New`, `JetStream.Publish`, `WithMsgID`,
+`jetstream.New`, `JetStream.PublishMsg`, `Nats-Msg-Id`,
 `CreateOrUpdateStream`, `CreateOrUpdateConsumer`, bounded `Fetch`, message
 metadata, and `DoubleAck`.
 

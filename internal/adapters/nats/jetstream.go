@@ -50,12 +50,6 @@ func EnsureStreams(
 	}
 	configs := []jetstream.StreamConfig{
 		streamConfig(
-			EngineInputsStream,
-			[]string{"engine.input.*.>"},
-			"ordered engine inputs",
-			limits,
-		),
-		streamConfig(
 			DomainEventsStream,
 			[]string{"domain.v1.>"},
 			"committed domain events",
@@ -80,6 +74,44 @@ func EnsureStreams(
 		}
 	}
 	return nil
+}
+
+// EnsureEngineShardStream creates one physical ordered stream for one shard.
+// Separate streams make the JetStream stream sequence stable across redelivery
+// and contiguous without traffic from unrelated shards.
+func EnsureEngineShardStream(
+	ctx context.Context,
+	js jetstream.JetStream,
+	shardID engine.ShardID,
+	limits StreamLimits,
+) error {
+	if js == nil {
+		return errors.New("ensure engine shard stream: JetStream is required")
+	}
+	if limits.Replicas < 1 ||
+		limits.MaxBytes <= 0 ||
+		limits.MaxMessageBytes <= 0 ||
+		limits.MaxAge <= 0 ||
+		limits.DuplicateWindow <= 0 {
+		return errors.New(
+			"ensure engine shard stream: explicit positive limits are required",
+		)
+	}
+	name := engineShardStreamName(shardID)
+	config := streamConfig(
+		name,
+		[]string{fmt.Sprintf("engine.input.%d.>", shardID)},
+		fmt.Sprintf("ordered engine inputs for shard %d", shardID),
+		limits,
+	)
+	if _, err := js.CreateOrUpdateStream(ctx, config); err != nil {
+		return fmt.Errorf("ensure stream %s: %w", name, err)
+	}
+	return nil
+}
+
+func engineShardStreamName(shardID engine.ShardID) string {
+	return fmt.Sprintf("%s_%d", EngineInputsStream, shardID)
 }
 
 func streamConfig(
@@ -195,7 +227,7 @@ func NewEnginePullConsumer(
 	}
 	consumer, err := js.CreateOrUpdateConsumer(
 		ctx,
-		EngineInputsStream,
+		engineShardStreamName(shardID),
 		jetstream.ConsumerConfig{
 			Name:              durable,
 			Durable:           durable,
