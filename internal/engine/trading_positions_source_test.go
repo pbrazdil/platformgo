@@ -9,7 +9,7 @@ import (
 // Ported from:
 //
 //	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/nautilus/tests/live/trading/e2e_fill_taxonomy.rs:160
+//	source: apps/nautilus/tests/live/trading/e2e_fill_taxonomy.rs:159
 //	test: fill_type_is_classified_open_increase_reduce_flip_close
 //
 // Adaptations:
@@ -262,7 +262,7 @@ func TestTradingRestingReduceOnlyReclampsAtExecution(t *testing.T) {
 // Ported from:
 //
 //	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/nautilus/tests/live/trading/e2e_quote_injection.rs:53
+//	source: apps/nautilus/tests/live/trading/e2e_quote_injection.rs:48
 //	test: injected_quote_fills_resting_limit
 //
 // Adaptations:
