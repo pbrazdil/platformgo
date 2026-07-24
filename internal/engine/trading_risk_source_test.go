@@ -95,20 +95,13 @@ func TestTradingUsedMarginEqualsExactPositionFormula(t *testing.T) {
 //	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/nautilus/tests/live/trading/e2e_funding_settlement.rs:115
 //	test: funding_settlement_debits_a_long_and_is_idempotent
-//
-// Also preserves the signed short-credit assertions from:
-//
-//	source: apps/nautilus/tests/live/trading/e2e_funding_settlement.rs:351
-//	test: funding_settlement_credits_a_short
-func TestTradingFundingDebitsLongCreditsShortAndIsIdempotent(t *testing.T) {
+func TestTradingFundingDebitsLongAndIsIdempotent(t *testing.T) {
 	fixture := newTradingFixture(t)
 	fixture.setBalance(t, "account-1", "1000", BalanceOperationSet)
-	fixture.setBalance(t, "account-2", "1000", BalanceOperationSet)
 	fixture.submit(t, marketOrder(fixture.id(830), "account-1", SideBuy, "1", nil))
-	fixture.submit(t, marketOrder(fixture.id(831), "account-2", SideSell, "1", nil))
 
 	settlement := SettleFunding{
-		SettlementID: fixture.id(832),
+		SettlementID: fixture.id(831),
 		InstrumentID: "BTC-PERP",
 		OraclePrice:  "1000",
 		Rate:         "0.01",
@@ -117,13 +110,12 @@ func TestTradingFundingDebitsLongCreditsShortAndIsIdempotent(t *testing.T) {
 		Kind:          TradingActionSettleFunding,
 		SettleFunding: &settlement,
 	})
-	if len(first.FundingChanges) != 2 {
-		t.Fatalf("funding changes = %+v, want long and short", first.FundingChanges)
+	if len(first.FundingChanges) != 1 {
+		t.Fatalf("funding changes = %+v, want one long debit", first.FundingChanges)
 	}
 	long, _ := fixture.state.Balance("account-1", "USDC")
-	short, _ := fixture.state.Balance("account-2", "USDC")
-	if long.Total != "990" || short.Total != "1010" {
-		t.Fatalf("funding balances long/short = %s/%s, want 990/1010", long.Total, short.Total)
+	if long.Total != "990" {
+		t.Fatalf("long funding balance = %s, want 990", long.Total)
 	}
 
 	second := fixture.apply(t, TradingAction{
@@ -134,9 +126,36 @@ func TestTradingFundingDebitsLongCreditsShortAndIsIdempotent(t *testing.T) {
 		t.Fatalf("duplicate settlement effects = funding %+v balances %+v", second.FundingChanges, second.BalanceChanges)
 	}
 	longAgain, _ := fixture.state.Balance("account-1", "USDC")
-	shortAgain, _ := fixture.state.Balance("account-2", "USDC")
-	if longAgain.Total != long.Total || shortAgain.Total != short.Total {
+	if longAgain.Total != long.Total {
 		t.Fatal("duplicate funding settlement moved money")
+	}
+}
+
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/nautilus/tests/live/trading/e2e_funding_settlement.rs:351
+//	test: funding_settlement_credits_a_short
+func TestTradingFundingCreditsShort(t *testing.T) {
+	fixture := newTradingFixture(t)
+	fixture.setBalance(t, "account-2", "1000", BalanceOperationSet)
+	fixture.submit(t, marketOrder(fixture.id(832), "account-2", SideSell, "1", nil))
+	decision := fixture.apply(t, TradingAction{
+		Kind: TradingActionSettleFunding,
+		SettleFunding: &SettleFunding{
+			SettlementID: fixture.id(833),
+			InstrumentID: "BTC-PERP",
+			OraclePrice:  "1000",
+			Rate:         "0.01",
+		},
+	})
+	if len(decision.FundingChanges) != 1 ||
+		decision.FundingChanges[0].Amount != "10" {
+		t.Fatalf("short funding changes = %+v, want exact credit 10", decision.FundingChanges)
+	}
+	short, _ := fixture.state.Balance("account-2", "USDC")
+	if short.Total != "1010" {
+		t.Fatalf("short funding balance = %s, want 1010", short.Total)
 	}
 }
 
