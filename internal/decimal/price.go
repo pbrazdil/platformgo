@@ -144,10 +144,10 @@ func (p Price) Cmp(other Price) int {
 	return p.value.Cmp(other.value)
 }
 
-// Equal compares prices numerically and requires equal representational
-// precision, matching the pinned model's value semantics.
+// Equal compares prices numerically. Precision is formatting metadata and does
+// not affect equality, matching the pinned model's raw-value semantics.
 func (p Price) Equal(other Price) bool {
-	return p.Precision() == other.Precision() && p.value.Equal(other.value)
+	return p.value.Equal(other.value)
 }
 
 // AddDecimal returns the exact decimal sum.
