@@ -1,6 +1,11 @@
 package engine
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+
+	"github.com/upcomers-org/platformgo/internal/decimal"
+)
 
 type State struct {
 	shardID            ShardID
@@ -165,8 +170,18 @@ func applyWithSchemaVersion(
 		})
 	}
 
+	previousState := state
 	previousStateHash := state.hash
 	state, decision := transition(state)
+	ledgerChanges, ledgerError := deriveLedgerChanges(
+		previousState,
+		input,
+		decision.BalanceChanges,
+	)
+	if ledgerError != nil {
+		return halt(previousState, inputHash, ledgerError)
+	}
+	decision.LedgerChanges = ledgerChanges
 	decision.InputID = input.InputID
 	decision.SourceSequence = input.SourceSequence
 	decision.StreamSequence = input.StreamSequence
@@ -307,6 +322,7 @@ func cloneDecision(decision Decision) Decision {
 	decision.AccountChanges = append([]AccountSnapshot(nil), decision.AccountChanges...)
 	decision.RiskChanges = append([]RiskSnapshot(nil), decision.RiskChanges...)
 	decision.BalanceChanges = append([]BalanceSnapshot(nil), decision.BalanceChanges...)
+	decision.LedgerChanges = cloneLedgerTransactions(decision.LedgerChanges)
 	decision.FundingChanges = append([]FundingSnapshot(nil), decision.FundingChanges...)
 	decision.BookChanges = cloneBookSnapshots(decision.BookChanges)
 	decision.OrderChanges = append([]OrderSnapshot(nil), decision.OrderChanges...)
@@ -314,6 +330,106 @@ func cloneDecision(decision Decision) Decision {
 	decision.PositionChanges = append([]PositionSnapshot(nil), decision.PositionChanges...)
 	decision.Events = append([]DomainEvent(nil), decision.Events...)
 	return decision
+}
+
+func deriveLedgerChanges(
+	previous State,
+	input InputEnvelope,
+	changes []BalanceSnapshot,
+) ([]LedgerTransactionSnapshot, *Error) {
+	type balanceKey struct {
+		accountID string
+		currency  string
+	}
+	final := make(map[balanceKey]BalanceSnapshot, len(changes))
+	for _, change := range changes {
+		final[balanceKey{
+			accountID: change.AccountID,
+			currency:  change.Currency,
+		}] = change
+	}
+	keys := make([]balanceKey, 0, len(final))
+	for key := range final {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(left, right int) bool {
+		if keys[left].accountID != keys[right].accountID {
+			return keys[left].accountID < keys[right].accountID
+		}
+		return keys[left].currency < keys[right].currency
+	})
+
+	transactions := make([]LedgerTransactionSnapshot, 0, len(keys))
+	for _, key := range keys {
+		nextTotal, err := decimal.Parse(final[key].Total)
+		if err != nil {
+			return nil, invalidLedgerEffect(input, "next balance total", err)
+		}
+		previousTotal := decimal.Decimal{}
+		if snapshot, ok := previous.Balance(key.accountID, key.currency); ok {
+			previousTotal, err = decimal.Parse(snapshot.Total)
+			if err != nil {
+				return nil, invalidLedgerEffect(input, "previous balance total", err)
+			}
+		}
+		delta := nextTotal.Sub(previousTotal).Normalize()
+		if delta.IsZero() {
+			continue
+		}
+		transactionID := IDFromSequence(input.InputID, uint64(len(transactions)+1))
+		transactions = append(transactions, LedgerTransactionSnapshot{
+			TransactionID: transactionID,
+			BusinessKey: fmt.Sprintf(
+				"balance:%s:%s:%s",
+				input.InputID,
+				key.accountID,
+				key.currency,
+			),
+			InputID:     input.InputID,
+			LogicalTime: input.LogicalTime,
+			Entries: []LedgerEntrySnapshot{
+				{
+					EntryID:   IDFromSequence(transactionID, 1),
+					AccountID: key.accountID,
+					Currency:  key.currency,
+					Amount:    delta.String(),
+				},
+				{
+					EntryID:   IDFromSequence(transactionID, 2),
+					AccountID: SystemClearingAccount,
+					Currency:  key.currency,
+					Amount:    delta.Neg().String(),
+				},
+			},
+		})
+	}
+	return transactions, nil
+}
+
+func invalidLedgerEffect(
+	input InputEnvelope,
+	field string,
+	err error,
+) *Error {
+	return &Error{
+		Kind:     ErrInvalidEffect,
+		Sequence: input.StreamSequence,
+		Detail:   fmt.Sprintf("%s is not exact canonical decimal: %v", field, err),
+	}
+}
+
+func cloneLedgerTransactions(
+	transactions []LedgerTransactionSnapshot,
+) []LedgerTransactionSnapshot {
+	cloned := make([]LedgerTransactionSnapshot, len(transactions))
+	for index, transaction := range transactions {
+		cloned[index] = transaction
+		cloned[index].Entries = append(
+			[]LedgerEntrySnapshot(nil),
+			transaction.Entries...,
+		)
+	}
+	return cloned
 }
 
 func cloneBookSnapshots(books []BookSnapshot) []BookSnapshot {

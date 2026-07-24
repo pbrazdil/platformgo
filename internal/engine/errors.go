@@ -16,6 +16,7 @@ const (
 	ErrSequenceExhausted  ErrorKind = "sequence_exhausted"
 	ErrInputConflict      ErrorKind = "input_conflict"
 	ErrUnknownHashVersion ErrorKind = "unknown_hash_version"
+	ErrInvalidEffect      ErrorKind = "invalid_economic_effect"
 	ErrShardNotReady      ErrorKind = "shard_not_ready"
 )
 

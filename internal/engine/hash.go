@@ -88,6 +88,20 @@ func hashEffects(decision Decision) Hash {
 			writeString(hasher, balance.Free)
 			writeString(hasher, balance.Equity)
 		}
+		writeUint64(hasher, uint64(len(decision.LedgerChanges)))
+		for _, transaction := range decision.LedgerChanges {
+			writeBytes(hasher, transaction.TransactionID[:])
+			writeString(hasher, transaction.BusinessKey)
+			writeBytes(hasher, transaction.InputID[:])
+			writeInt64(hasher, transaction.LogicalTime.UnixNano())
+			writeUint64(hasher, uint64(len(transaction.Entries)))
+			for _, entry := range transaction.Entries {
+				writeBytes(hasher, entry.EntryID[:])
+				writeString(hasher, entry.AccountID)
+				writeString(hasher, entry.Currency)
+				writeString(hasher, entry.Amount)
+			}
+		}
 		writeUint64(hasher, uint64(len(decision.FundingChanges)))
 		for _, funding := range decision.FundingChanges {
 			writeBytes(hasher, funding.FundingID[:])

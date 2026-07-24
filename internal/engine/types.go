@@ -177,6 +177,7 @@ type Decision struct {
 	AccountChanges       []AccountSnapshot
 	RiskChanges          []RiskSnapshot
 	BalanceChanges       []BalanceSnapshot
+	LedgerChanges        []LedgerTransactionSnapshot
 	FundingChanges       []FundingSnapshot
 	BookChanges          []BookSnapshot
 	OrderChanges         []OrderSnapshot

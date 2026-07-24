@@ -387,6 +387,28 @@ type BalanceSnapshot struct {
 	Equity    string
 }
 
+// SystemClearingAccount is the counterparty for externally introduced or
+// removed account currency. Every ledger transaction remains zero-sum.
+const SystemClearingAccount = "system:clearing"
+
+// LedgerEntrySnapshot is one exact immutable debit or credit.
+type LedgerEntrySnapshot struct {
+	EntryID   ID
+	AccountID string
+	Currency  string
+	Amount    string
+}
+
+// LedgerTransactionSnapshot is one balanced economic effect decided by the
+// deterministic core. Adapters persist it without deriving money behavior.
+type LedgerTransactionSnapshot struct {
+	TransactionID ID
+	BusinessKey   string
+	InputID       ID
+	LogicalTime   LogicalTime
+	Entries       []LedgerEntrySnapshot
+}
+
 // FundingSnapshot is one append-only position funding effect.
 type FundingSnapshot struct {
 	FundingID          ID

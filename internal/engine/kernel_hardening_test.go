@@ -182,9 +182,9 @@ func TestKernelHashGoldenVectors(t *testing.T) {
 	}{
 		{name: "initial state", got: state.Hash(), want: "6685cbadc498da804da2b0f316b0b598ff43f501672c619c248330380e1496ab"},
 		{name: "input", got: decision.InputHash, want: "03c13213415db9db34fd61e86021074bf078552c47218ffa054313c6a86c1e2b"},
-		{name: "effects", got: decision.EffectsHash, want: "a58d5d8e43c454a8e00ba04f1fb98aeebd4156dc5141abd2dbbb9156a08e8725"},
-		{name: "decision", got: decision.DecisionHash, want: "20db88b5f281dfcee1d59232812e74f9eed3ef830632d0631ddf5ca684f28274"},
-		{name: "accepted state", got: next.Hash(), want: "7d84f679cd6c276f9828ef3df0ab9c76226b565cf9dd97c89c2238ae8a7abb04"},
+		{name: "effects", got: decision.EffectsHash, want: "377035ddfbebd315b0877447de9b719c5ed0774d46bb91670b5fec6e6be1f5d0"},
+		{name: "decision", got: decision.DecisionHash, want: "732d760984540b245d8deb82c7961b2461323a94611b8f0a128da6746932d399"},
+		{name: "accepted state", got: next.Hash(), want: "64b7bca66af248c0a976de5a54de25fcfede732e0e25c7be6c4ae034dd8c9e0e"},
 		{name: "halted state", got: halted.Hash(), want: "cd748e998b0582ad13540b96e0bb5682faa9f10b636ef7e2c3c15ea384771565"},
 		{name: "negative logical time", got: hashInput(negativeTime), want: "c803b3138c8db07c468b249391405f394d1942207eecaebbfa1e621a52b2fa26"},
 		{name: "empty payload", got: hashInput(emptyPayload), want: "59837e1266e78dd508ae139143de7e4f23bb8d848698982be96131910a40b54b"},
