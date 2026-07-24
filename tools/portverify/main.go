@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -144,6 +145,7 @@ func verify(root string, rows []row) error {
 	var problems []string
 	seenSources := make(map[string]struct{}, len(rows))
 	goFiles := make(map[string]map[string]goTest)
+	goAssignments := make(map[string]int)
 
 	for _, row := range rows {
 		sourceKey := fmt.Sprintf("%s:%s:%d", row.sourceRepo, row.sourceFile, row.sourceLine)
@@ -190,6 +192,7 @@ func verify(root string, rows []row) error {
 				problems = append(problems, sourceKey+": Go test "+row.goTest+" not found in "+row.goFile)
 				continue
 			}
+			goAssignments[row.goFile+":"+row.goTest]++
 			for _, expected := range []string{
 				row.sourceRevision,
 				fmt.Sprintf("%s:%d", row.sourceFile, row.sourceLine),
@@ -215,6 +218,43 @@ func verify(root string, rows []row) error {
 				problems = append(problems, sourceKey+": discovered row already names a Go port")
 			}
 		}
+	}
+
+	internalRoot := filepath.Join(root, "internal")
+	walkErr := filepath.WalkDir(internalRoot, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		goFile := filepath.ToSlash(relative)
+		tests, ok := goFiles[goFile]
+		if !ok {
+			tests, err = parseGoTests(path)
+			if err != nil {
+				return err
+			}
+			goFiles[goFile] = tests
+		}
+		for name := range tests {
+			key := goFile + ":" + name
+			switch goAssignments[key] {
+			case 0:
+				problems = append(problems, key+": native test is not assigned to a ported ledger row")
+			case 1:
+			default:
+				problems = append(problems, key+": native test is assigned to multiple ledger rows")
+			}
+		}
+		return nil
+	})
+	if walkErr != nil && !errors.Is(walkErr, os.ErrNotExist) {
+		problems = append(problems, "scan native tests: "+walkErr.Error())
 	}
 
 	if len(problems) > 0 {
