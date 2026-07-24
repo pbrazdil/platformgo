@@ -123,7 +123,7 @@ func TestPayloadMutationCannotChangeRecordedState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	input.Payload[0] ^= 0xff
+	input.Payload.value[0] ^= 0xff
 
 	if state.Hash() != decision.NextStateHash {
 		t.Fatalf("payload mutation changed state hash: %s != %s", state.Hash(), decision.NextStateHash)
@@ -138,13 +138,13 @@ func TestApplyDoesNotMutateInputState(t *testing.T) {
 	firstHash := firstState.Hash()
 
 	leftInput := testInput(t, 2)
-	leftInput.Payload = []byte("left")
+	leftInput.Payload = canonicalPayloadFromTrustedBytes([]byte("left"))
 	leftState, _, err := Apply(firstState, leftInput)
 	if err != nil {
 		t.Fatalf("left Apply: %v", err)
 	}
 	rightInput := testInput(t, 2)
-	rightInput.Payload = []byte("right")
+	rightInput.Payload = canonicalPayloadFromTrustedBytes([]byte("right"))
 	rightState, _, err := Apply(firstState, rightInput)
 	if err != nil {
 		t.Fatalf("right Apply: %v", err)
@@ -226,12 +226,11 @@ func TestOrderingAndEnvelopeFailuresHaltShard(t *testing.T) {
 				if err != nil {
 					t.Fatalf("prepare regression state: %v", err)
 				}
-				state.receipts = nil
 				return state
 			}(),
 			input: func() InputEnvelope {
 				input := testInput(t, 1)
-				input.Payload = []byte("different")
+				input.Payload = canonicalPayloadFromTrustedBytes([]byte("different"))
 				return input
 			}(),
 			want: ErrSequenceRegression,
@@ -247,7 +246,7 @@ func TestOrderingAndEnvelopeFailuresHaltShard(t *testing.T) {
 			}(),
 			input: func() InputEnvelope {
 				input := testInput(t, 1)
-				input.Payload = []byte("different")
+				input.Payload = canonicalPayloadFromTrustedBytes([]byte("different"))
 				return input
 			}(),
 			want: ErrInputConflict,
@@ -326,7 +325,7 @@ func testInput(t *testing.T, streamSequence uint64) InputEnvelope {
 		LogicalTime:          NewLogicalTime(time.Date(2026, time.July, 24, 10, 0, 1, 0, time.UTC)),
 		ConfigurationVersion: 11,
 		InstrumentVersion:    23,
-		Payload:              []byte(`{"command":"noop"}`),
+		Payload:              canonicalPayloadFromTrustedBytes([]byte(`{"command":"noop"}`)),
 	}
 }
 

@@ -6,7 +6,7 @@ Clean-room Go replacement for `upcomers-org/platform`, using pinned source tests
 
 Last updated: 2026-07-24
 
-Current delivery stage: **Phase 1 — pure engine complete**.
+Current delivery stage: **Phase 2 — durable execution in progress**.
 
 The pinned source inventory is complete: all 2,748 tests are recorded in
 `ports/test-port-map.csv`. Forty-one source tests are independently reviewed
@@ -40,6 +40,16 @@ protection. Thirty-six pinned Phase 1 rows are reviewed, green, and wired to
 this `model-real` boundary; five numeric rows provide the underlying
 `unit-real` exact-value evidence.
 
+Phase 2 opened by hardening the contracts that will become durable. Economic
+state now retains only its bounded latest receipt while an explicit O(1)
+receipt index resolves historical identity before current-schema validation.
+Versioned decision hashes bind previous state, input, and canonical effects;
+fixed vectors pin the audit protocol. Canonical payloads are opaque values
+created by deterministic encoders, production-economic dependency direction
+is enforced, and the shared deterministic testkit now provides shard-scoped
+IDs, manual time, receipt-aware engine execution, semantic failpoints, and
+canonical hash extraction.
+
 This repository is not yet a production-capable replacement. It has no executable `cmd` services, production PostgreSQL schema or adapter, NATS/JetStream adapter, Centrifugo adapter, or production Hyperliquid adapter. Current integration tests use deterministic in-memory fixtures and do not prove those runtime boundaries.
 
 ## Delivery progress
@@ -48,7 +58,7 @@ This repository is not yet a production-capable replacement. It has no executabl
 |---|---|---|
 | 0 — Policy and test harness | Complete | Machine-readable package scope, AST policy checks, split port/review/wiring evidence, exact function provenance, canonical source authorities, pinned Go 1.26.5, CODEOWNERS, immutable CI actions, complete-port and tidy gates, and the initial agent-evaluation corpus exist. `main` is protected and all seven required checks are enforced. The numeric foundation provides the sole `apd/v3`-backed production decimal, strict canonical parsing, explicit one-boundary rounding, immutable unit-bearing values, parser/arithmetic fuzzing, and five reviewed green source rows. The deterministic kernel adds explicit logical time and IDs, strict input sequencing, idempotent duplicate receipts, fail-closed typed errors, canonical decision/state hashes, replay properties, and the minimal synchronous engine fixture. |
 | 1 — Pure engine | Complete | Thirty-six pinned source rows are reviewed and green against the production `model-real` engine boundary. Coverage includes deterministic order lifecycle, depth/VWAP and slippage, netting and hedging positions, exact PnL, margin and reservation, idempotent funding, cross/isolated liquidation, stop/touch triggers, brackets and ladders, protection cleanup, and exact maker/taker fees. Policy-native invariant, fuzz, duplicate, replay, repeated, and race-enabled tests reinforce the source-test evidence. |
-| 2 — Durable execution | Not started | PostgreSQL migrations and persistence, idempotency journal, transactional ledger/state, NATS/JetStream transport, outbox/inbox, and durable recovery are not implemented. |
+| 2 — Durable execution | In progress | The prerequisite receipt, redelivery, versioned hash, canonical payload, dependency-direction, and shared-testkit contracts are implemented. PostgreSQL migrations and persistence, idempotency journal, transactional ledger/state, NATS/JetStream transport, outbox/inbox, and durable recovery remain. |
 | 3 — Compatibility edges | Not started | Production REST, gRPC, authentication, realtime/Centrifugo, health, CLI, and deployment-compatible services are not implemented. |
 | 4 — Hyperliquid production integration | Not started | No production adapter, reconnect/resynchronization path, controlled live canary, soak test, or incident drill exists. |
 | 5 — Replacement rehearsal | Not started | Data import, cutover, rollback, reconciliation, and audited go-live rehearsal remain. |
@@ -82,7 +92,7 @@ Verified on 2026-07-24:
 
 ## Next milestone
 
-Begin Phase 2 with PostgreSQL authority and immutable forward-only migrations:
+Add the initial immutable PostgreSQL migration and transactional engine store:
 persist command receipts, exact ledger and state changes, checkpoints, and
 outbox records in one transaction before adding NATS/JetStream delivery.
 

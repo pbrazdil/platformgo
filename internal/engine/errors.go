@@ -15,6 +15,7 @@ const (
 	ErrSequenceRegression ErrorKind = "sequence_regression"
 	ErrSequenceExhausted  ErrorKind = "sequence_exhausted"
 	ErrInputConflict      ErrorKind = "input_conflict"
+	ErrUnknownHashVersion ErrorKind = "unknown_hash_version"
 	ErrShardNotReady      ErrorKind = "shard_not_ready"
 )
 
@@ -44,7 +45,7 @@ func (engineError *Error) Is(target error) bool {
 	case ErrorKind:
 		return engineError.Kind == target
 	case *Error:
-		return engineError.Kind == target.Kind
+		return target != nil && engineError.Kind == target.Kind
 	default:
 		return false
 	}

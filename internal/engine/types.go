@@ -8,7 +8,11 @@ import (
 	"time"
 )
 
-const CurrentSchemaVersion uint32 = 1
+const (
+	CurrentSchemaVersion       uint32 = 1
+	CurrentInputHashVersion    uint32 = 1
+	CurrentDecisionHashVersion uint32 = 2
+)
 
 // IDError is a stable canonical-ID validation error.
 type IDError string
@@ -148,7 +152,7 @@ type InputEnvelope struct {
 	LogicalTime          LogicalTime
 	ConfigurationVersion uint64
 	InstrumentVersion    uint64
-	Payload              []byte
+	Payload              CanonicalPayload
 }
 
 // Decision records the deterministic result metadata and canonical hashes.
@@ -161,7 +165,11 @@ type Decision struct {
 	LogicalTime          LogicalTime
 	ConfigurationVersion uint64
 	InstrumentVersion    uint64
+	InputHashVersion     uint32
+	DecisionHashVersion  uint32
+	PreviousStateHash    Hash
 	InputHash            Hash
+	EffectsHash          Hash
 	DecisionHash         Hash
 	NextStateHash        Hash
 	CommandResult        CommandResult

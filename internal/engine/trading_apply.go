@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"fmt"
 	"sort"
 
@@ -16,16 +15,32 @@ func ApplyTrading(
 	input InputEnvelope,
 	action TradingAction,
 ) (State, Decision, error) {
+	return ApplyTradingWithReceipts(state, input, action, nil)
+}
+
+// ApplyTradingWithReceipts checks committed identity before validating a typed
+// action against the current schema and canonical payload.
+func ApplyTradingWithReceipts(
+	state State,
+	input InputEnvelope,
+	action TradingAction,
+	receipts ReceiptLookup,
+) (State, Decision, error) {
+	if _, found, conflict := lookupReceipt(state, receipts, input); found || conflict != nil {
+		return applyWithReceipts(state, input, receipts, func(state State) (State, Decision) {
+			return state, Decision{}
+		})
+	}
 	payload, err := EncodeTradingAction(action)
 	if err != nil {
 		return state, Decision{}, err
 	}
-	if !bytes.Equal(payload, input.Payload) {
+	if !payload.equal(input.Payload) {
 		if !state.ready {
-			return Apply(state, input)
+			return ApplyWithReceipts(state, input, receipts)
 		}
 		inputHash := hashInput(input)
-		if engineError := validateEnvelope(state, input); engineError != nil {
+		if engineError := validateEnvelope(state, input, CurrentSchemaVersion); engineError != nil {
 			return halt(state, inputHash, engineError)
 		}
 		return halt(state, inputHash, &Error{
@@ -34,7 +49,7 @@ func ApplyTrading(
 			Detail:   "typed trading action does not match canonical envelope payload",
 		})
 	}
-	return apply(state, input, func(state State) (State, Decision) {
+	return applyWithReceipts(state, input, receipts, func(state State) (State, Decision) {
 		return applyTradingAction(state, input, action)
 	})
 }

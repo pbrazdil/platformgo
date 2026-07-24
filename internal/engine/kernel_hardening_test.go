@@ -16,8 +16,8 @@ func TestHistoricalDuplicateResolvesBeforeCurrentSchemaValidation(t *testing.T) 
 	if err != nil {
 		t.Fatalf("first ApplyWithReceipts: %v", err)
 	}
-	if err := index.Record(NewReceipt(firstInput, firstDecision)); err != nil {
-		t.Fatalf("record first receipt: %v", err)
+	if recordErr := index.Record(NewReceipt(firstInput, firstDecision)); recordErr != nil {
+		t.Fatalf("record first receipt: %v", recordErr)
 	}
 
 	secondInput := testInput(t, 2)
@@ -26,8 +26,8 @@ func TestHistoricalDuplicateResolvesBeforeCurrentSchemaValidation(t *testing.T) 
 	if err != nil {
 		t.Fatalf("second ApplyWithReceipts: %v", err)
 	}
-	if err := index.Record(NewReceipt(secondInput, secondDecision)); err != nil {
-		t.Fatalf("record second receipt: %v", err)
+	if recordErr := index.Record(NewReceipt(secondInput, secondDecision)); recordErr != nil {
+		t.Fatalf("record second receipt: %v", recordErr)
 	}
 
 	beforeHash := state.Hash()
@@ -59,8 +59,8 @@ func TestReceiptIndexRejectsConflictingIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyWithReceipts: %v", err)
 	}
-	if err := index.Record(NewReceipt(input, decision)); err != nil {
-		t.Fatalf("Record: %v", err)
+	if recordErr := index.Record(NewReceipt(input, decision)); recordErr != nil {
+		t.Fatalf("Record: %v", recordErr)
 	}
 
 	conflict := testInput(t, 2)
@@ -122,5 +122,79 @@ func TestErrorIsHandlesTypedNilTarget(t *testing.T) {
 
 	if errors.Is(engineError, target) {
 		t.Fatal("errors.Is matched a typed-nil target")
+	}
+}
+
+func TestCanonicalJSONPayloadHasStableOrderingAndDefensiveBytes(t *testing.T) {
+	left, err := NewCanonicalJSONPayload(map[string]any{
+		"side":     "buy",
+		"quantity": "1",
+	})
+	if err != nil {
+		t.Fatalf("left payload: %v", err)
+	}
+	right, err := NewCanonicalJSONPayload(map[string]any{
+		"quantity": "1",
+		"side":     "buy",
+	})
+	if err != nil {
+		t.Fatalf("right payload: %v", err)
+	}
+	if !left.equal(right) {
+		t.Fatalf("semantically equal payloads differ: %s != %s", left.Bytes(), right.Bytes())
+	}
+
+	returned := left.Bytes()
+	returned[0] ^= 0xff
+	if !left.equal(right) {
+		t.Fatal("mutating returned bytes changed canonical payload")
+	}
+}
+
+func TestKernelHashGoldenVectors(t *testing.T) {
+	input := testInput(t, 1)
+	state := NewState(7)
+	next, decision, err := apply(state, input, func(state State) (State, Decision) {
+		return state, Decision{CommandResult: CommandResult{Status: CommandStatusAccepted}}
+	})
+	if err != nil {
+		t.Fatalf("accepted apply: %v", err)
+	}
+
+	invalid := testInput(t, 1)
+	invalid.SchemaVersion = CurrentSchemaVersion + 1
+	halted, _, err := Apply(NewState(7), invalid)
+	if !errors.Is(err, ErrUnknownSchema) {
+		t.Fatalf("halted apply error = %v, want ErrUnknownSchema", err)
+	}
+
+	negativeTime := testInput(t, 1)
+	negativeTime.LogicalTime = LogicalTime(-1)
+	emptyPayload := testInput(t, 1)
+	emptyPayload.Payload = CanonicalPayload{}
+	binaryPayload := testInput(t, 1)
+	binaryPayload.Payload = canonicalPayloadFromTrustedBytes([]byte{0x00, 0xff, 0x80, 0x01})
+
+	vectors := []struct {
+		name string
+		got  Hash
+		want string
+	}{
+		{name: "initial state", got: state.Hash(), want: "6685cbadc498da804da2b0f316b0b598ff43f501672c619c248330380e1496ab"},
+		{name: "input", got: decision.InputHash, want: "03c13213415db9db34fd61e86021074bf078552c47218ffa054313c6a86c1e2b"},
+		{name: "effects", got: decision.EffectsHash, want: "a58d5d8e43c454a8e00ba04f1fb98aeebd4156dc5141abd2dbbb9156a08e8725"},
+		{name: "decision", got: decision.DecisionHash, want: "20db88b5f281dfcee1d59232812e74f9eed3ef830632d0631ddf5ca684f28274"},
+		{name: "accepted state", got: next.Hash(), want: "7d84f679cd6c276f9828ef3df0ab9c76226b565cf9dd97c89c2238ae8a7abb04"},
+		{name: "halted state", got: halted.Hash(), want: "cd748e998b0582ad13540b96e0bb5682faa9f10b636ef7e2c3c15ea384771565"},
+		{name: "negative logical time", got: hashInput(negativeTime), want: "c803b3138c8db07c468b249391405f394d1942207eecaebbfa1e621a52b2fa26"},
+		{name: "empty payload", got: hashInput(emptyPayload), want: "59837e1266e78dd508ae139143de7e4f23bb8d848698982be96131910a40b54b"},
+		{name: "binary payload", got: hashInput(binaryPayload), want: "9f6a04c2cf393ef911e59522cb37070f6891c3dcda06ea040a07647f74408bd2"},
+	}
+	for _, vector := range vectors {
+		t.Run(vector.name, func(t *testing.T) {
+			if got := vector.got.String(); got != vector.want {
+				t.Fatalf("hash = %s, want %s", got, vector.want)
+			}
+		})
 	}
 }

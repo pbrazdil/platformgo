@@ -2,18 +2,13 @@ package engine
 
 import "fmt"
 
-type receipt struct {
-	inputID   ID
-	inputHash Hash
-	decision  Decision
-}
-
 type State struct {
 	shardID            ShardID
 	nextStreamSequence uint64
 	ready              bool
 	hash               Hash
-	receipts           []receipt
+	lastReceipt        Receipt
+	hasLastReceipt     bool
 	trading            tradingState
 }
 
@@ -56,9 +51,86 @@ func Apply(state State, input InputEnvelope) (State, Decision, error) {
 	})
 }
 
+// ApplyWithReceipts consults committed receipt identity before treating the
+// envelope as new. Durable orchestration supplies a PostgreSQL-backed lookup;
+// model tests use MemoryReceiptIndex.
+func ApplyWithReceipts(
+	state State,
+	input InputEnvelope,
+	receipts ReceiptLookup,
+) (State, Decision, error) {
+	return applyWithReceipts(state, input, receipts, func(state State) (State, Decision) {
+		return state, Decision{}
+	})
+}
+
 type transition func(State) (State, Decision)
 
 func apply(state State, input InputEnvelope, transition transition) (State, Decision, error) {
+	return applyWithReceipts(state, input, nil, transition)
+}
+
+func applyWithReceipts(
+	state State,
+	input InputEnvelope,
+	receipts ReceiptLookup,
+	transition transition,
+) (State, Decision, error) {
+	return applyWithSchemaVersion(
+		state,
+		input,
+		receipts,
+		CurrentSchemaVersion,
+		transition,
+	)
+}
+
+func applyWithSchemaVersion(
+	state State,
+	input InputEnvelope,
+	receipts ReceiptLookup,
+	currentSchemaVersion uint32,
+	transition transition,
+) (State, Decision, error) {
+	recorded, found, conflict := lookupReceipt(state, receipts, input)
+	if conflict != nil {
+		if !state.ready {
+			return state, Decision{}, &Error{
+				Kind:     ErrShardNotReady,
+				Sequence: input.StreamSequence,
+				Detail:   "the shard has recorded a fatal input error",
+			}
+		}
+		inputHash := hashInput(input)
+		return halt(state, inputHash, conflict)
+	}
+	if found {
+		inputHash, engineError := hashInputAtVersion(input, recorded.InputHashVersion)
+		if engineError != nil {
+			if !state.ready {
+				return state, Decision{}, engineError
+			}
+			return halt(state, hashInput(input), engineError)
+		}
+		if inputHash != recorded.InputHash ||
+			recorded.InputID != input.InputID ||
+			recorded.StreamSequence != input.StreamSequence {
+			if !state.ready {
+				return state, Decision{}, &Error{
+					Kind:     ErrShardNotReady,
+					Sequence: input.StreamSequence,
+					Detail:   "the shard has recorded a fatal input error",
+				}
+			}
+			return halt(state, inputHash, &Error{
+				Kind:     ErrInputConflict,
+				Sequence: input.StreamSequence,
+				Detail:   "committed input identity was reused with different content",
+			})
+		}
+		return state, cloneDecision(recorded.Decision), nil
+	}
+
 	if !state.ready {
 		return state, Decision{}, &Error{
 			Kind:     ErrShardNotReady,
@@ -68,28 +140,8 @@ func apply(state State, input InputEnvelope, transition transition) (State, Deci
 	}
 
 	inputHash := hashInput(input)
-	if engineError := validateEnvelope(state, input); engineError != nil {
+	if engineError := validateEnvelope(state, input, currentSchemaVersion); engineError != nil {
 		return halt(state, inputHash, engineError)
-	}
-
-	for _, recorded := range state.receipts {
-		if recorded.decision.StreamSequence == input.StreamSequence {
-			if recorded.inputHash == inputHash {
-				return state, cloneDecision(recorded.decision), nil
-			}
-			return halt(state, inputHash, &Error{
-				Kind:     ErrInputConflict,
-				Sequence: input.StreamSequence,
-				Detail:   "stream sequence was already committed with different input",
-			})
-		}
-		if recorded.inputID == input.InputID {
-			return halt(state, inputHash, &Error{
-				Kind:     ErrInputConflict,
-				Sequence: input.StreamSequence,
-				Detail:   "input ID was already committed with different input",
-			})
-		}
 	}
 
 	switch {
@@ -113,6 +165,7 @@ func apply(state State, input InputEnvelope, transition transition) (State, Deci
 		})
 	}
 
+	previousStateHash := state.hash
 	state, decision := transition(state)
 	decision.InputID = input.InputID
 	decision.SourceSequence = input.SourceSequence
@@ -121,29 +174,86 @@ func apply(state State, input InputEnvelope, transition transition) (State, Deci
 	decision.LogicalTime = input.LogicalTime
 	decision.ConfigurationVersion = input.ConfigurationVersion
 	decision.InstrumentVersion = input.InstrumentVersion
+	decision.InputHashVersion = CurrentInputHashVersion
+	decision.DecisionHashVersion = CurrentDecisionHashVersion
+	decision.PreviousStateHash = previousStateHash
 	decision.InputHash = inputHash
-	decisionHash := hashDecision(input, inputHash, decision)
+	decision.EffectsHash = hashEffects(decision)
+	decisionHash := hashDecision(previousStateHash, inputHash, decision.EffectsHash)
 	nextSequence := state.nextStreamSequence + 1
-	nextStateHash := hashAcceptedState(state.hash, inputHash, decisionHash, nextSequence)
+	nextStateHash := hashAcceptedState(previousStateHash, inputHash, decisionHash, nextSequence)
 	decision.DecisionHash = decisionHash
 	decision.NextStateHash = nextStateHash
 
-	receipts := make([]receipt, len(state.receipts), len(state.receipts)+1)
-	copy(receipts, state.receipts)
-	receipts = append(receipts, receipt{
-		inputID:   input.InputID,
-		inputHash: inputHash,
-		decision:  cloneDecision(decision),
-	})
 	state.nextStreamSequence = nextSequence
 	state.hash = nextStateHash
-	state.receipts = receipts
+	state.lastReceipt = NewReceipt(input, decision)
+	state.hasLastReceipt = true
 	return state, cloneDecision(decision), nil
 }
 
-func validateEnvelope(state State, input InputEnvelope) *Error {
+func lookupReceipt(
+	state State,
+	receipts ReceiptLookup,
+	input InputEnvelope,
+) (Receipt, bool, *Error) {
+	var byInputID Receipt
+	var hasInputID bool
+	var bySequence Receipt
+	var hasSequence bool
+
+	if state.hasLastReceipt {
+		if state.lastReceipt.InputID == input.InputID {
+			byInputID, hasInputID = cloneReceipt(state.lastReceipt), true
+		}
+		if state.lastReceipt.StreamSequence == input.StreamSequence {
+			bySequence, hasSequence = cloneReceipt(state.lastReceipt), true
+		}
+	}
+	if receipts != nil {
+		if recorded, ok := receipts.LookupByInputID(input.InputID); ok {
+			byInputID, hasInputID = recorded, true
+		}
+		if recorded, ok := receipts.LookupByStreamSequence(input.StreamSequence); ok {
+			bySequence, hasSequence = recorded, true
+		}
+	}
+
 	switch {
-	case input.SchemaVersion != CurrentSchemaVersion:
+	case hasInputID && byInputID.StreamSequence != input.StreamSequence:
+		return Receipt{}, false, &Error{
+			Kind:     ErrInputConflict,
+			Sequence: input.StreamSequence,
+			Detail:   "input ID was already committed at a different stream sequence",
+		}
+	case hasSequence && bySequence.InputID != input.InputID:
+		return Receipt{}, false, &Error{
+			Kind:     ErrInputConflict,
+			Sequence: input.StreamSequence,
+			Detail:   "stream sequence was already committed with a different input ID",
+		}
+	case hasInputID && hasSequence && !sameReceiptIdentity(byInputID, bySequence):
+		return Receipt{}, false, &Error{
+			Kind:     ErrInputConflict,
+			Sequence: input.StreamSequence,
+			Detail:   "committed receipt indexes disagree",
+		}
+	case hasInputID:
+		return cloneReceipt(byInputID), true, nil
+	case hasSequence:
+		return cloneReceipt(bySequence), true, nil
+	default:
+		return Receipt{}, false, nil
+	}
+}
+
+func validateEnvelope(
+	state State,
+	input InputEnvelope,
+	currentSchemaVersion uint32,
+) *Error {
+	switch {
+	case input.SchemaVersion != currentSchemaVersion:
 		return &Error{
 			Kind:     ErrUnknownSchema,
 			Sequence: input.StreamSequence,

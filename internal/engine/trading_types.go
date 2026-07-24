@@ -1,9 +1,6 @@
 package engine
 
-import (
-	"encoding/json"
-	"fmt"
-)
+import "fmt"
 
 // TradingActionKind identifies one deterministic trading state transition.
 type TradingActionKind string
@@ -343,10 +340,10 @@ type CancelOrder struct {
 }
 
 // EncodeTradingAction returns the canonical bytes bound into InputEnvelope.
-func EncodeTradingAction(action TradingAction) ([]byte, error) {
-	payload, err := json.Marshal(action)
+func EncodeTradingAction(action TradingAction) (CanonicalPayload, error) {
+	payload, err := NewCanonicalJSONPayload(action)
 	if err != nil {
-		return nil, fmt.Errorf("encode trading action: %w", err)
+		return CanonicalPayload{}, fmt.Errorf("encode trading action: %w", err)
 	}
 	return payload, nil
 }

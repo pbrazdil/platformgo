@@ -89,7 +89,12 @@ func TestTradingTypedPayloadMismatchHaltsReadiness(t *testing.T) {
 		Quantity:     "0.002",
 	}
 
-	halted, _, err := ApplyTrading(fixture.state, fixture.lastInput, mismatched)
+	mismatchedInput := fixture.lastInput
+	mismatchedInput.InputID = fixture.id(121)
+	mismatchedInput.SourceSequence = fixture.state.NextStreamSequence()
+	mismatchedInput.StreamSequence = fixture.state.NextStreamSequence()
+
+	halted, _, err := ApplyTrading(fixture.state, mismatchedInput, mismatched)
 	if !errors.Is(err, ErrPayloadMismatch) {
 		t.Fatalf("payload mismatch error = %v, want ErrPayloadMismatch", err)
 	}

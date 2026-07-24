@@ -7,6 +7,21 @@ import (
 )
 
 func hashInput(input InputEnvelope) Hash {
+	result, engineError := hashInputAtVersion(input, CurrentInputHashVersion)
+	if engineError != nil {
+		return Hash{}
+	}
+	return result
+}
+
+func hashInputAtVersion(input InputEnvelope, version uint32) (Hash, *Error) {
+	if version != CurrentInputHashVersion {
+		return Hash{}, &Error{
+			Kind:     ErrUnknownHashVersion,
+			Sequence: input.StreamSequence,
+			Detail:   "input hash version is not supported",
+		}
+	}
 	return finishHash(func(hasher hash.Hash) {
 		writeString(hasher, "platformgo.engine.input.v1")
 		writeBytes(hasher, input.InputID[:])
@@ -20,21 +35,22 @@ func hashInput(input InputEnvelope) Hash {
 		writeInt64(hasher, input.LogicalTime.UnixNano())
 		writeUint64(hasher, input.ConfigurationVersion)
 		writeUint64(hasher, input.InstrumentVersion)
-		writeBytes(hasher, input.Payload)
+		writeBytes(hasher, input.Payload.value)
+	}), nil
+}
+
+func hashDecision(previousStateHash Hash, inputHash Hash, effectsHash Hash) Hash {
+	return finishHash(func(hasher hash.Hash) {
+		writeString(hasher, "platformgo.engine.decision.v2")
+		writeBytes(hasher, previousStateHash[:])
+		writeBytes(hasher, inputHash[:])
+		writeBytes(hasher, effectsHash[:])
 	})
 }
 
-func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
+func hashEffects(decision Decision) Hash {
 	return finishHash(func(hasher hash.Hash) {
-		writeString(hasher, "platformgo.engine.decision.v1")
-		writeBytes(hasher, input.InputID[:])
-		writeUint64(hasher, input.SourceSequence)
-		writeUint64(hasher, input.StreamSequence)
-		writeUint64(hasher, input.MarketSequence)
-		writeInt64(hasher, input.LogicalTime.UnixNano())
-		writeUint64(hasher, input.ConfigurationVersion)
-		writeUint64(hasher, input.InstrumentVersion)
-		writeBytes(hasher, inputHash[:])
+		writeString(hasher, "platformgo.engine.effects.v1")
 		writeString(hasher, string(decision.CommandResult.Status))
 		writeString(hasher, string(decision.CommandResult.Reason))
 		writeUint64(hasher, uint64(len(decision.InstrumentChanges)))
@@ -190,7 +206,7 @@ func hashInitialState(shardID ShardID) Hash {
 
 func hashAcceptedState(previous Hash, inputHash Hash, decisionHash Hash, nextSequence uint64) Hash {
 	return finishHash(func(hasher hash.Hash) {
-		writeString(hasher, "platformgo.engine.state.accepted.v1")
+		writeString(hasher, "platformgo.engine.state.accepted.v2")
 		writeBytes(hasher, previous[:])
 		writeBytes(hasher, inputHash[:])
 		writeBytes(hasher, decisionHash[:])
