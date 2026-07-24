@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -303,6 +304,121 @@ func TestCommandJournalDurablyBindsAccountToOneShard(t *testing.T) {
 		"UPDATE engine.account_shards SET shard_id = 8 WHERE account_id = 'account-1'",
 	); err == nil {
 		t.Fatal("immutable account shard assignment was updated")
+	}
+}
+
+func TestConcurrentFirstCommandShardAssignmentHasOneDurableAuthority(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	requests := []platformpostgres.BeginCommandRequest{
+		validCommandRequest(
+			t,
+			engine.IDFromSequence(engine.ID{}, 131),
+			"account-race",
+			1,
+			7,
+			now,
+		),
+		validCommandRequest(
+			t,
+			engine.IDFromSequence(engine.ID{}, 132),
+			"account-race",
+			1,
+			8,
+			now,
+		),
+	}
+	start := make(chan struct{})
+	results := make(chan error, len(requests))
+	var workers sync.WaitGroup
+	for _, request := range requests {
+		request := request
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			_, err := platformpostgres.NewCommandJournal(pool).Begin(
+				context.Background(),
+				request,
+			)
+			results <- err
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+
+	successes := 0
+	conflicts := 0
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, platformpostgres.ErrAccountShardConflict):
+			conflicts++
+		default:
+			t.Fatalf("concurrent assignment leaked unclassified error: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf(
+			"concurrent assignments = successes %d conflicts %d, want 1 each",
+			successes,
+			conflicts,
+		)
+	}
+
+	var assignedShardID int64
+	var commandRows int
+	var idempotencyRows int
+	var outboxRows int
+	var subjectMatches bool
+	if err := pool.QueryRow(context.Background(), `
+		SELECT shard_id
+		  FROM engine.account_shards
+		 WHERE account_id = 'account-race'`,
+	).Scan(&assignedShardID); err != nil {
+		t.Fatalf("read concurrent assignment: %v", err)
+	}
+	if err := pool.QueryRow(context.Background(), `
+		SELECT
+			(SELECT count(*) FROM trading.commands),
+			(SELECT count(*) FROM trading.idempotency_records),
+			(SELECT count(*) FROM messaging.outbox),
+			EXISTS (
+				SELECT 1
+				  FROM messaging.outbox
+				 WHERE subject = 'engine.input.' || $1::bigint::text || '.command.v1'
+			)`,
+		assignedShardID,
+	).Scan(
+		&commandRows,
+		&idempotencyRows,
+		&outboxRows,
+		&subjectMatches,
+	); err != nil {
+		t.Fatalf("inspect concurrent assignment effects: %v", err)
+	}
+	if (assignedShardID != 7 && assignedShardID != 8) ||
+		commandRows != 1 ||
+		idempotencyRows != 1 ||
+		outboxRows != 1 ||
+		!subjectMatches {
+		t.Fatalf(
+			"concurrent authority = shard %d commands %d idempotency %d outbox %d subjectMatches %t",
+			assignedShardID,
+			commandRows,
+			idempotencyRows,
+			outboxRows,
+			subjectMatches,
+		)
 	}
 }
 

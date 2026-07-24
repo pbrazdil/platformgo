@@ -578,7 +578,7 @@ func persistDecision(
 ) error {
 	if accountID, scoped := engine.TradingActionAccountID(action); scoped &&
 		input.Kind != engine.InputKindCommand {
-		if err := bindAccountShard(ctx, tx, accountID, input.ShardID); err != nil {
+		if err := requireAccountShard(ctx, tx, accountID, input.ShardID); err != nil {
 			return err
 		}
 	}

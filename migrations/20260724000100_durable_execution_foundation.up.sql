@@ -14,10 +14,18 @@ BEGIN
     ]
     LOOP
         IF NOT EXISTS (
-            SELECT 1 FROM pg_roles WHERE rolname = required_role
+            SELECT 1
+              FROM pg_roles
+             WHERE rolname = required_role
+               AND NOT rolcanlogin
+               AND NOT rolsuper
+               AND NOT rolcreatedb
+               AND NOT rolcreaterole
+               AND NOT rolreplication
+               AND NOT rolbypassrls
         ) THEN
             RAISE EXCEPTION
-                'required pre-provisioned runtime role % is missing',
+                'required pre-provisioned runtime role % is missing or unsafe',
                 required_role
                 USING ERRCODE = '42501';
         END IF;
@@ -453,11 +461,11 @@ GRANT USAGE ON SCHEMA engine, trading, ledger, market, messaging
 GRANT SELECT, INSERT, UPDATE ON engine.shard_checkpoints
     TO platformgo_engine;
 GRANT SELECT, INSERT ON
-    engine.account_shards,
     engine.input_receipts,
     engine.shard_faults,
     engine.duplicate_delivery_receipts
 TO platformgo_engine;
+GRANT SELECT ON engine.account_shards TO platformgo_engine;
 GRANT SELECT ON trading.commands TO platformgo_engine;
 GRANT UPDATE (
     status,

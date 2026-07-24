@@ -646,6 +646,11 @@ func TestEngineStoreBindsNonCommandAccountInputToOneShard(t *testing.T) {
 	}
 	store := platformpostgres.NewEngineStore(pool)
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO engine.account_shards (account_id, shard_id)
+		VALUES ('account-1', 7)`); err != nil {
+		t.Fatalf("preassign non-command account shard: %v", err)
+	}
 	firstAction := engine.TradingAction{
 		Kind: engine.TradingActionConfigureAccount,
 		ConfigureAccount: &engine.ConfigureAccount{
@@ -766,6 +771,297 @@ func TestEngineStoreBindsNonCommandAccountInputToOneShard(t *testing.T) {
 			recovered.Hash(),
 			halted.Hash(),
 		)
+	}
+}
+
+func TestEngineStoreMissingAccountShardFailsClosedWithoutBinding(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	action := engine.TradingAction{
+		Kind: engine.TradingActionLiquidateAccount,
+		LiquidateAccount: &engine.LiquidateAccount{
+			AccountID: "missing-account",
+		},
+	}
+	payload, err := engine.EncodeTradingAction(action)
+	if err != nil {
+		t.Fatalf("EncodeTradingAction: %v", err)
+	}
+	input := engine.InputEnvelope{
+		InputID:              engine.IDFromSequence(engine.ID{}, 955),
+		SchemaVersion:        engine.CurrentSchemaVersion,
+		ShardID:              8,
+		Kind:                 engine.InputKindTimer,
+		SourceID:             "liquidation-timer",
+		SourceSequence:       1,
+		StreamSequence:       1,
+		LogicalTime:          engine.NewLogicalTime(time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)),
+		ConfigurationVersion: 1,
+		InstrumentVersion:    1,
+		Payload:              payload,
+	}
+	store := platformpostgres.NewEngineStore(pool)
+	halted, _, _, err := store.ApplyTrading(
+		context.Background(),
+		engine.NewState(8),
+		input,
+		action,
+		platformpostgres.ApplyOptions{},
+	)
+	if !errors.Is(err, platformpostgres.ErrAccountShardConflict) ||
+		!errors.Is(err, engine.ErrDurableInputConflict) {
+		t.Fatalf(
+			"missing mapping timer error = %v, want account-shard and durable conflicts",
+			err,
+		)
+	}
+	if halted.Ready() || halted.NextStreamSequence() != 1 {
+		t.Fatalf("missing mapping timer state = %+v", halted)
+	}
+	for relation, query := range map[string]string{
+		"account mappings": "SELECT count(*) FROM engine.account_shards",
+		"accounts":         "SELECT count(*) FROM trading.accounts",
+		"balances":         "SELECT count(*) FROM ledger.balances",
+		"ledger":           "SELECT count(*) FROM ledger.transactions",
+		"orders":           "SELECT count(*) FROM trading.orders",
+		"positions":        "SELECT count(*) FROM trading.positions",
+		"receipts":         "SELECT count(*) FROM engine.input_receipts",
+		"outbox":           "SELECT count(*) FROM messaging.outbox",
+	} {
+		var count int
+		if err := pool.QueryRow(context.Background(), query).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", relation, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows = %d, want 0", relation, count)
+		}
+	}
+	assertRowCount(t, pool, "engine.shard_faults", 1)
+	assertRowCount(t, pool, "engine.shard_checkpoints", 1)
+	recovered, err := store.RecoverTradingState(context.Background(), 8)
+	if err != nil {
+		t.Fatalf("RecoverTradingState: %v", err)
+	}
+	if recovered.Ready() || recovered.Hash() != halted.Hash() {
+		t.Fatalf(
+			"recovered missing mapping timer = ready %t hash %s, want false %s",
+			recovered.Ready(),
+			recovered.Hash(),
+			halted.Hash(),
+		)
+	}
+}
+
+func TestEngineStoreFailsClosedOnInvalidCommandShardAssignment(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		mappingShard     *engine.ShardID
+		deliveryShard    engine.ShardID
+		wantMappingCount int
+	}{
+		{
+			name:          "missing mapping",
+			deliveryShard: 7,
+		},
+		{
+			name: "mismatched mapping",
+			mappingShard: func() *engine.ShardID {
+				shardID := engine.ShardID(7)
+				return &shardID
+			}(),
+			deliveryShard:    8,
+			wantMappingCount: 1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pool := postgresPool(t)
+			resetDurableSchemas(t, pool)
+			if err := platformpostgres.NewMigrator(
+				pool,
+				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			).Migrate(context.Background()); err != nil {
+				t.Fatalf("Migrate: %v", err)
+			}
+			now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+			commandID := engine.IDFromSequence(engine.ID{}, 961)
+			action := engine.TradingAction{
+				Kind: engine.TradingActionConfigureAccount,
+				ConfigureAccount: &engine.ConfigureAccount{
+					AccountID: "account-1",
+					OmsMode:   engine.OmsModeNetting,
+				},
+			}
+			payload, err := engine.EncodeTradingAction(action)
+			if err != nil {
+				t.Fatalf("EncodeTradingAction: %v", err)
+			}
+			storedInput := engine.InputEnvelope{
+				InputID:              commandID,
+				SchemaVersion:        engine.CurrentSchemaVersion,
+				ShardID:              7,
+				Kind:                 engine.InputKindCommand,
+				SourceID:             "command-journal",
+				SourceSequence:       1,
+				LogicalTime:          engine.NewLogicalTime(now),
+				ConfigurationVersion: 1,
+				InstrumentVersion:    1,
+				Payload:              payload,
+			}
+			outboxPayload, err := engine.EncodeInputMessage(storedInput)
+			if err != nil {
+				t.Fatalf("EncodeInputMessage: %v", err)
+			}
+			if test.mappingShard != nil {
+				if _, err := pool.Exec(context.Background(), `
+					INSERT INTO engine.account_shards (account_id, shard_id)
+					VALUES ('account-1', $1)`,
+					int64(*test.mappingShard),
+				); err != nil {
+					t.Fatalf("seed mismatched account shard: %v", err)
+				}
+			}
+			if _, err := pool.Exec(context.Background(), `
+				INSERT INTO trading.commands (
+					command_id, account_id, account_sequence, command_type,
+					schema_version, canonical_payload, status, logical_time
+				) VALUES ($1, 'account-1', 1, $2, $3, $4, 'pending', $5)`,
+				commandID.String(),
+				string(action.Kind),
+				storedInput.SchemaVersion,
+				payload.Bytes(),
+				now,
+			); err != nil {
+				t.Fatalf("seed durable command without valid mapping: %v", err)
+			}
+			if _, err := pool.Exec(context.Background(), `
+				INSERT INTO messaging.outbox (
+					message_id, subject, schema_version, payload
+				) VALUES ($1, 'engine.input.7.command.v1', $2, $3)`,
+				commandID.String(),
+				storedInput.SchemaVersion,
+				outboxPayload,
+			); err != nil {
+				t.Fatalf("seed durable command outbox without valid mapping: %v", err)
+			}
+
+			delivered := storedInput
+			delivered.ShardID = test.deliveryShard
+			delivered.StreamSequence = 1
+			halted, _, _, err := platformpostgres.NewEngineStore(pool).ApplyTrading(
+				context.Background(),
+				engine.NewState(test.deliveryShard),
+				delivered,
+				action,
+				platformpostgres.ApplyOptions{},
+			)
+			if !errors.Is(err, platformpostgres.ErrAccountShardConflict) ||
+				!errors.Is(err, engine.ErrDurableInputConflict) {
+				t.Fatalf(
+					"ApplyTrading error = %v, want account-shard and durable conflicts",
+					err,
+				)
+			}
+			if halted.Ready() || halted.NextStreamSequence() != 1 {
+				t.Fatalf("invalid mapping state = %+v", halted)
+			}
+
+			var commandStatus string
+			var subject string
+			var payloadUnchanged bool
+			var attempts int
+			var claimUnset bool
+			var publicationUnset bool
+			if err := pool.QueryRow(context.Background(), `
+				SELECT c.status, o.subject, o.payload = $2::jsonb, o.attempts,
+				       o.claimed_at IS NULL,
+				       o.published_at IS NULL AND o.publish_sequence IS NULL
+				  FROM trading.commands AS c
+				  JOIN messaging.outbox AS o ON o.message_id = c.command_id
+				 WHERE c.command_id = $1`,
+				commandID.String(),
+				outboxPayload,
+			).Scan(
+				&commandStatus,
+				&subject,
+				&payloadUnchanged,
+				&attempts,
+				&claimUnset,
+				&publicationUnset,
+			); err != nil {
+				t.Fatalf("read command/outbox after mapping conflict: %v", err)
+			}
+			if commandStatus != "pending" ||
+				subject != "engine.input.7.command.v1" ||
+				!payloadUnchanged ||
+				attempts != 0 ||
+				!claimUnset ||
+				!publicationUnset {
+				t.Fatalf(
+					"mapping conflict changed command/outbox: status=%s subject=%s payload=%t attempts=%d claimUnset=%t publicationUnset=%t",
+					commandStatus,
+					subject,
+					payloadUnchanged,
+					attempts,
+					claimUnset,
+					publicationUnset,
+				)
+			}
+			for relation, query := range map[string]string{
+				"accounts":     "SELECT count(*) FROM trading.accounts",
+				"balances":     "SELECT count(*) FROM ledger.balances",
+				"transactions": "SELECT count(*) FROM ledger.transactions",
+				"entries":      "SELECT count(*) FROM ledger.entries",
+				"orders":       "SELECT count(*) FROM trading.orders",
+				"fills":        "SELECT count(*) FROM trading.fills",
+				"positions":    "SELECT count(*) FROM trading.positions",
+				"receipts":     "SELECT count(*) FROM engine.input_receipts",
+				"domain outbox": `SELECT count(*) FROM messaging.outbox
+				                  WHERE subject LIKE 'domain.v1.%'`,
+			} {
+				var count int
+				if err := pool.QueryRow(context.Background(), query).Scan(&count); err != nil {
+					t.Fatalf("count %s after mapping conflict: %v", relation, err)
+				}
+				if count != 0 {
+					t.Fatalf("%s rows after mapping conflict = %d, want 0", relation, count)
+				}
+			}
+			var mappingCount int
+			if err := pool.QueryRow(
+				context.Background(),
+				"SELECT count(*) FROM engine.account_shards",
+			).Scan(&mappingCount); err != nil {
+				t.Fatalf("count account mappings: %v", err)
+			}
+			if mappingCount != test.wantMappingCount {
+				t.Fatalf(
+					"mapping rows = %d, want %d",
+					mappingCount,
+					test.wantMappingCount,
+				)
+			}
+			assertRowCount(t, pool, "engine.shard_faults", 1)
+			assertRowCount(t, pool, "engine.shard_checkpoints", 1)
+			recovered, err := platformpostgres.NewEngineStore(pool).
+				RecoverTradingState(context.Background(), test.deliveryShard)
+			if err != nil {
+				t.Fatalf("RecoverTradingState: %v", err)
+			}
+			if recovered.Ready() || recovered.Hash() != halted.Hash() {
+				t.Fatalf(
+					"recovered mapping conflict = ready %t hash %s, want false %s",
+					recovered.Ready(),
+					recovered.Hash(),
+					halted.Hash(),
+				)
+			}
+		})
 	}
 }
 

@@ -114,7 +114,7 @@ func (journal *CommandJournal) Begin(
 		return BeginCommandResult{}, err
 	}
 	tx, err := journal.pool.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel: pgx.Serializable,
+		IsoLevel: pgx.ReadCommitted,
 	})
 	if err != nil {
 		return BeginCommandResult{}, fmt.Errorf("begin command transaction: %w", err)
@@ -350,6 +350,45 @@ func bindAccountShard(
 		 WHERE account_id = $1`,
 		accountID,
 	).Scan(&assignedShardID); err != nil {
+		return fmt.Errorf(
+			"read account %q shard assignment: %w",
+			accountID,
+			err,
+		)
+	}
+	if assignedShardID != int64(shardID) {
+		return fmt.Errorf(
+			"%w: account %q is assigned to shard %d, got %d",
+			ErrAccountShardConflict,
+			accountID,
+			assignedShardID,
+			shardID,
+		)
+	}
+	return nil
+}
+
+func requireAccountShard(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID string,
+	shardID engine.ShardID,
+) error {
+	var assignedShardID int64
+	err := tx.QueryRow(ctx, `
+		SELECT shard_id
+		  FROM engine.account_shards
+		 WHERE account_id = $1`,
+		accountID,
+	).Scan(&assignedShardID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf(
+			"%w: account %q has no durable shard assignment",
+			ErrAccountShardConflict,
+			accountID,
+		)
+	}
+	if err != nil {
 		return fmt.Errorf(
 			"read account %q shard assignment: %w",
 			accountID,

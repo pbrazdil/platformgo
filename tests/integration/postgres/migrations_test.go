@@ -386,6 +386,9 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 		UPDATE trading.commands
 		   SET canonical_payload = '{"tampered":true}'
 		 WHERE command_id = '019f9460-4b36-4e9b-8f44-682611f70101'`)
+	assertRoleStatementDenied(t, pool, "platformgo_engine", `
+		INSERT INTO engine.account_shards (account_id, shard_id)
+		VALUES ('engine-squatted-account', 10)`)
 
 	apiCompletion, err := pool.Begin(context.Background())
 	if err != nil {
@@ -604,6 +607,78 @@ func TestFinalBaselineFailsWhenPreprovisionedRuntimeRoleIsMissing(t *testing.T) 
 	}
 	if appliedCount != 0 {
 		t.Fatalf("prerequisite failure recorded %d migrations", appliedCount)
+	}
+}
+
+func TestFinalBaselineRejectsUnsafeRuntimeRoleAttributes(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		unsafe  string
+		restore string
+	}{
+		{
+			name:    "login capability",
+			unsafe:  "ALTER ROLE platformgo_projector LOGIN",
+			restore: "ALTER ROLE platformgo_projector NOLOGIN",
+		},
+		{
+			name:    "role creation capability",
+			unsafe:  "ALTER ROLE platformgo_projector CREATEROLE",
+			restore: "ALTER ROLE platformgo_projector NOCREATEROLE",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pool := postgresPool(t)
+			resetDurableSchemas(t, pool)
+			dropDurableSchemas(t, pool)
+			if _, err := pool.Exec(context.Background(), test.unsafe); err != nil {
+				t.Fatalf("make runtime role unsafe: %v", err)
+			}
+			defer func() {
+				dropDurableSchemas(t, pool)
+				if _, err := pool.Exec(
+					context.Background(),
+					test.restore,
+				); err != nil {
+					t.Errorf("restore safe runtime role attributes: %v", err)
+				}
+			}()
+
+			err := platformpostgres.NewMigrator(
+				pool,
+				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			).Migrate(context.Background())
+			var postgresError *pgconn.PgError
+			if !errors.As(err, &postgresError) ||
+				postgresError.Code != "42501" ||
+				!strings.Contains(err.Error(), "missing or unsafe") {
+				t.Fatalf(
+					"unsafe runtime role migration error = %v, want clear SQLSTATE 42501",
+					err,
+				)
+			}
+			var appliedCount int
+			var durableTableExists bool
+			if err := pool.QueryRow(
+				context.Background(),
+				"SELECT count(*) FROM engine.schema_migrations",
+			).Scan(&appliedCount); err != nil {
+				t.Fatalf("count migrations after unsafe-role failure: %v", err)
+			}
+			if err := pool.QueryRow(
+				context.Background(),
+				"SELECT to_regclass('engine.shard_checkpoints') IS NOT NULL",
+			).Scan(&durableTableExists); err != nil {
+				t.Fatalf("inspect schema after unsafe-role failure: %v", err)
+			}
+			if appliedCount != 0 || durableTableExists {
+				t.Fatalf(
+					"unsafe role failure left applied=%d durableTable=%t",
+					appliedCount,
+					durableTableExists,
+				)
+			}
+		})
 	}
 }
 
