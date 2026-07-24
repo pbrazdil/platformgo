@@ -32,12 +32,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 		t.Fatalf("open PostgreSQL pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(
-		ctx,
-		`DROP SCHEMA IF EXISTS market, messaging, ledger, trading, engine CASCADE`,
-	); err != nil {
-		t.Fatalf("reset durable schemas: %v", err)
-	}
+	resetDurableSchemas(t, ctx, pool)
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
@@ -689,12 +684,7 @@ func TestLaterAccountCommandCannotBypassOrderedPublication(t *testing.T) {
 		t.Fatalf("open PostgreSQL pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(
-		ctx,
-		`DROP SCHEMA IF EXISTS market, messaging, ledger, trading, engine CASCADE`,
-	); err != nil {
-		t.Fatalf("reset durable schemas: %v", err)
-	}
+	resetDurableSchemas(t, ctx, pool)
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
@@ -926,6 +916,46 @@ func TestLaterAccountCommandCannotBypassOrderedPublication(t *testing.T) {
 			receipts,
 			processor.State().NextStreamSequence(),
 		)
+	}
+}
+
+func resetDurableSchemas(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+
+	if _, err := pool.Exec(
+		ctx,
+		`DROP SCHEMA IF EXISTS market, messaging, ledger, trading, engine CASCADE`,
+	); err != nil {
+		t.Fatalf("reset durable schemas: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_api'
+			) THEN
+				CREATE ROLE platformgo_api NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_engine'
+			) THEN
+				CREATE ROLE platformgo_engine NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_outbox'
+			) THEN
+				CREATE ROLE platformgo_outbox NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_projector'
+			) THEN
+				CREATE ROLE platformgo_projector NOLOGIN;
+			END IF;
+		END;
+		$$`,
+	); err != nil {
+		t.Fatalf("provision test runtime roles: %v", err)
 	}
 }
 
