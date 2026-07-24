@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
 
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -336,6 +338,11 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 		UPDATE trading.commands
 		   SET status = 'completed', completed_at = clock_timestamp()
 		 WHERE command_id = '019f9460-4b36-4e9b-8f44-682611f70101'`)
+	assertRoleStatementDenied(t, pool, "platformgo_api", `
+		UPDATE trading.idempotency_records
+		   SET request_hash = decode(repeat('ff', 32), 'hex')
+		 WHERE scope = 'account:role-account'
+		   AND idempotency_key = 'role-command'`)
 
 	engineTransaction, err := pool.Begin(context.Background())
 	if err != nil {
@@ -375,6 +382,35 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 	if err := engineTransaction.Commit(context.Background()); err != nil {
 		t.Fatalf("commit engine transaction: %v", err)
 	}
+	assertRoleStatementDenied(t, pool, "platformgo_engine", `
+		UPDATE trading.commands
+		   SET canonical_payload = '{"tampered":true}'
+		 WHERE command_id = '019f9460-4b36-4e9b-8f44-682611f70101'`)
+
+	apiCompletion, err := pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin API completion transaction: %v", err)
+	}
+	if _, err = apiCompletion.Exec(
+		context.Background(),
+		"SET LOCAL ROLE platformgo_api",
+	); err == nil {
+		_, err = apiCompletion.Exec(context.Background(), `
+			UPDATE trading.idempotency_records
+			   SET state = 'completed',
+			       response_status = 200,
+			       response_headers = '{}',
+			       response_body = decode('7b7d', 'hex')
+			 WHERE scope = 'account:role-account'
+			   AND idempotency_key = 'role-command'`)
+	}
+	if err != nil {
+		_ = apiCompletion.Rollback(context.Background())
+		t.Fatalf("API completion transaction: %v", err)
+	}
+	if err := apiCompletion.Commit(context.Background()); err != nil {
+		t.Fatalf("commit API completion transaction: %v", err)
+	}
 
 	outboxTransaction, err := pool.Begin(context.Background())
 	if err != nil {
@@ -396,6 +432,10 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 	if err := outboxTransaction.Commit(context.Background()); err != nil {
 		t.Fatalf("commit outbox transaction: %v", err)
 	}
+	assertRoleStatementDenied(t, pool, "platformgo_outbox", `
+		UPDATE messaging.outbox
+		   SET payload = '{"tampered":true}'
+		 WHERE message_id = '019f9460-4b36-4e9b-8f44-682611f70101'`)
 
 	projectorTransaction, err := pool.Begin(context.Background())
 	if err != nil {
@@ -457,6 +497,145 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 	}
 }
 
+func TestFinalBaselineMigratesWithNoCreateRole(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	dropTestMigratorRole(t, pool)
+
+	var databaseName string
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT current_database()",
+	).Scan(&databaseName); err != nil {
+		t.Fatalf("read test database name: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		CREATE ROLE platformgo_migrator_test
+			LOGIN NOCREATEROLE PASSWORD 'platformgo-migrator-test'`); err != nil {
+		t.Fatalf("create NOCREATEROLE migrator: %v", err)
+	}
+	if _, err := pool.Exec(
+		context.Background(),
+		"GRANT CREATE ON DATABASE "+
+			pgx.Identifier{databaseName}.Sanitize()+
+			" TO platformgo_migrator_test",
+	); err != nil {
+		t.Fatalf("grant test database create to migrator: %v", err)
+	}
+	t.Cleanup(func() {
+		dropDurableSchemas(t, pool)
+		dropTestMigratorRole(t, pool)
+	})
+
+	config, err := pgxpool.ParseConfig(os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN"))
+	if err != nil {
+		t.Fatalf("parse test PostgreSQL configuration: %v", err)
+	}
+	config.ConnConfig.User = "platformgo_migrator_test"
+	config.ConnConfig.Password = "platformgo-migrator-test"
+	migratorPool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open NOCREATEROLE migrator pool: %v", err)
+	}
+	defer migratorPool.Close()
+	if err := migratorPool.Ping(context.Background()); err != nil {
+		t.Fatalf("ping as NOCREATEROLE migrator: %v", err)
+	}
+	if err := platformpostgres.NewMigrator(
+		migratorPool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate as NOCREATEROLE role: %v", err)
+	}
+
+	var canCreateRole bool
+	if err := pool.QueryRow(context.Background(), `
+		SELECT rolcreaterole
+		  FROM pg_roles
+		 WHERE rolname = 'platformgo_migrator_test'`,
+	).Scan(&canCreateRole); err != nil {
+		t.Fatalf("inspect migrator role: %v", err)
+	}
+	if canCreateRole {
+		t.Fatal("test migrator unexpectedly has CREATEROLE")
+	}
+	assertSingleBaselineMigration(t, pool)
+}
+
+func TestFinalBaselineFailsWhenPreprovisionedRuntimeRoleIsMissing(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	dropDurableSchemas(t, pool)
+	if _, err := pool.Exec(
+		context.Background(),
+		"DROP ROLE platformgo_projector",
+	); err != nil {
+		t.Fatalf("remove required runtime role: %v", err)
+	}
+	t.Cleanup(func() {
+		dropDurableSchemas(t, pool)
+		if _, err := pool.Exec(
+			context.Background(),
+			"CREATE ROLE platformgo_projector NOLOGIN",
+		); err != nil {
+			t.Errorf("restore required runtime role: %v", err)
+		}
+	})
+
+	err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(context.Background())
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) ||
+		postgresError.Code != "42501" ||
+		!strings.Contains(err.Error(), "pre-provisioned runtime role") {
+		t.Fatalf(
+			"missing runtime role migration error = %v, want clear SQLSTATE 42501",
+			err,
+		)
+	}
+	var appliedCount int
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT count(*) FROM engine.schema_migrations",
+	).Scan(&appliedCount); err != nil {
+		t.Fatalf("count migrations after prerequisite failure: %v", err)
+	}
+	if appliedCount != 0 {
+		t.Fatalf("prerequisite failure recorded %d migrations", appliedCount)
+	}
+}
+
+func dropTestMigratorRole(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	var exists bool
+	if err := pool.QueryRow(context.Background(), `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM pg_roles
+			 WHERE rolname = 'platformgo_migrator_test'
+		)`,
+	).Scan(&exists); err != nil {
+		t.Fatalf("inspect test migrator role: %v", err)
+	}
+	if !exists {
+		return
+	}
+	if _, err := pool.Exec(
+		context.Background(),
+		"DROP OWNED BY platformgo_migrator_test",
+	); err != nil {
+		t.Fatalf("drop test migrator ownership: %v", err)
+	}
+	if _, err := pool.Exec(
+		context.Background(),
+		"DROP ROLE platformgo_migrator_test",
+	); err != nil {
+		t.Fatalf("drop test migrator role: %v", err)
+	}
+}
+
 func assertRoleStatementDenied(
 	t *testing.T,
 	pool *pgxpool.Pool,
@@ -479,6 +658,15 @@ func assertRoleStatementDenied(
 	}
 	if _, err := tx.Exec(context.Background(), statement); err == nil {
 		t.Fatalf("role %s executed forbidden statement", role)
+	} else {
+		var postgresError *pgconn.PgError
+		if !errors.As(err, &postgresError) || postgresError.Code != "42501" {
+			t.Fatalf(
+				"role %s denial error = %v, want SQLSTATE 42501",
+				role,
+				err,
+			)
+		}
 	}
 }
 
@@ -754,6 +942,42 @@ func postgresPool(t *testing.T) *pgxpool.Pool {
 }
 
 func resetDurableSchemas(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+
+	dropDurableSchemas(t, pool)
+	_, err := pool.Exec(
+		context.Background(),
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_api'
+			) THEN
+				CREATE ROLE platformgo_api NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_engine'
+			) THEN
+				CREATE ROLE platformgo_engine NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_outbox'
+			) THEN
+				CREATE ROLE platformgo_outbox NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_projector'
+			) THEN
+				CREATE ROLE platformgo_projector NOLOGIN;
+			END IF;
+		END;
+		$$`,
+	)
+	if err != nil {
+		t.Fatalf("provision test runtime roles: %v", err)
+	}
+}
+
+func dropDurableSchemas(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 
 	_, err := pool.Exec(

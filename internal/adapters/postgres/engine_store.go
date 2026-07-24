@@ -310,7 +310,7 @@ func (store *EngineStore) ApplyTrading(
 		return next, decision, true, nil
 	}
 
-	if err := persistDecision(ctx, tx, input, decision); err != nil {
+	if err := persistDecision(ctx, tx, input, action, decision); err != nil {
 		if isDeterministicDurableInputConflict(err) {
 			halted, haltErr := engine.FailClosed(
 				state,
@@ -573,8 +573,15 @@ func persistDecision(
 	ctx context.Context,
 	tx pgx.Tx,
 	input engine.InputEnvelope,
+	action engine.TradingAction,
 	decision engine.Decision,
 ) error {
+	if accountID, scoped := engine.TradingActionAccountID(action); scoped &&
+		input.Kind != engine.InputKindCommand {
+		if err := bindAccountShard(ctx, tx, accountID, input.ShardID); err != nil {
+			return err
+		}
+	}
 	if err := persistCommandResult(ctx, tx, input, decision.CommandResult); err != nil {
 		return err
 	}

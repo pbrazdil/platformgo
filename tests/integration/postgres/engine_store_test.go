@@ -635,6 +635,140 @@ func TestEngineStoreRecoveryRejectsInvalidBusinessHashMetadata(t *testing.T) {
 	}
 }
 
+func TestEngineStoreBindsNonCommandAccountInputToOneShard(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	store := platformpostgres.NewEngineStore(pool)
+	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	firstAction := engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "account-1",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	}
+	firstPayload, err := engine.EncodeTradingAction(firstAction)
+	if err != nil {
+		t.Fatalf("EncodeTradingAction first: %v", err)
+	}
+	firstInput := engine.InputEnvelope{
+		InputID:              engine.IDFromSequence(engine.ID{}, 951),
+		SchemaVersion:        engine.CurrentSchemaVersion,
+		ShardID:              7,
+		Kind:                 engine.InputKindConfiguration,
+		SourceID:             "configuration",
+		SourceSequence:       1,
+		StreamSequence:       1,
+		LogicalTime:          engine.NewLogicalTime(now),
+		ConfigurationVersion: 1,
+		InstrumentVersion:    1,
+		Payload:              firstPayload,
+	}
+	firstState, _, _, err := store.ApplyTrading(
+		context.Background(),
+		engine.NewState(7),
+		firstInput,
+		firstAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if err != nil {
+		t.Fatalf("first configuration input: %v", err)
+	}
+	if firstState.NextStreamSequence() != 2 {
+		t.Fatalf(
+			"first configuration next sequence = %d, want 2",
+			firstState.NextStreamSequence(),
+		)
+	}
+
+	conflictingAction := engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "account-1",
+			OmsMode:   engine.OmsModeHedging,
+		},
+	}
+	conflictingPayload, err := engine.EncodeTradingAction(conflictingAction)
+	if err != nil {
+		t.Fatalf("EncodeTradingAction conflicting: %v", err)
+	}
+	conflictingInput := engine.InputEnvelope{
+		InputID:              engine.IDFromSequence(engine.ID{}, 952),
+		SchemaVersion:        engine.CurrentSchemaVersion,
+		ShardID:              8,
+		Kind:                 engine.InputKindConfiguration,
+		SourceID:             "configuration",
+		SourceSequence:       1,
+		StreamSequence:       1,
+		LogicalTime:          engine.NewLogicalTime(now.Add(time.Second)),
+		ConfigurationVersion: 2,
+		InstrumentVersion:    1,
+		Payload:              conflictingPayload,
+	}
+	halted, _, _, err := store.ApplyTrading(
+		context.Background(),
+		engine.NewState(8),
+		conflictingInput,
+		conflictingAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if !errors.Is(err, platformpostgres.ErrAccountShardConflict) ||
+		!errors.Is(err, engine.ErrDurableInputConflict) {
+		t.Fatalf(
+			"cross-shard configuration error = %v, want account-shard and durable conflicts",
+			err,
+		)
+	}
+	if halted.Ready() || halted.NextStreamSequence() != 1 {
+		t.Fatalf("cross-shard configuration state = %+v", halted)
+	}
+
+	var assignedShardID int64
+	var omsMode string
+	var accountVersion uint64
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT shard_id FROM engine.account_shards WHERE account_id = 'account-1'",
+	).Scan(&assignedShardID); err != nil {
+		t.Fatalf("read non-command shard assignment: %v", err)
+	}
+	if err := pool.QueryRow(context.Background(), `
+		SELECT oms_mode, version
+		  FROM trading.accounts
+		 WHERE account_id = 'account-1'`,
+	).Scan(&omsMode, &accountVersion); err != nil {
+		t.Fatalf("read account after cross-shard conflict: %v", err)
+	}
+	if assignedShardID != 7 || omsMode != "NETTING" || accountVersion != 1 {
+		t.Fatalf(
+			"account authority changed: shard=%d mode=%s version=%d",
+			assignedShardID,
+			omsMode,
+			accountVersion,
+		)
+	}
+	assertRowCount(t, pool, "engine.input_receipts", 1)
+	assertRowCount(t, pool, "engine.shard_faults", 1)
+	recovered, err := store.RecoverTradingState(context.Background(), 8)
+	if err != nil {
+		t.Fatalf("RecoverTradingState conflicting shard: %v", err)
+	}
+	if recovered.Ready() || recovered.Hash() != halted.Hash() {
+		t.Fatalf(
+			"recovered conflicting shard = ready %t hash %s, want false %s",
+			recovered.Ready(),
+			recovered.Hash(),
+			halted.Hash(),
+		)
+	}
+}
+
 func TestEngineStoreBindsCompleteCommandEnvelope(t *testing.T) {
 	baseTime := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 	action := engine.TradingAction{

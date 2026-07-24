@@ -2,6 +2,29 @@
 -- main, and the only database with the superseded development history was
 -- explicitly disposable and recreated before this baseline was accepted.
 
+DO $$
+DECLARE
+    required_role text;
+BEGIN
+    FOREACH required_role IN ARRAY ARRAY[
+        'platformgo_api',
+        'platformgo_engine',
+        'platformgo_outbox',
+        'platformgo_projector'
+    ]
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_roles WHERE rolname = required_role
+        ) THEN
+            RAISE EXCEPTION
+                'required pre-provisioned runtime role % is missing',
+                required_role
+                USING ERRCODE = '42501';
+        END IF;
+    END LOOP;
+END;
+$$;
+
 CREATE SCHEMA IF NOT EXISTS engine;
 CREATE SCHEMA IF NOT EXISTS trading;
 CREATE SCHEMA IF NOT EXISTS ledger;
@@ -397,23 +420,6 @@ CREATE TRIGGER inbox_is_immutable
 BEFORE UPDATE OR DELETE ON messaging.inbox
 FOR EACH ROW EXECUTE FUNCTION engine.reject_immutable_change();
 
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_api') THEN
-        CREATE ROLE platformgo_api NOLOGIN;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_engine') THEN
-        CREATE ROLE platformgo_engine NOLOGIN;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_outbox') THEN
-        CREATE ROLE platformgo_outbox NOLOGIN;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_projector') THEN
-        CREATE ROLE platformgo_projector NOLOGIN;
-    END IF;
-END;
-$$;
-
 REVOKE ALL ON SCHEMA engine, trading, ledger, market, messaging FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA engine, trading, ledger, market, messaging
     FROM PUBLIC;
@@ -421,7 +427,13 @@ REVOKE ALL ON ALL TABLES IN SCHEMA engine, trading, ledger, market, messaging
 GRANT USAGE ON SCHEMA engine, trading, ledger, market, messaging
     TO platformgo_api;
 GRANT SELECT, INSERT ON engine.account_shards TO platformgo_api;
-GRANT SELECT, INSERT, UPDATE ON trading.idempotency_records TO platformgo_api;
+GRANT SELECT, INSERT ON trading.idempotency_records TO platformgo_api;
+GRANT UPDATE (
+    state,
+    response_status,
+    response_headers,
+    response_body
+) ON trading.idempotency_records TO platformgo_api;
 GRANT SELECT, INSERT ON trading.commands TO platformgo_api;
 GRANT SELECT, INSERT ON messaging.outbox TO platformgo_api;
 GRANT SELECT ON
@@ -446,8 +458,13 @@ GRANT SELECT, INSERT ON
     engine.shard_faults,
     engine.duplicate_delivery_receipts
 TO platformgo_engine;
+GRANT SELECT ON trading.commands TO platformgo_engine;
+GRANT UPDATE (
+    status,
+    result,
+    completed_at
+) ON trading.commands TO platformgo_engine;
 GRANT SELECT, INSERT, UPDATE ON
-    trading.commands,
     trading.instruments,
     trading.accounts,
     trading.risk_configs,
@@ -463,7 +480,15 @@ GRANT SELECT, INSERT, UPDATE ON ledger.balances, market.books
 GRANT SELECT, INSERT ON messaging.outbox TO platformgo_engine;
 
 GRANT USAGE ON SCHEMA messaging TO platformgo_outbox;
-GRANT SELECT, UPDATE ON messaging.outbox TO platformgo_outbox;
+GRANT SELECT ON messaging.outbox TO platformgo_outbox;
+GRANT UPDATE (
+    attempts,
+    next_attempt_at,
+    claimed_at,
+    published_at,
+    publish_sequence,
+    last_error
+) ON messaging.outbox TO platformgo_outbox;
 
 GRANT USAGE ON SCHEMA messaging TO platformgo_projector;
 GRANT SELECT, INSERT ON messaging.inbox TO platformgo_projector;
