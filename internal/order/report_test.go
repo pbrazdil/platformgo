@@ -25,7 +25,7 @@ func TestToOrderStatusReportForAcceptedLimitOrder(t *testing.T) {
 	}
 	if report.AccountID != testAccount || report.InstrumentID.String() != "AUDUSD.SIM" ||
 		report.VenueOrderID != testVenue || report.OrderSide != OrderSideBuy ||
-		report.OrderType != OrderTypeLimit || report.TimeInForce != TimeInForceDay ||
+		report.OrderType != OrderTypeLimit || report.TimeInForce != TimeInForceGTC ||
 		report.OrderStatus != OrderStatusAccepted || report.ClientOrderID == nil ||
 		*report.ClientOrderID != order.config.ClientOrderID {
 		t.Fatalf("identity/status fields = %+v", report)

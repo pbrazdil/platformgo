@@ -126,7 +126,7 @@ func NewCore(config Config) (*Core, error) {
 		config.Type = OrderTypeMarket
 	}
 	if config.TimeInForce == 0 {
-		config.TimeInForce = TimeInForceDay
+		config.TimeInForce = TimeInForceGTC
 	}
 	if config.Quantity.IsZero() {
 		config.Quantity = decimal.MustQuantity("100000")

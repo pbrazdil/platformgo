@@ -2,7 +2,6 @@ package order
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/upcomers-org/platformgo/internal/decimal"
 	"github.com/upcomers-org/platformgo/internal/ids"
@@ -51,6 +50,7 @@ type Initialization struct {
 	Price              *decimal.Price
 	TriggerPrice       *decimal.Price
 	TriggerType        *TriggerType
+	ActivationPrice    *decimal.Price
 	LimitOffset        *decimal.Decimal
 	TrailingOffset     *decimal.Decimal
 	TrailingOffsetType *TrailingOffsetType
@@ -85,15 +85,16 @@ type Any struct {
 
 func NewAny(config Config) (*Any, error) {
 	initialization := Initialization{
-		ClientOrderID:  config.ClientOrderID,
-		InstrumentID:   config.InstrumentID,
-		Side:           config.Side,
-		Type:           config.Type,
-		Quantity:       config.Quantity,
-		Price:          config.Price,
-		TriggerPrice:   config.TriggerPrice,
-		LimitOffset:    config.LimitOffset,
-		TrailingOffset: config.TrailingOffset,
+		ClientOrderID:   config.ClientOrderID,
+		InstrumentID:    config.InstrumentID,
+		Side:            config.Side,
+		Type:            config.Type,
+		Quantity:        config.Quantity,
+		Price:           config.Price,
+		TriggerPrice:    config.TriggerPrice,
+		ActivationPrice: config.ActivationPrice,
+		LimitOffset:     config.LimitOffset,
+		TrailingOffset:  config.TrailingOffset,
 	}
 	if config.TriggerType != TriggerTypeNoTrigger {
 		initialization.TriggerType = copyPointer(config.TriggerType)
@@ -154,15 +155,16 @@ func newAny(initialization Initialization) (*Any, error) {
 		return nil, err
 	}
 	config := Config{
-		ClientOrderID:  initialization.ClientOrderID,
-		InstrumentID:   initialization.InstrumentID,
-		Side:           initialization.Side,
-		Type:           initialization.Type,
-		Quantity:       initialization.Quantity,
-		Price:          initialization.Price,
-		TriggerPrice:   initialization.TriggerPrice,
-		LimitOffset:    initialization.LimitOffset,
-		TrailingOffset: initialization.TrailingOffset,
+		ClientOrderID:   initialization.ClientOrderID,
+		InstrumentID:    initialization.InstrumentID,
+		Side:            initialization.Side,
+		Type:            initialization.Type,
+		Quantity:        initialization.Quantity,
+		Price:           initialization.Price,
+		TriggerPrice:    initialization.TriggerPrice,
+		ActivationPrice: initialization.ActivationPrice,
+		LimitOffset:     initialization.LimitOffset,
+		TrailingOffset:  initialization.TrailingOffset,
 	}
 	if initialization.TriggerType != nil {
 		config.TriggerType = *initialization.TriggerType
@@ -334,13 +336,4 @@ func (o *Any) clone() *Any {
 	copied.config.TrailingOffset = copyDecimal(o.config.TrailingOffset)
 	copied.protectionPrice = copyPointerValue(o.protectionPrice)
 	return &copied
-}
-
-func (e *ReplayError) Contains(parts ...string) bool {
-	for _, part := range parts {
-		if !strings.Contains(e.Error(), part) {
-			return false
-		}
-	}
-	return true
 }
