@@ -1014,29 +1014,29 @@ nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/expressions/p
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/expressions/parser.rs,test_parse_rejects_missing_closing_paren,417,internal/expression/expression_test.go,TestParseRejectsMissingClosingParen,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/expressions/parser.rs,test_parse_supports_special_bindings,397,internal/expression/expression_test.go,TestParseSupportsSpecialBindings,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/expressions/parser.rs,test_parse_unary_minus_after_power,349,internal/expression/expression_test.go,TestParseUnaryMinusAfterPower,unit,ported-green,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/data/deltas.rs,test_empty_delta_drop_returns_without_panic,111,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/data/deltas.rs,test_orderbook_deltas_new_clones_borrowed_buffer,116,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/enums.rs,test_name,693,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/enums.rs,test_value,700,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/account_id.rs,test_account_id_hash_c,69,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/account_id.rs,test_account_id_round_trip,47,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/account_id.rs,test_account_id_to_cstr_and_back,58,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/client_id.rs,test_client_id_hash_c,56,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/client_id.rs,test_client_id_to_cstr_c,48,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/instrument_id.rs,test_from_symbol_and_back,126,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/instrument_id.rs,test_to_cstr,107,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/instrument_id.rs,test_to_cstr_and_back,116,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/instruments/synthetic.rs,test_synthetic_calculate_borrows_inputs,224,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/orderbook/book.rs,test_empty_fills_drop_returns_without_panic,443,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/orderbook/level.rs,test_empty_typed_drops_return_without_panic,154,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/orderbook/level.rs,test_level_new_preserves_valid_behavior,160,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_currency_code_to_cstr,165,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_currency_from_cstr,186,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_currency_from_py,145,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_currency_hash,179,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_currency_name_to_cstr,172,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_currency_to_cstr,157,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_registration,136,,,unit,discovered,
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/data/deltas.rs,test_empty_delta_drop_returns_without_panic,111,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/data/deltas.rs,test_orderbook_deltas_new_clones_borrowed_buffer,116,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/enums.rs,test_name,693,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/enums.rs,test_value,700,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/account_id.rs,test_account_id_hash_c,69,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/account_id.rs,test_account_id_round_trip,47,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/account_id.rs,test_account_id_to_cstr_and_back,58,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/client_id.rs,test_client_id_hash_c,56,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/client_id.rs,test_client_id_to_cstr_c,48,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/instrument_id.rs,test_from_symbol_and_back,126,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/instrument_id.rs,test_to_cstr,107,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/identifiers/instrument_id.rs,test_to_cstr_and_back,116,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/instruments/synthetic.rs,test_synthetic_calculate_borrows_inputs,224,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/orderbook/book.rs,test_empty_fills_drop_returns_without_panic,443,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/orderbook/level.rs,test_empty_typed_drops_return_without_panic,154,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/orderbook/level.rs,test_level_new_preserves_valid_behavior,160,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_currency_code_to_cstr,165,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_currency_from_cstr,186,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_currency_from_py,145,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_currency_hash,179,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_currency_name_to_cstr,172,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_currency_to_cstr,157,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/ffi/types/currency.rs,test_registration,136,,,unit,not-applicable,"C FFI boundary is not part of the native Go rewrite"
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/identifiers/account_id.rs,test_account_id_fmt,162,internal/ids/account_id_test.go,TestAccountIDFormat,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/identifiers/account_id.rs,test_account_id_new_invalid_string,151,internal/ids/account_id_test.go,TestAccountIDEmptyPanics,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/identifiers/account_id.rs,test_account_id_new_missing_hyphen,157,internal/ids/account_id_test.go,TestAccountIDMissingHyphenPanics,unit,ported-green,
@@ -1947,79 +1947,79 @@ nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/position.rs,t
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/position.rs,test_signed_qty_decimal_qty_for_equity,3024,internal/position/position_math_test.go,TestSignedQtyDecimalQtyForEquity,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/position.rs,test_try_notional_value_for_inverse_zero_price_returns_error,2747,internal/position/position_math_test.go,TestTryNotionalValueForInverseZeroPriceReturnsError,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/position.rs,test_two_trades_with_same_trade_id_error,1401,internal/position/position_test.go,TestTwoTradesWithSameTradeIDError,unit,ported-green,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_commissions_from_vec_empty_returns_none,311,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_commissions_from_vec_returns_sorted_list,321,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_value_to_pydict,192,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_value_to_pyobject_array,288,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_value_to_pyobject_bool,277,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_value_to_pyobject_number_branches,242,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_value_to_pyobject_string,266,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/bar.rs,test_as_from_dict,798,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/bar.rs,test_bar_py_new,771,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/bar.rs,test_bar_py_new_invalid,751,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/bar.rs,test_from_pyobject,810,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/bar.rs,test_to_dict,786,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/delta.rs,test_from_dict,358,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/delta.rs,test_from_pyobject,370,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/delta.rs,test_from_pyobject_rejects_invalid_action,382,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/delta.rs,test_from_pyobject_rejects_invalid_order_side,417,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/delta.rs,test_order_book_delta_py_new_with_zero_size_returns_error,316,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/delta.rs,test_to_dict,346,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/funding.rs,test_py_funding_rate_update_new,372,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/mod.rs,test_drop_cvec_pycapsule_accepts_empty_cvec,826,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/mod.rs,test_drop_cvec_pycapsule_allows_repeated_drop,837,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/mod.rs,test_drop_cvec_pycapsule_rejects_len_greater_than_cap,786,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/mod.rs,test_drop_cvec_pycapsule_rejects_null_non_empty_pointer,806,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/mod.rs,test_drop_cvec_pycapsule_rejects_wrong_capsule_name,774,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/order.rs,test_from_dict,194,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/order.rs,test_to_dict,181,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/prices.rs,test_index_price_from_dict,527,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/prices.rs,test_index_price_from_pyobject,537,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/prices.rs,test_index_price_to_dict,517,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/prices.rs,test_mark_price_from_dict,497,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/prices.rs,test_mark_price_from_pyobject,507,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/prices.rs,test_mark_price_to_dict,487,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/quote.rs,test_from_dict,457,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/quote.rs,test_from_pyobject,469,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/quote.rs,test_quote_tick_py_new_invalid_precisions,421,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/quote.rs,test_to_dict,445,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/status.rs,test_from_dict,280,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/status.rs,test_from_pyobject,290,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/status.rs,test_from_pyobject_rejects_invalid_action,300,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/status.rs,test_to_dict,270,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/trade.rs,test_from_dict,434,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/trade.rs,test_from_pyobject,446,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/trade.rs,test_from_pyobject_rejects_invalid_aggressor_side,458,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/trade.rs,test_to_dict,422,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/trade.rs,test_trade_tick_py_new_with_zero_size,399,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/defi/profiler.rs,price_sqrt_ratio_x96_returns_python_int,314,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/events/order/fill_voided.rs,test_order_fill_voided_python_dict_round_trip,233,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/betting.rs,test_dict_round_trip,479,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/binary_option.rs,test_dict_round_trip,394,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_future.rs,test_dict_round_trip,404,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_future.rs,test_from_dict_unknown_underlying_registers_as_crypto,416,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_futures_spread.rs,test_dict_round_trip,409,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_option.rs,test_dict_round_trip,424,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_option.rs,test_from_dict_unknown_underlying_registers_as_crypto,436,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_option_spread.rs,test_dict_round_trip,409,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_perpetual.rs,test_from_dict_unknown_base_currency_registers_as_crypto,382,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/mod.rs,test_register_crypto_currencies_from_dict_blank_code_skipped,653,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/mod.rs,test_register_crypto_currencies_from_dict_known_code_not_overwritten,593,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/mod.rs,test_register_crypto_currencies_from_dict_missing_key,609,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/mod.rs,test_register_crypto_currencies_from_dict_non_string_value,622,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/mod.rs,test_register_crypto_currencies_from_dict_trims_padding,636,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/mod.rs,test_register_crypto_currencies_from_dict_unknown_code,577,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/mod.rs,test_currency_lookup_error_to_pyvalue_err_preserves_display_text,404,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/mod.rs,test_instrument_id_error_to_pyvalue_err_preserves_display_text,366,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/mod.rs,test_option_series_id_error_to_pyvalue_err_preserves_display_text,385,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/orders/list.rs,test_python_order_list_exposes_readonly_api,113,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/balance.rs,test_account_balance_from_dict_rejects_invalid_numeric_field,317,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/balance.rs,test_account_balance_from_dict_rejects_out_of_range_money_value,337,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/balance.rs,test_margin_balance_from_dict_rejects_invalid_numeric_field,367,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/balance.rs,test_margin_balance_from_dict_rejects_out_of_range_money_value,387,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/money.rs,test_py_from_raw_rejects_out_of_range_raw_value,449,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/price.rs,test_py_from_raw_rejects_out_of_range_raw_value,478,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/quantity.rs,test_py_from_raw_rejects_out_of_range_raw_value,482,,,unit,discovered,
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_commissions_from_vec_empty_returns_none,311,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_commissions_from_vec_returns_sorted_list,321,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_value_to_pydict,192,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_value_to_pyobject_array,288,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_value_to_pyobject_bool,277,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_value_to_pyobject_number_branches,242,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/common.rs,test_value_to_pyobject_string,266,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/bar.rs,test_as_from_dict,798,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/bar.rs,test_bar_py_new,771,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/bar.rs,test_bar_py_new_invalid,751,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/bar.rs,test_from_pyobject,810,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/bar.rs,test_to_dict,786,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/delta.rs,test_from_dict,358,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/delta.rs,test_from_pyobject,370,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/delta.rs,test_from_pyobject_rejects_invalid_action,382,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/delta.rs,test_from_pyobject_rejects_invalid_order_side,417,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/delta.rs,test_order_book_delta_py_new_with_zero_size_returns_error,316,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/delta.rs,test_to_dict,346,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/funding.rs,test_py_funding_rate_update_new,372,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/mod.rs,test_drop_cvec_pycapsule_accepts_empty_cvec,826,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/mod.rs,test_drop_cvec_pycapsule_allows_repeated_drop,837,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/mod.rs,test_drop_cvec_pycapsule_rejects_len_greater_than_cap,786,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/mod.rs,test_drop_cvec_pycapsule_rejects_null_non_empty_pointer,806,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/mod.rs,test_drop_cvec_pycapsule_rejects_wrong_capsule_name,774,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/order.rs,test_from_dict,194,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/order.rs,test_to_dict,181,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/prices.rs,test_index_price_from_dict,527,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/prices.rs,test_index_price_from_pyobject,537,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/prices.rs,test_index_price_to_dict,517,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/prices.rs,test_mark_price_from_dict,497,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/prices.rs,test_mark_price_from_pyobject,507,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/prices.rs,test_mark_price_to_dict,487,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/quote.rs,test_from_dict,457,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/quote.rs,test_from_pyobject,469,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/quote.rs,test_quote_tick_py_new_invalid_precisions,421,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/quote.rs,test_to_dict,445,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/status.rs,test_from_dict,280,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/status.rs,test_from_pyobject,290,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/status.rs,test_from_pyobject_rejects_invalid_action,300,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/status.rs,test_to_dict,270,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/trade.rs,test_from_dict,434,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/trade.rs,test_from_pyobject,446,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/trade.rs,test_from_pyobject_rejects_invalid_aggressor_side,458,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/trade.rs,test_to_dict,422,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/data/trade.rs,test_trade_tick_py_new_with_zero_size,399,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/defi/profiler.rs,price_sqrt_ratio_x96_returns_python_int,314,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/events/order/fill_voided.rs,test_order_fill_voided_python_dict_round_trip,233,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/betting.rs,test_dict_round_trip,479,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/binary_option.rs,test_dict_round_trip,394,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_future.rs,test_dict_round_trip,404,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_future.rs,test_from_dict_unknown_underlying_registers_as_crypto,416,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_futures_spread.rs,test_dict_round_trip,409,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_option.rs,test_dict_round_trip,424,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_option.rs,test_from_dict_unknown_underlying_registers_as_crypto,436,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_option_spread.rs,test_dict_round_trip,409,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/crypto_perpetual.rs,test_from_dict_unknown_base_currency_registers_as_crypto,382,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/mod.rs,test_register_crypto_currencies_from_dict_blank_code_skipped,653,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/mod.rs,test_register_crypto_currencies_from_dict_known_code_not_overwritten,593,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/mod.rs,test_register_crypto_currencies_from_dict_missing_key,609,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/mod.rs,test_register_crypto_currencies_from_dict_non_string_value,622,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/mod.rs,test_register_crypto_currencies_from_dict_trims_padding,636,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/instruments/mod.rs,test_register_crypto_currencies_from_dict_unknown_code,577,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/mod.rs,test_currency_lookup_error_to_pyvalue_err_preserves_display_text,404,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/mod.rs,test_instrument_id_error_to_pyvalue_err_preserves_display_text,366,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/mod.rs,test_option_series_id_error_to_pyvalue_err_preserves_display_text,385,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/orders/list.rs,test_python_order_list_exposes_readonly_api,113,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/balance.rs,test_account_balance_from_dict_rejects_invalid_numeric_field,317,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/balance.rs,test_account_balance_from_dict_rejects_out_of_range_money_value,337,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/balance.rs,test_margin_balance_from_dict_rejects_invalid_numeric_field,367,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/balance.rs,test_margin_balance_from_dict_rejects_out_of_range_money_value,387,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/money.rs,test_py_from_raw_rejects_out_of_range_raw_value,449,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/price.rs,test_py_from_raw_rejects_out_of_range_raw_value,478,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/python/types/quantity.rs,test_py_from_raw_rejects_out_of_range_raw_value,482,,,unit,not-applicable,"Python/PyO3 binding boundary is not part of the native Go rewrite"
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/reports/fill.rs,test_clone_and_equality,253,internal/report/fill_test.go,TestFillReportCloneAndEquality,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/reports/fill.rs,test_display,239,internal/report/fill_test.go,TestFillReportDisplay,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/reports/fill.rs,test_fill_report_new,173,internal/report/fill_test.go,TestFillReportNew,unit,ported-green,
