@@ -58,9 +58,11 @@ checkpoint, and versioned domain-event outbox. Recovery replays canonical
 inputs and terminal faults, verifies every hash, and reconciliation detects
 projection corruption without repair.
 
-Phase 2 is not yet complete. Release review identified migration-history and
-populated-upgrade blockers that require an owner-approved forward repair,
-and durable account-to-shard ownership is still missing.
+Phase 2 is not yet complete. The owner-approved pre-release migration rewrite
+now provides one final checksum-verified baseline, populated PostgreSQL 17
+fixtures, stale-development-history refusal, and immutable durable
+account-to-shard ownership. Full release validation and final independent
+approval remain.
 
 JetStream uses bounded file-backed streams with `DiscardNew`, one physical
 input stream and lifetime PostgreSQL ownership lock per shard, stable
@@ -82,7 +84,7 @@ integration proof; deployment packaging and later phase contracts remain.
 |---|---|---|
 | 0 — Policy and test harness | Complete | Machine-readable package scope, AST policy checks, split port/review/wiring evidence, exact function provenance, canonical source authorities, pinned Go 1.26.5, CODEOWNERS, immutable CI actions, complete-port and tidy gates, and the initial agent-evaluation corpus exist. `main` is protected and all seven required checks are enforced. The numeric foundation provides the sole `apd/v3`-backed production decimal, strict canonical parsing, explicit one-boundary rounding, immutable unit-bearing values, parser/arithmetic fuzzing, and five reviewed green source rows. The deterministic kernel adds explicit logical time and IDs, strict input sequencing, idempotent duplicate receipts, fail-closed typed errors, canonical decision/state hashes, replay properties, and the minimal synchronous engine fixture. |
 | 1 — Pure engine | Complete | Thirty-six pinned source rows are reviewed and green against the production `model-real` engine boundary. Coverage includes deterministic order lifecycle, depth/VWAP and slippage, netting and hedging positions, exact PnL, margin and reservation, idempotent funding, cross/isolated liquidation, stop/touch triggers, brackets and ladders, protection cleanup, and exact maker/taker fees. Policy-native invariant, fuzz, duplicate, replay, repeated, and race-enabled tests reinforce the source-test evidence. |
-| 2 — Durable execution | In progress | Durable execution, command-envelope binding, account command sequencing, durable fail-closed recovery, reconciliation, live PostgreSQL/JetStream proof, and hosted PostgreSQL 17/NATS CI execution are implemented. Remaining release blockers are an owner-approved immutable migration repair with populated-upgrade fixtures, durable account-to-shard ownership, and final independent review. |
+| 2 — Durable execution | In progress | Durable execution, command-envelope binding, contiguous account sequencing, immutable account-to-shard ownership, durable fail-closed recovery, reconciliation, one clean pre-release PostgreSQL baseline, populated/stale-history migration fixtures, live PostgreSQL/JetStream proof, and hosted PostgreSQL 17/NATS CI execution are implemented. Full release gates and final independent approval remain. |
 | 3 — Compatibility edges | Not started | Production REST, gRPC, authentication, realtime/Centrifugo, health, CLI, and deployment-compatible services are not implemented. |
 | 4 — Hyperliquid production integration | Not started | No production adapter, reconnect/resynchronization path, controlled live canary, soak test, or incident drill exists. |
 | 5 — Replacement rehearsal | Not started | Data import, cutover, rollback, reconciliation, and audited go-live rehearsal remain. |
@@ -114,8 +116,9 @@ Verified on 2026-07-24:
   deterministic repeats, policy, formatting, strict lint, complete source
   inventory, tidy-diff, and vulnerability checks.
 - Phase 2 PostgreSQL tests pass against a temporary PostgreSQL 17 instance and
-  cover clean migration, forward upgrade, immutable/checksum constraints,
-  least-privilege roles, atomic rollback/retry, normalized execution
+  cover the clean final baseline, populated idempotent rerun, stale-history
+  refusal, immutable/checksum constraints, executable least-privilege roles,
+  durable account-to-shard binding, atomic rollback/retry, normalized execution
   projections, idempotency replay/conflict, outbox unknown outcomes,
   transactional inbox dedupe, restart/fault replay, and reconciliation.
 - Phase 2 JetStream tests pass against a temporary NATS Server 2.14.3 instance
@@ -126,9 +129,8 @@ Verified on 2026-07-24:
 
 ## Next milestone
 
-Complete Phase 2 release hardening: resolve the migration-history decision,
-prove populated PostgreSQL 17 upgrades, add durable account-to-shard ownership,
-and obtain final independent release approval. Phase 3 then begins with
-production health/readiness and idempotent command submission over HTTP.
+Complete the Phase 2 full release gates and obtain final independent release
+approval. Phase 3 then begins with production health/readiness and idempotent
+command submission over HTTP.
 
 The authoritative scope, phase definitions, and completion criteria are in `PROJECT_CHARTER.md`. Repository-wide execution rules are in `AGENTS.md`.

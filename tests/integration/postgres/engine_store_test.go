@@ -551,6 +551,90 @@ func TestEngineStoreRejectsCommandInputThatDiffersFromJournal(t *testing.T) {
 	}
 }
 
+func TestEngineStoreRecoveryRejectsInvalidBusinessHashMetadata(t *testing.T) {
+	tests := []struct {
+		name    string
+		corrupt string
+	}{
+		{
+			name: "unknown version",
+			corrupt: `
+				UPDATE engine.input_receipts
+				   SET business_input_hash_version = 999`,
+		},
+		{
+			name: "mismatched hash",
+			corrupt: `
+				UPDATE engine.input_receipts
+				   SET business_input_hash = decode(repeat('ff', 32), 'hex')`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pool := postgresPool(t)
+			resetDurableSchemas(t, pool)
+			if err := platformpostgres.NewMigrator(
+				pool,
+				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			).Migrate(context.Background()); err != nil {
+				t.Fatalf("Migrate: %v", err)
+			}
+			store := platformpostgres.NewEngineStore(pool)
+			state := engine.NewState(7)
+			ids := testkit.NewShardIDSequence(7)
+			clock := testkit.NewManualClock(engine.NewLogicalTime(time.Date(
+				2026,
+				time.July,
+				24,
+				12,
+				0,
+				0,
+				0,
+				time.UTC,
+			)))
+			action := engine.TradingAction{
+				Kind: engine.TradingActionConfigureAccount,
+				ConfigureAccount: &engine.ConfigureAccount{
+					AccountID: "account-1",
+					OmsMode:   engine.OmsModeNetting,
+				},
+			}
+			applyStoredTrading(
+				t,
+				pool,
+				store,
+				state,
+				ids,
+				clock,
+				action,
+				platformpostgres.ApplyOptions{},
+			)
+			if _, err := pool.Exec(context.Background(), `
+				ALTER TABLE engine.input_receipts
+				DISABLE TRIGGER input_receipts_are_immutable`); err != nil {
+				t.Fatalf("disable receipt immutability trigger: %v", err)
+			}
+			if _, err := pool.Exec(context.Background(), test.corrupt); err != nil {
+				t.Fatalf("corrupt business hash metadata: %v", err)
+			}
+			if _, err := pool.Exec(context.Background(), `
+				ALTER TABLE engine.input_receipts
+				ENABLE TRIGGER input_receipts_are_immutable`); err != nil {
+				t.Fatalf("restore receipt immutability trigger: %v", err)
+			}
+			if _, err := store.RecoverTradingState(
+				context.Background(),
+				7,
+			); !errors.Is(err, platformpostgres.ErrCheckpointMismatch) {
+				t.Fatalf(
+					"RecoverTradingState error = %v, want ErrCheckpointMismatch",
+					err,
+				)
+			}
+		})
+	}
+}
+
 func TestEngineStoreBindsCompleteCommandEnvelope(t *testing.T) {
 	baseTime := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 	action := engine.TradingAction{
@@ -589,7 +673,11 @@ func TestEngineStoreBindsCompleteCommandEnvelope(t *testing.T) {
 			mutate:    func(input *engine.InputEnvelope) { input.SchemaVersion++ },
 			wantError: engine.ErrUnknownSchema,
 		},
-		{name: "shard", mutate: func(input *engine.InputEnvelope) { input.ShardID++ }},
+		{
+			name:      "shard",
+			mutate:    func(input *engine.InputEnvelope) { input.ShardID++ },
+			wantError: platformpostgres.ErrAccountShardConflict,
+		},
 		{
 			name:      "kind",
 			mutate:    func(input *engine.InputEnvelope) { input.Kind = engine.InputKindMarket },
@@ -1057,6 +1145,15 @@ func seedPendingCommand(
 	accountID := fmt.Sprintf("test-shard-%d", input.ShardID)
 	if actionAccountID, scoped := engine.TradingActionAccountID(action); scoped {
 		accountID = actionAccountID
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO engine.account_shards (account_id, shard_id)
+		VALUES ($1, $2)
+		ON CONFLICT (account_id) DO NOTHING`,
+		accountID,
+		int64(input.ShardID),
+	); err != nil {
+		t.Fatalf("seed command %s account shard: %v", input.InputID, err)
 	}
 	outboxPayload, err := engine.EncodeInputMessage(input)
 	if err != nil {

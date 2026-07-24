@@ -362,6 +362,7 @@ func (store *EngineStore) ApplyTrading(
 
 func isDeterministicDurableInputConflict(err error) bool {
 	return errors.Is(err, ErrCommandInputConflict) ||
+		errors.Is(err, ErrAccountShardConflict) ||
 		errors.Is(err, ErrCommandPredecessorPending) ||
 		errors.Is(err, ErrCommandNotFound) ||
 		errors.Is(err, ErrCommandCompletionConflict)
@@ -737,12 +738,15 @@ func persistCommandResult(
 	var outboxSubject string
 	var outboxSchemaVersion uint32
 	var outboxPayload []byte
+	var assignedShardID *int64
 	if err := tx.QueryRow(ctx, `
 		SELECT c.status, c.command_type, c.schema_version, c.account_id,
 		       c.account_sequence, c.canonical_payload, c.logical_time,
-		       o.subject, o.schema_version, o.payload
+		       o.subject, o.schema_version, o.payload, a.shard_id
 		  FROM trading.commands AS c
 		  JOIN messaging.outbox AS o ON o.message_id = c.command_id
+		  LEFT JOIN engine.account_shards AS a
+		    ON a.account_id = c.account_id
 		 WHERE c.command_id = $1
 		 FOR UPDATE OF c`,
 		input.InputID.String(),
@@ -757,6 +761,7 @@ func persistCommandResult(
 		&outboxSubject,
 		&outboxSchemaVersion,
 		&outboxPayload,
+		&assignedShardID,
 	); errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: %s", ErrCommandNotFound, input.InputID)
 	} else if err != nil {
@@ -768,6 +773,19 @@ func persistCommandResult(
 			ErrCommandCompletionConflict,
 			input.InputID,
 			commandStatus,
+		)
+	}
+	if assignedShardID == nil || *assignedShardID != int64(input.ShardID) {
+		assigned := "missing"
+		if assignedShardID != nil {
+			assigned = fmt.Sprint(*assignedShardID)
+		}
+		return fmt.Errorf(
+			"%w: account %q is assigned to shard %s, input uses %d",
+			ErrAccountShardConflict,
+			accountID,
+			assigned,
+			input.ShardID,
 		)
 	}
 	storedInput, storedAction, err := engine.DecodeInputMessage(outboxPayload)

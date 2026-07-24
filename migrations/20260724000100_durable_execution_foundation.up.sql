@@ -1,7 +1,12 @@
+-- Owner-approved pre-release baseline. No Phase 2 migration was released on
+-- main, and the only database with the superseded development history was
+-- explicitly disposable and recreated before this baseline was accepted.
+
 CREATE SCHEMA IF NOT EXISTS engine;
 CREATE SCHEMA IF NOT EXISTS trading;
 CREATE SCHEMA IF NOT EXISTS ledger;
 CREATE SCHEMA IF NOT EXISTS messaging;
+CREATE SCHEMA IF NOT EXISTS market;
 
 CREATE TABLE IF NOT EXISTS engine.schema_migrations (
     filename text PRIMARY KEY,
@@ -21,7 +26,7 @@ END;
 $$;
 
 CREATE TABLE engine.shard_checkpoints (
-    shard_id integer PRIMARY KEY CHECK (shard_id >= 0),
+    shard_id bigint PRIMARY KEY CHECK (shard_id >= 0),
     next_stream_sequence bigint NOT NULL CHECK (next_stream_sequence > 0),
     ready boolean NOT NULL,
     state_hash bytea NOT NULL CHECK (octet_length(state_hash) = 32),
@@ -30,7 +35,7 @@ CREATE TABLE engine.shard_checkpoints (
 );
 
 CREATE TABLE engine.input_receipts (
-    shard_id integer NOT NULL CHECK (shard_id >= 0),
+    shard_id bigint NOT NULL CHECK (shard_id >= 0),
     input_id uuid NOT NULL,
     stream_sequence bigint NOT NULL CHECK (stream_sequence > 0),
     schema_version integer NOT NULL CHECK (schema_version > 0),
@@ -42,12 +47,67 @@ CREATE TABLE engine.input_receipts (
     envelope jsonb NOT NULL,
     decision jsonb NOT NULL,
     committed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    business_input_hash bytea NOT NULL
+        CHECK (octet_length(business_input_hash) = 32),
+    business_input_hash_version integer NOT NULL
+        CHECK (business_input_hash_version > 0),
     PRIMARY KEY (shard_id, input_id),
     UNIQUE (shard_id, stream_sequence)
 );
 
 CREATE TRIGGER input_receipts_are_immutable
 BEFORE UPDATE OR DELETE ON engine.input_receipts
+FOR EACH ROW EXECUTE FUNCTION engine.reject_immutable_change();
+
+CREATE TABLE engine.shard_faults (
+    shard_id bigint NOT NULL CHECK (shard_id >= 0),
+    resulting_state_hash bytea NOT NULL
+        CHECK (octet_length(resulting_state_hash) = 32),
+    input_id uuid NOT NULL,
+    stream_sequence bigint NOT NULL CHECK (stream_sequence > 0),
+    error_kind text NOT NULL CHECK (error_kind <> ''),
+    error_detail text NOT NULL,
+    envelope jsonb NOT NULL,
+    supplied_action bytea NOT NULL,
+    committed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (shard_id, resulting_state_hash)
+);
+
+CREATE TRIGGER shard_faults_are_immutable
+BEFORE UPDATE OR DELETE ON engine.shard_faults
+FOR EACH ROW EXECUTE FUNCTION engine.reject_immutable_change();
+
+CREATE TABLE engine.duplicate_delivery_receipts (
+    shard_id bigint NOT NULL CHECK (shard_id >= 0),
+    stream_sequence bigint NOT NULL CHECK (stream_sequence > 0),
+    input_id uuid NOT NULL,
+    input_hash bytea NOT NULL CHECK (octet_length(input_hash) = 32),
+    original_decision_hash bytea NOT NULL
+        CHECK (octet_length(original_decision_hash) = 32),
+    decision_hash bytea NOT NULL CHECK (octet_length(decision_hash) = 32),
+    resulting_state_hash bytea NOT NULL
+        CHECK (octet_length(resulting_state_hash) = 32),
+    envelope jsonb NOT NULL,
+    decision jsonb NOT NULL,
+    committed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (shard_id, stream_sequence)
+);
+
+CREATE INDEX duplicate_delivery_input_idx
+ON engine.duplicate_delivery_receipts (shard_id, input_id, stream_sequence);
+
+CREATE TRIGGER duplicate_delivery_receipts_are_immutable
+BEFORE UPDATE OR DELETE ON engine.duplicate_delivery_receipts
+FOR EACH ROW EXECUTE FUNCTION engine.reject_immutable_change();
+
+CREATE TABLE engine.account_shards (
+    account_id text PRIMARY KEY CHECK (account_id <> ''),
+    shard_id bigint NOT NULL CHECK (shard_id >= 0),
+    assigned_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TRIGGER account_shards_are_immutable
+BEFORE UPDATE OR DELETE ON engine.account_shards
 FOR EACH ROW EXECUTE FUNCTION engine.reject_immutable_change();
 
 CREATE TABLE trading.idempotency_records (
@@ -107,14 +167,14 @@ CREATE TABLE trading.instruments (
 
 CREATE TABLE trading.accounts (
     account_id text PRIMARY KEY CHECK (account_id <> ''),
-    oms_mode text NOT NULL CHECK (oms_mode IN ('netting', 'hedging')),
+    oms_mode text NOT NULL CHECK (oms_mode IN ('NETTING', 'HEDGING')),
     version bigint NOT NULL DEFAULT 1 CHECK (version > 0)
 );
 
 CREATE TABLE trading.risk_configs (
     account_id text NOT NULL REFERENCES trading.accounts(account_id),
     instrument_id text NOT NULL REFERENCES trading.instruments(instrument_id),
-    margin_mode text NOT NULL CHECK (margin_mode IN ('cross', 'isolated')),
+    margin_mode text NOT NULL CHECK (margin_mode IN ('CROSS', 'ISOLATED')),
     leverage numeric(38,18) NOT NULL CHECK (leverage > 0),
     version bigint NOT NULL DEFAULT 1 CHECK (version > 0),
     PRIMARY KEY (account_id, instrument_id)
@@ -124,7 +184,7 @@ CREATE TABLE trading.orders (
     order_id uuid PRIMARY KEY,
     account_id text NOT NULL REFERENCES trading.accounts(account_id),
     instrument_id text NOT NULL REFERENCES trading.instruments(instrument_id),
-    side text NOT NULL CHECK (side IN ('buy', 'sell')),
+    side text NOT NULL CHECK (side IN ('BUY', 'SELL')),
     order_type text NOT NULL CHECK (order_type <> ''),
     time_in_force text NOT NULL CHECK (time_in_force <> ''),
     status text NOT NULL CHECK (status <> ''),
@@ -144,6 +204,10 @@ CREATE TABLE trading.orders (
     reject_reason text,
     version bigint NOT NULL CHECK (version > 0),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    has_slippage_band boolean NOT NULL DEFAULT false,
+    max_slippage_bps integer NOT NULL DEFAULT 0
+        CHECK (max_slippage_bps >= 0),
+    slippage_reference numeric(38,18),
     CHECK ((triggered AND triggered_at IS NOT NULL) OR (NOT triggered)),
     CHECK (limit_price IS NULL OR limit_price > 0),
     CHECK (trigger_price IS NULL OR trigger_price > 0)
@@ -158,18 +222,28 @@ CREATE TABLE trading.fills (
     input_id uuid NOT NULL,
     account_id text NOT NULL REFERENCES trading.accounts(account_id),
     instrument_id text NOT NULL REFERENCES trading.instruments(instrument_id),
-    side text NOT NULL CHECK (side IN ('buy', 'sell')),
+    side text NOT NULL CHECK (side IN ('BUY', 'SELL')),
     price numeric(38,18) NOT NULL CHECK (price > 0),
     quantity numeric(38,18) NOT NULL CHECK (quantity > 0),
     position_id uuid NOT NULL,
     position_effect text NOT NULL CHECK (position_effect <> ''),
-    realized_pnl numeric(38,18) NOT NULL,
-    settlement_currency text NOT NULL CHECK (settlement_currency <> ''),
-    liquidity_side text NOT NULL CHECK (liquidity_side IN ('maker', 'taker')),
-    fee numeric(38,18) NOT NULL,
-    fee_currency text NOT NULL CHECK (fee_currency <> ''),
+    realized_pnl numeric(38,18),
+    settlement_currency text CHECK (settlement_currency <> ''),
+    liquidity_side text NOT NULL CHECK (liquidity_side IN ('MAKER', 'TAKER')),
+    fee numeric(38,18),
+    fee_currency text CHECK (fee_currency <> ''),
     logical_time timestamptz NOT NULL,
-    UNIQUE (input_id, fill_id)
+    UNIQUE (input_id, fill_id),
+    CONSTRAINT fills_realized_pnl_pair_check CHECK (
+        (realized_pnl IS NULL AND settlement_currency IS NULL)
+        OR
+        (realized_pnl IS NOT NULL AND settlement_currency IS NOT NULL)
+    ),
+    CONSTRAINT fills_fee_pair_check CHECK (
+        (fee IS NULL AND fee_currency IS NULL)
+        OR
+        (fee IS NOT NULL AND fee_currency IS NOT NULL)
+    )
 );
 
 CREATE TRIGGER fills_are_immutable
@@ -180,13 +254,13 @@ CREATE TABLE trading.positions (
     position_id uuid PRIMARY KEY,
     account_id text NOT NULL REFERENCES trading.accounts(account_id),
     instrument_id text NOT NULL REFERENCES trading.instruments(instrument_id),
-    side text NOT NULL CHECK (side IN ('long', 'short', 'flat')),
+    side text NOT NULL CHECK (side IN ('LONG', 'SHORT', 'FLAT')),
     status text NOT NULL CHECK (status <> ''),
     signed_quantity numeric(38,18) NOT NULL,
     average_open_price numeric(38,18) NOT NULL CHECK (average_open_price >= 0),
     realized_pnl numeric(38,18) NOT NULL,
     settlement_currency text NOT NULL CHECK (settlement_currency <> ''),
-    margin_mode text NOT NULL CHECK (margin_mode IN ('cross', 'isolated')),
+    margin_mode text NOT NULL CHECK (margin_mode IN ('CROSS', 'ISOLATED')),
     isolated_collateral numeric(38,18) NOT NULL CHECK (isolated_collateral >= 0),
     version bigint NOT NULL CHECK (version > 0),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -279,6 +353,16 @@ CREATE TABLE ledger.balances (
     CHECK (free = equity - used)
 );
 
+CREATE TABLE market.books (
+    instrument_id text PRIMARY KEY
+        REFERENCES trading.instruments(instrument_id),
+    mark_price numeric(38,18) NOT NULL CHECK (mark_price > 0),
+    bids jsonb NOT NULL,
+    asks jsonb NOT NULL,
+    stream_sequence bigint NOT NULL CHECK (stream_sequence > 0),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE TABLE messaging.outbox (
     message_id uuid PRIMARY KEY,
     subject text NOT NULL CHECK (subject <> ''),
@@ -312,3 +396,74 @@ CREATE TABLE messaging.inbox (
 CREATE TRIGGER inbox_is_immutable
 BEFORE UPDATE OR DELETE ON messaging.inbox
 FOR EACH ROW EXECUTE FUNCTION engine.reject_immutable_change();
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_api') THEN
+        CREATE ROLE platformgo_api NOLOGIN;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_engine') THEN
+        CREATE ROLE platformgo_engine NOLOGIN;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_outbox') THEN
+        CREATE ROLE platformgo_outbox NOLOGIN;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_projector') THEN
+        CREATE ROLE platformgo_projector NOLOGIN;
+    END IF;
+END;
+$$;
+
+REVOKE ALL ON SCHEMA engine, trading, ledger, market, messaging FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA engine, trading, ledger, market, messaging
+    FROM PUBLIC;
+
+GRANT USAGE ON SCHEMA engine, trading, ledger, market, messaging
+    TO platformgo_api;
+GRANT SELECT, INSERT ON engine.account_shards TO platformgo_api;
+GRANT SELECT, INSERT, UPDATE ON trading.idempotency_records TO platformgo_api;
+GRANT SELECT, INSERT ON trading.commands TO platformgo_api;
+GRANT SELECT, INSERT ON messaging.outbox TO platformgo_api;
+GRANT SELECT ON
+    trading.instruments,
+    trading.accounts,
+    trading.risk_configs,
+    trading.orders,
+    trading.fills,
+    trading.positions,
+    trading.funding_settlements,
+    ledger.balances,
+    market.books
+TO platformgo_api;
+
+GRANT USAGE ON SCHEMA engine, trading, ledger, market, messaging
+    TO platformgo_engine;
+GRANT SELECT, INSERT, UPDATE ON engine.shard_checkpoints
+    TO platformgo_engine;
+GRANT SELECT, INSERT ON
+    engine.account_shards,
+    engine.input_receipts,
+    engine.shard_faults,
+    engine.duplicate_delivery_receipts
+TO platformgo_engine;
+GRANT SELECT, INSERT, UPDATE ON
+    trading.commands,
+    trading.instruments,
+    trading.accounts,
+    trading.risk_configs,
+    trading.orders,
+    trading.positions
+TO platformgo_engine;
+GRANT SELECT, INSERT ON trading.fills, trading.funding_settlements
+    TO platformgo_engine;
+GRANT SELECT, INSERT ON ledger.transactions, ledger.entries
+    TO platformgo_engine;
+GRANT SELECT, INSERT, UPDATE ON ledger.balances, market.books
+    TO platformgo_engine;
+GRANT SELECT, INSERT ON messaging.outbox TO platformgo_engine;
+
+GRANT USAGE ON SCHEMA messaging TO platformgo_outbox;
+GRANT SELECT, UPDATE ON messaging.outbox TO platformgo_outbox;
+
+GRANT USAGE ON SCHEMA messaging TO platformgo_projector;
+GRANT SELECT, INSERT ON messaging.inbox TO platformgo_projector;

@@ -24,6 +24,9 @@ var (
 	// ErrCommandSequenceGap means a new command did not use the next contiguous
 	// sequence for its account.
 	ErrCommandSequenceGap = errors.New("command account sequence gap")
+	// ErrAccountShardConflict means an account was routed to a shard other than
+	// its immutable durable assignment.
+	ErrAccountShardConflict = errors.New("account shard assignment conflict")
 )
 
 const commandAccountLockNamespace = 0x5047434d
@@ -106,7 +109,8 @@ func (journal *CommandJournal) Begin(
 			"begin command: PostgreSQL pool is required",
 		)
 	}
-	if err := validateBeginCommand(request); err != nil {
+	input, err := validateBeginCommand(request)
+	if err != nil {
 		return BeginCommandResult{}, err
 	}
 	tx, err := journal.pool.BeginTx(ctx, pgx.TxOptions{
@@ -145,6 +149,14 @@ func (journal *CommandJournal) Begin(
 				request.AccountID,
 				lockErr,
 			)
+		}
+		if bindErr := bindAccountShard(
+			ctx,
+			tx,
+			request.AccountID,
+			input.ShardID,
+		); bindErr != nil {
+			return BeginCommandResult{}, bindErr
 		}
 		var lastSequence uint64
 		if sequenceErr := tx.QueryRow(ctx, `
@@ -223,34 +235,51 @@ func (journal *CommandJournal) Begin(
 	return result, nil
 }
 
-func validateBeginCommand(request BeginCommandRequest) error {
+func validateBeginCommand(
+	request BeginCommandRequest,
+) (engine.InputEnvelope, error) {
 	switch {
 	case request.Scope == "":
-		return errors.New("begin command: scope is required")
+		return engine.InputEnvelope{}, errors.New("begin command: scope is required")
 	case request.IdempotencyKey == "":
-		return errors.New("begin command: idempotency key is required")
+		return engine.InputEnvelope{}, errors.New(
+			"begin command: idempotency key is required",
+		)
 	case request.CommandID.IsZero():
-		return errors.New("begin command: command ID is required")
+		return engine.InputEnvelope{}, errors.New("begin command: command ID is required")
 	case request.AccountID == "":
-		return errors.New("begin command: account ID is required")
+		return engine.InputEnvelope{}, errors.New("begin command: account ID is required")
 	case request.AccountSequence == 0:
-		return errors.New("begin command: account sequence is required")
+		return engine.InputEnvelope{}, errors.New(
+			"begin command: account sequence is required",
+		)
 	case request.CommandType == "":
-		return errors.New("begin command: command type is required")
+		return engine.InputEnvelope{}, errors.New("begin command: command type is required")
 	case request.SchemaVersion == 0:
-		return errors.New("begin command: schema version is required")
+		return engine.InputEnvelope{}, errors.New(
+			"begin command: schema version is required",
+		)
 	case !json.Valid(request.CanonicalPayload):
-		return errors.New("begin command: canonical payload is not JSON")
+		return engine.InputEnvelope{}, errors.New(
+			"begin command: canonical payload is not JSON",
+		)
 	case request.OutboxSubject == "":
-		return errors.New("begin command: outbox subject is required")
+		return engine.InputEnvelope{}, errors.New(
+			"begin command: outbox subject is required",
+		)
 	case !json.Valid(request.OutboxPayload):
-		return errors.New("begin command: outbox payload is not JSON")
+		return engine.InputEnvelope{}, errors.New(
+			"begin command: outbox payload is not JSON",
+		)
 	case request.ExpiresAt.IsZero():
-		return errors.New("begin command: expiration is required")
+		return engine.InputEnvelope{}, errors.New("begin command: expiration is required")
 	}
 	input, action, err := engine.DecodeInputMessage(request.OutboxPayload)
 	if err != nil {
-		return fmt.Errorf("begin command: decode outbox envelope: %w", err)
+		return engine.InputEnvelope{}, fmt.Errorf(
+			"begin command: decode outbox envelope: %w",
+			err,
+		)
 	}
 	expectedSubject := fmt.Sprintf(
 		"engine.input.%d.command.v%d",
@@ -259,11 +288,17 @@ func validateBeginCommand(request BeginCommandRequest) error {
 	)
 	canonicalCommand, err := canonicalJSON(request.CanonicalPayload)
 	if err != nil {
-		return fmt.Errorf("begin command: canonicalize command payload: %w", err)
+		return engine.InputEnvelope{}, fmt.Errorf(
+			"begin command: canonicalize command payload: %w",
+			err,
+		)
 	}
 	canonicalInput, err := canonicalJSON(input.Payload.Bytes())
 	if err != nil {
-		return fmt.Errorf("begin command: canonicalize outbox payload: %w", err)
+		return engine.InputEnvelope{}, fmt.Errorf(
+			"begin command: canonicalize outbox payload: %w",
+			err,
+		)
 	}
 	if input.InputID != request.CommandID ||
 		input.Kind != engine.InputKindCommand ||
@@ -274,7 +309,7 @@ func validateBeginCommand(request BeginCommandRequest) error {
 		request.OutboxSubject != expectedSubject ||
 		string(action.Kind) != request.CommandType ||
 		!bytes.Equal(canonicalCommand, canonicalInput) {
-		return fmt.Errorf(
+		return engine.InputEnvelope{}, fmt.Errorf(
 			"%w: begin command %s redundant metadata differs from outbox",
 			ErrCommandInputConflict,
 			request.CommandID,
@@ -282,12 +317,52 @@ func validateBeginCommand(request BeginCommandRequest) error {
 	}
 	if actionAccountID, scoped := engine.TradingActionAccountID(action); scoped &&
 		actionAccountID != request.AccountID {
-		return fmt.Errorf(
+		return engine.InputEnvelope{}, fmt.Errorf(
 			"%w: begin command %s account lane %q differs from payload account %q",
 			ErrCommandInputConflict,
 			request.CommandID,
 			request.AccountID,
 			actionAccountID,
+		)
+	}
+	return input, nil
+}
+
+func bindAccountShard(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID string,
+	shardID engine.ShardID,
+) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO engine.account_shards (account_id, shard_id)
+		VALUES ($1, $2)
+		ON CONFLICT (account_id) DO NOTHING`,
+		accountID,
+		int64(shardID),
+	); err != nil {
+		return fmt.Errorf("bind account %q to shard %d: %w", accountID, shardID, err)
+	}
+	var assignedShardID int64
+	if err := tx.QueryRow(ctx, `
+		SELECT shard_id
+		  FROM engine.account_shards
+		 WHERE account_id = $1`,
+		accountID,
+	).Scan(&assignedShardID); err != nil {
+		return fmt.Errorf(
+			"read account %q shard assignment: %w",
+			accountID,
+			err,
+		)
+	}
+	if assignedShardID != int64(shardID) {
+		return fmt.Errorf(
+			"%w: account %q is assigned to shard %d, got %d",
+			ErrAccountShardConflict,
+			accountID,
+			assignedShardID,
+			shardID,
 		)
 	}
 	return nil

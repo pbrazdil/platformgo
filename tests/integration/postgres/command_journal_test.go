@@ -214,6 +214,98 @@ func TestCommandJournalRejectsOutOfOrderAndPrematureCompletion(t *testing.T) {
 	}
 }
 
+func TestCommandJournalDurablyBindsAccountToOneShard(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	first := validCommandRequest(
+		t,
+		engine.IDFromSequence(engine.ID{}, 121),
+		"account-1",
+		1,
+		7,
+		now,
+	)
+	if _, err := platformpostgres.NewCommandJournal(pool).Begin(
+		context.Background(),
+		first,
+	); err != nil {
+		t.Fatalf("first shard-bound Begin: %v", err)
+	}
+
+	// A new journal instance represents a process restart. The durable mapping,
+	// rather than process memory, must admit the next same-shard command.
+	second := validCommandRequest(
+		t,
+		engine.IDFromSequence(engine.ID{}, 122),
+		"account-1",
+		2,
+		7,
+		now.Add(time.Second),
+	)
+	if _, err := platformpostgres.NewCommandJournal(pool).Begin(
+		context.Background(),
+		second,
+	); err != nil {
+		t.Fatalf("same-shard Begin after restart: %v", err)
+	}
+
+	wrongShard := validCommandRequest(
+		t,
+		engine.IDFromSequence(engine.ID{}, 123),
+		"account-1",
+		3,
+		8,
+		now.Add(2*time.Second),
+	)
+	if _, err := platformpostgres.NewCommandJournal(pool).Begin(
+		context.Background(),
+		wrongShard,
+	); !errors.Is(err, platformpostgres.ErrAccountShardConflict) {
+		t.Fatalf(
+			"cross-shard Begin error = %v, want ErrAccountShardConflict",
+			err,
+		)
+	}
+
+	var assignedShard int64
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT shard_id FROM engine.account_shards WHERE account_id = 'account-1'",
+	).Scan(&assignedShard); err != nil {
+		t.Fatalf("read durable account shard: %v", err)
+	}
+	if assignedShard != 7 {
+		t.Fatalf("durable account shard = %d, want 7", assignedShard)
+	}
+	for _, query := range []string{
+		"SELECT count(*) FROM trading.idempotency_records",
+		"SELECT count(*) FROM trading.commands",
+		"SELECT count(*) FROM messaging.outbox",
+	} {
+		var count int
+		if err := pool.QueryRow(context.Background(), query).Scan(&count); err != nil {
+			t.Fatalf("count cross-shard rollback rows: %v", err)
+		}
+		if count != 2 {
+			t.Fatalf("%s = %d, want 2", query, count)
+		}
+	}
+	if _, err := pool.Exec(
+		context.Background(),
+		"UPDATE engine.account_shards SET shard_id = 8 WHERE account_id = 'account-1'",
+	); err == nil {
+		t.Fatal("immutable account shard assignment was updated")
+	}
+}
+
 func TestCommandJournalRejectsRedundantMetadataMismatch(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
