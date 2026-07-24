@@ -67,7 +67,7 @@ func TestCustomJSONRegistryRoundTripWithDenyUnknownFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deserialize: %v", err)
 	}
-	if back.TypeName != "TestRegCustomData" || back.TsInit != 200 {
+	if back.TypeName != "StrictRegCustomData" || back.TsInit != 200 {
 		t.Fatalf("round trip = %#v", back)
 	}
 }
