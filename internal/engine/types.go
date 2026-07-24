@@ -167,6 +167,9 @@ type Decision struct {
 	CommandResult        CommandResult
 	InstrumentChanges    []InstrumentSnapshot
 	AccountChanges       []AccountSnapshot
+	RiskChanges          []RiskSnapshot
+	BalanceChanges       []BalanceSnapshot
+	FundingChanges       []FundingSnapshot
 	BookChanges          []BookSnapshot
 	OrderChanges         []OrderSnapshot
 	Fills                []FillSnapshot

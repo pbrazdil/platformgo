@@ -318,6 +318,29 @@ func newTradingFixtureWithoutBook(t *testing.T) *tradingFixture {
 			QuantityScale:           3,
 			SettlementCurrency:      "USDC",
 			SettlementCurrencyScale: 8,
+			InitialMarginRate:       "1",
+			MaintenanceMarginRate:   "0.05",
+			MaxLeverage:             "10",
+		},
+	})
+	fixture.apply(t, TradingAction{
+		Kind: TradingActionAdjustBalance,
+		AdjustBalance: &AdjustBalance{
+			AccountID:     "account-1",
+			Currency:      "USDC",
+			CurrencyScale: 8,
+			Operation:     BalanceOperationSet,
+			Amount:        "1000000",
+		},
+	})
+	fixture.apply(t, TradingAction{
+		Kind: TradingActionAdjustBalance,
+		AdjustBalance: &AdjustBalance{
+			AccountID:     "account-2",
+			Currency:      "USDC",
+			CurrencyScale: 8,
+			Operation:     BalanceOperationSet,
+			Amount:        "1000000",
 		},
 	})
 	return fixture

@@ -45,11 +45,43 @@ func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
 			writeUint8(hasher, instrument.QuantityScale)
 			writeString(hasher, instrument.SettlementCurrency)
 			writeUint8(hasher, instrument.SettlementCurrencyScale)
+			writeString(hasher, instrument.InitialMarginRate)
+			writeString(hasher, instrument.MaintenanceMarginRate)
+			writeString(hasher, instrument.MaxLeverage)
 		}
 		writeUint64(hasher, uint64(len(decision.AccountChanges)))
 		for _, account := range decision.AccountChanges {
 			writeString(hasher, account.AccountID)
 			writeString(hasher, string(account.OmsMode))
+		}
+		writeUint64(hasher, uint64(len(decision.RiskChanges)))
+		for _, risk := range decision.RiskChanges {
+			writeString(hasher, risk.AccountID)
+			writeString(hasher, risk.InstrumentID)
+			writeString(hasher, string(risk.MarginMode))
+			writeString(hasher, risk.Leverage)
+		}
+		writeUint64(hasher, uint64(len(decision.BalanceChanges)))
+		for _, balance := range decision.BalanceChanges {
+			writeString(hasher, balance.AccountID)
+			writeString(hasher, balance.Currency)
+			writeString(hasher, balance.Total)
+			writeString(hasher, balance.Used)
+			writeString(hasher, balance.Free)
+			writeString(hasher, balance.Equity)
+		}
+		writeUint64(hasher, uint64(len(decision.FundingChanges)))
+		for _, funding := range decision.FundingChanges {
+			writeBytes(hasher, funding.FundingID[:])
+			writeBytes(hasher, funding.SettlementID[:])
+			writeBytes(hasher, funding.PositionID[:])
+			writeString(hasher, funding.AccountID)
+			writeString(hasher, funding.InstrumentID)
+			writeString(hasher, funding.SignedQuantity)
+			writeString(hasher, funding.OraclePrice)
+			writeString(hasher, funding.Rate)
+			writeString(hasher, funding.Amount)
+			writeString(hasher, funding.SettlementCurrency)
 		}
 		writeUint64(hasher, uint64(len(decision.BookChanges)))
 		for _, book := range decision.BookChanges {
@@ -106,6 +138,8 @@ func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
 			writeString(hasher, position.AverageOpenPrice)
 			writeString(hasher, position.RealizedPnL)
 			writeString(hasher, position.SettlementCurrency)
+			writeString(hasher, string(position.MarginMode))
+			writeString(hasher, position.IsolatedCollateral)
 			writeUint64(hasher, position.Version)
 		}
 		writeUint64(hasher, uint64(len(decision.Events)))
