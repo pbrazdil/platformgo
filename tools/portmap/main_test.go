@@ -35,3 +35,27 @@ func TestPrice(t *testing.T) {}
 		t.Fatalf("unexpected provenance: %+v", found[0])
 	}
 }
+
+func TestReadProvenanceAcceptsQualifiedPlatformRevision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "platform_test.go")
+	source := `package platform
+
+import "testing"
+
+// Ported from:
+//   platform: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//   source: apps/app/tests/it/example.rs:42
+//   test: example
+func TestExample(t *testing.T) {}
+`
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found, err := readProvenance(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 1 || found[0].revision != "50141367492be46ebf5623f6191a14b94af2f2bd" {
+		t.Fatalf("unexpected provenance: %+v", found)
+	}
+}

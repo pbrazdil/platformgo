@@ -20,7 +20,9 @@ import (
 var (
 	sourcePattern   = regexp.MustCompile(`(?m)^\s*source:\s+(.+):([0-9]+)\s*$`)
 	testPattern     = regexp.MustCompile(`(?m)^\s*test:\s+([A-Za-z_][A-Za-z0-9_]*)\s*$`)
-	revisionPattern = regexp.MustCompile(`(?m)^\s*(?:platform|NautilusTrader):\s+([0-9a-f]{40})\s*$`)
+	revisionPattern = regexp.MustCompile(
+		`(?m)^\s*(?:platform|NautilusTrader):\s+(?:upcomers-org/platform@)?([0-9a-f]{40})\s*$`,
+	)
 )
 
 type provenance struct {
