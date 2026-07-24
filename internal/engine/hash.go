@@ -48,6 +48,8 @@ func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
 			writeString(hasher, instrument.InitialMarginRate)
 			writeString(hasher, instrument.MaintenanceMarginRate)
 			writeString(hasher, instrument.MaxLeverage)
+			writeString(hasher, instrument.MakerFeeRate)
+			writeString(hasher, instrument.TakerFeeRate)
 		}
 		writeUint64(hasher, uint64(len(decision.AccountChanges)))
 		for _, account := range decision.AccountChanges {
@@ -104,8 +106,14 @@ func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
 			writeString(hasher, order.AverageFillPrice)
 			writeString(hasher, order.Price)
 			writeString(hasher, order.TriggerPrice)
+			writeUint8(hasher, boolByte(order.Triggered))
+			writeInt64(hasher, order.TriggeredAt.UnixNano())
 			writeUint8(hasher, boolByte(order.ReduceOnly))
 			writeBytes(hasher, order.PositionID[:])
+			writeBytes(hasher, order.BracketID[:])
+			writeString(hasher, string(order.BracketLeg))
+			writeUint32(hasher, order.BracketLegIndex)
+			writeUint8(hasher, boolByte(order.HasRested))
 			writeUint8(hasher, boolByte(order.HasSlippageBand))
 			writeUint32(hasher, order.MaxSlippageBPS)
 			writeString(hasher, order.SlippageReference)
@@ -125,6 +133,9 @@ func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
 			writeString(hasher, string(fill.PositionEffect))
 			writeString(hasher, fill.RealizedPnL)
 			writeString(hasher, fill.SettlementCurrency)
+			writeString(hasher, string(fill.LiquiditySide))
+			writeString(hasher, fill.Fee)
+			writeString(hasher, fill.FeeCurrency)
 			writeInt64(hasher, fill.LogicalTime.UnixNano())
 		}
 		writeUint64(hasher, uint64(len(decision.PositionChanges)))

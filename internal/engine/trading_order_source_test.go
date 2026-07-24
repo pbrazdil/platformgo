@@ -299,6 +299,37 @@ func newTradingFixture(t *testing.T) *tradingFixture {
 }
 
 func newTradingFixtureWithoutBook(t *testing.T) *tradingFixture {
+	return newTradingFixtureWithFeeRatesWithoutBook(t, "0", "0")
+}
+
+func newTradingFixtureWithFeeRates(
+	t *testing.T,
+	makerFeeRate string,
+	takerFeeRate string,
+) *tradingFixture {
+	t.Helper()
+	fixture := newTradingFixtureWithFeeRatesWithoutBook(
+		t,
+		makerFeeRate,
+		takerFeeRate,
+	)
+	fixture.apply(t, TradingAction{
+		Kind: TradingActionUpdateBook,
+		UpdateBook: &UpdateBook{
+			InstrumentID: "BTC-PERP",
+			MarkPrice:    "100",
+			Bids:         []BookLevel{{Price: "99", Quantity: "10"}},
+			Asks:         []BookLevel{{Price: "100", Quantity: "10"}},
+		},
+	})
+	return fixture
+}
+
+func newTradingFixtureWithFeeRatesWithoutBook(
+	t *testing.T,
+	makerFeeRate string,
+	takerFeeRate string,
+) *tradingFixture {
 	t.Helper()
 
 	fixture := &tradingFixture{
@@ -321,6 +352,8 @@ func newTradingFixtureWithoutBook(t *testing.T) *tradingFixture {
 			InitialMarginRate:       "1",
 			MaintenanceMarginRate:   "0.05",
 			MaxLeverage:             "10",
+			MakerFeeRate:            makerFeeRate,
+			TakerFeeRate:            takerFeeRate,
 		},
 	})
 	fixture.apply(t, TradingAction{
