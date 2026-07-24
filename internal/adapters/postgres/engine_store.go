@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -42,7 +43,8 @@ type faultSet interface {
 
 // ApplyOptions carries deterministic, caller-owned execution controls.
 type ApplyOptions struct {
-	Faults faultSet
+	Faults    faultSet
+	Ownership *ShardOwnership
 }
 
 // EngineStore is the PostgreSQL authority for one atomic engine decision.
@@ -53,8 +55,10 @@ type EngineStore struct {
 // ShardOwnership holds the lifetime singleton lock for one active engine
 // process. Close must be called during orderly shutdown.
 type ShardOwnership struct {
+	mu         sync.Mutex
 	connection *pgxpool.Conn
 	shardID    engine.ShardID
+	epoch      uint64
 }
 
 // NewEngineStore binds the durable coordinator to PostgreSQL.
@@ -70,6 +74,7 @@ func (store *EngineStore) HaltTradingInput(
 	input engine.InputEnvelope,
 	action engine.TradingAction,
 	conflict error,
+	ownership ...*ShardOwnership,
 ) (engine.State, error) {
 	if store == nil || store.pool == nil {
 		return state, errors.New("halt trading input: PostgreSQL pool is required")
@@ -77,17 +82,30 @@ func (store *EngineStore) HaltTradingInput(
 	if conflict == nil {
 		return state, errors.New("halt trading input: conflict is required")
 	}
-	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel: pgx.Serializable,
-	})
+	var owner *ShardOwnership
+	if len(ownership) > 0 {
+		owner = ownership[0]
+	}
+	tx, token, releaseOwnership, err := store.beginEngineTx(ctx, owner)
 	if err != nil {
 		return state, fmt.Errorf("halt trading input: begin transaction: %w", err)
 	}
+	defer releaseOwnership()
 	defer func() {
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
 	if err := acquireShardWriter(ctx, tx, state.ShardID()); err != nil {
 		return state, err
+	}
+	if token.present {
+		if err := verifyOwnershipEpoch(
+			ctx,
+			tx,
+			state.ShardID(),
+			token,
+		); err != nil {
+			return state, err
+		}
 	}
 	if err := verifyCheckpoint(ctx, tx, state); err != nil {
 		return state, err
@@ -144,12 +162,89 @@ func (store *EngineStore) AcquireShardOwnership(
 		connection.Release()
 		return nil, fmt.Errorf("%w: shard %d process ownership", ErrWriterConflict, shardID)
 	}
-	return &ShardOwnership{connection: connection, shardID: shardID}, nil
+	var epoch uint64
+	if err := connection.QueryRow(ctx, `
+		INSERT INTO engine.shard_ownership_epochs (
+			shard_id, epoch, acquired_at
+		) VALUES ($1, 1, clock_timestamp())
+		ON CONFLICT (shard_id) DO UPDATE SET
+			epoch = engine.shard_ownership_epochs.epoch + 1,
+			acquired_at = EXCLUDED.acquired_at
+		RETURNING epoch`,
+		int64(shardID),
+	).Scan(&epoch); err != nil {
+		var released bool
+		_ = connection.QueryRow(
+			context.WithoutCancel(ctx),
+			"SELECT pg_advisory_unlock($1, $2)",
+			engineOwnerLockNamespace,
+			int64(shardID),
+		).Scan(&released)
+		connection.Release()
+		return nil, fmt.Errorf("acquire shard %d ownership epoch: %w", shardID, err)
+	}
+	return &ShardOwnership{
+		connection: connection,
+		shardID:    shardID,
+		epoch:      epoch,
+	}, nil
+}
+
+// Check proves that the dedicated session still owns the shard advisory lock.
+// A lost session is a fatal single-writer conflict, even if PostgreSQL has
+// already admitted a replacement owner.
+func (ownership *ShardOwnership) Check(ctx context.Context) error {
+	if ownership == nil {
+		return errors.New("check shard ownership: ownership is required")
+	}
+	ownership.mu.Lock()
+	defer ownership.mu.Unlock()
+	if ownership.connection == nil {
+		return fmt.Errorf(
+			"%w: shard %d process ownership is closed",
+			ErrWriterConflict,
+			ownership.shardID,
+		)
+	}
+	var held bool
+	if err := ownership.connection.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM pg_locks
+			 WHERE locktype = 'advisory'
+			   AND pid = pg_backend_pid()
+			   AND classid = $1::oid
+			   AND objid = $2::oid
+			   AND granted
+		)`,
+		engineOwnerLockNamespace,
+		uint32(ownership.shardID),
+	).Scan(&held); err != nil {
+		return fmt.Errorf(
+			"%w: check shard %d ownership session: %w",
+			ErrWriterConflict,
+			ownership.shardID,
+			err,
+		)
+	}
+	if !held {
+		return fmt.Errorf(
+			"%w: shard %d process ownership lock was lost",
+			ErrWriterConflict,
+			ownership.shardID,
+		)
+	}
+	return nil
 }
 
 // Close releases the process-lifetime shard ownership lock.
 func (ownership *ShardOwnership) Close(ctx context.Context) error {
-	if ownership == nil || ownership.connection == nil {
+	if ownership == nil {
+		return nil
+	}
+	ownership.mu.Lock()
+	defer ownership.mu.Unlock()
+	if ownership.connection == nil {
 		return nil
 	}
 	connection := ownership.connection
@@ -191,21 +286,33 @@ func (store *EngineStore) ApplyTrading(
 			"apply trading: PostgreSQL pool is required",
 		)
 	}
-	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel: pgx.Serializable,
-	})
+	tx, token, releaseOwnership, err := store.beginEngineTx(
+		ctx,
+		options.Ownership,
+	)
 	if err != nil {
 		return state, engine.Decision{}, false, fmt.Errorf(
 			"apply trading: begin transaction: %w",
 			err,
 		)
 	}
+	defer releaseOwnership()
 	defer func() {
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
 
 	if lockErr := acquireShardWriter(ctx, tx, state.ShardID()); lockErr != nil {
 		return state, engine.Decision{}, false, lockErr
+	}
+	if token.present {
+		if ownershipErr := verifyOwnershipEpoch(
+			ctx,
+			tx,
+			state.ShardID(),
+			token,
+		); ownershipErr != nil {
+			return state, engine.Decision{}, false, ownershipErr
+		}
 	}
 	if checkpointErr := verifyCheckpoint(ctx, tx, state); checkpointErr != nil {
 		return state, engine.Decision{}, false, checkpointErr
@@ -384,6 +491,101 @@ func acquireShardWriter(
 	}
 	if !acquired {
 		return fmt.Errorf("%w: shard %d", ErrWriterConflict, shardID)
+	}
+	return nil
+}
+
+type ownershipToken struct {
+	shardID engine.ShardID
+	epoch   uint64
+	present bool
+}
+
+func (store *EngineStore) beginEngineTx(
+	ctx context.Context,
+	ownership *ShardOwnership,
+) (pgx.Tx, ownershipToken, func(), error) {
+	options := pgx.TxOptions{IsoLevel: pgx.Serializable}
+	if ownership == nil {
+		tx, err := store.pool.BeginTx(ctx, options)
+		return tx, ownershipToken{}, func() {}, err
+	}
+	ownership.mu.Lock()
+	if ownership.connection == nil || ownership.epoch == 0 {
+		ownership.mu.Unlock()
+		return nil, ownershipToken{}, func() {}, fmt.Errorf(
+			"%w: shard %d ownership is inactive",
+			ErrWriterConflict,
+			ownership.shardID,
+		)
+	}
+	tx, err := ownership.connection.BeginTx(ctx, options)
+	if err != nil {
+		ownership.mu.Unlock()
+		return nil, ownershipToken{}, func() {}, fmt.Errorf(
+			"%w: begin shard %d transaction on ownership session: %w",
+			ErrWriterConflict,
+			ownership.shardID,
+			err,
+		)
+	}
+	token := ownershipToken{
+		shardID: ownership.shardID,
+		epoch:   ownership.epoch,
+		present: true,
+	}
+	return tx, token, ownership.mu.Unlock, nil
+}
+
+func verifyOwnershipEpoch(
+	ctx context.Context,
+	tx pgx.Tx,
+	shardID engine.ShardID,
+	token ownershipToken,
+) error {
+	if !token.present || token.shardID != shardID || token.epoch == 0 {
+		return fmt.Errorf(
+			"%w: shard %d ownership token is inactive or mismatched",
+			ErrWriterConflict,
+			shardID,
+		)
+	}
+	var durableEpoch uint64
+	var lockHeld bool
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			epoch,
+			EXISTS (
+				SELECT 1
+				  FROM pg_locks
+				 WHERE locktype = 'advisory'
+				   AND pid = pg_backend_pid()
+				   AND classid = $2::oid
+				   AND objid = $1::oid
+				   AND granted
+			)
+		  FROM engine.shard_ownership_epochs
+		 WHERE shard_id = $1
+		 FOR SHARE`,
+		int64(shardID),
+		engineOwnerLockNamespace,
+	).Scan(&durableEpoch, &lockHeld); err != nil {
+		return fmt.Errorf(
+			"%w: verify shard %d ownership epoch: %w",
+			ErrWriterConflict,
+			shardID,
+			err,
+		)
+	}
+	if !lockHeld || durableEpoch != token.epoch {
+		return fmt.Errorf(
+			"%w: shard %d ownership lock=%t epoch %d was replaced by %d",
+			ErrWriterConflict,
+			shardID,
+			lockHeld,
+			token.epoch,
+			durableEpoch,
+		)
 	}
 	return nil
 }
@@ -1417,7 +1619,20 @@ func (store *EngineStore) RecoverTradingState(
 			"recover trading state: PostgreSQL pool is required",
 		)
 	}
-	rows, err := store.pool.Query(ctx, `
+	return recoverTradingState(ctx, store.pool, shardID)
+}
+
+type postgresQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func recoverTradingState(
+	ctx context.Context,
+	querier postgresQuerier,
+	shardID engine.ShardID,
+) (engine.State, error) {
+	rows, err := querier.Query(ctx, `
 		SELECT receipt_kind, envelope, decision_hash, resulting_state_hash,
 		       business_input_hash_version, business_input_hash
 		  FROM (
@@ -1559,22 +1774,23 @@ func (store *EngineStore) RecoverTradingState(
 		return engine.State{}, fmt.Errorf("iterate shard %d replay: %w", shardID, rowsErr)
 	}
 	rows.Close()
-	state, err = store.replayCommittedFaults(ctx, state, receipts)
+	state, err = replayCommittedFaults(ctx, querier, state, receipts)
 	if err != nil {
 		return engine.State{}, err
 	}
-	if err := verifyRecoveredCheckpoint(ctx, store.pool, state); err != nil {
+	if err := verifyRecoveredCheckpoint(ctx, querier, state); err != nil {
 		return engine.State{}, err
 	}
 	return state, nil
 }
 
-func (store *EngineStore) replayCommittedFaults(
+func replayCommittedFaults(
 	ctx context.Context,
+	querier postgresQuerier,
 	state engine.State,
 	receipts *engine.MemoryReceiptIndex,
 ) (engine.State, error) {
-	rows, err := store.pool.Query(ctx, `
+	rows, err := querier.Query(ctx, `
 		SELECT envelope, supplied_action, error_kind, error_detail,
 		       resulting_state_hash
 		  FROM engine.shard_faults
@@ -1668,13 +1884,13 @@ func (store *EngineStore) replayCommittedFaults(
 
 func verifyRecoveredCheckpoint(
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	querier postgresQuerier,
 	state engine.State,
 ) error {
 	var sequence uint64
 	var ready bool
 	var stateHash []byte
-	err := pool.QueryRow(ctx, `
+	err := querier.QueryRow(ctx, `
 		SELECT next_stream_sequence, ready, state_hash
 		  FROM engine.shard_checkpoints
 		 WHERE shard_id = $1`,

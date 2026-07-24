@@ -156,10 +156,10 @@ type Publisher struct {
 	js publishAPI
 }
 
-// ErrUnorderedCommandPublication rejects engine commands that bypassed the
-// PostgreSQL account-ordered outbox claim.
-var ErrUnorderedCommandPublication = errors.New(
-	"engine command publication lacks ordered outbox claim",
+// ErrUnauthorizedEngineInputPublication rejects engine inputs that did not
+// cross a producer-specific PostgreSQL authority boundary.
+var ErrUnauthorizedEngineInputPublication = errors.New(
+	"engine input publication lacks authorized producer claim",
 )
 
 // NewPublisher constructs a PostgreSQL outbox-compatible JetStream publisher.
@@ -175,11 +175,12 @@ func (publisher *Publisher) Publish(
 	if publisher == nil || publisher.js == nil {
 		return 0, errors.New("publish JetStream message: publisher is not configured")
 	}
-	if isEngineCommandSubject(message.Subject) &&
-		!message.HasOrderedCommandClaim() {
+	if isEngineInputSubject(message.Subject) &&
+		(!isEngineCommandSubject(message.Subject) ||
+			!message.HasOrderedCommandClaim()) {
 		return 0, fmt.Errorf(
 			"%w: %s",
-			ErrUnorderedCommandPublication,
+			ErrUnauthorizedEngineInputPublication,
 			message.MessageID,
 		)
 	}
@@ -204,6 +205,13 @@ func (publisher *Publisher) Publish(
 		)
 	}
 	return ack.Sequence, nil
+}
+
+func isEngineInputSubject(subject string) bool {
+	parts := strings.Split(subject, ".")
+	return len(parts) >= 3 &&
+		parts[0] == "engine" &&
+		parts[1] == "input"
 }
 
 func isEngineCommandSubject(subject string) bool {

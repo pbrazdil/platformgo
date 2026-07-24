@@ -42,25 +42,38 @@ func TestPublisherUsesStableOutboxMessageIDAndWaitsForAck(t *testing.T) {
 	}
 }
 
-func TestPublisherRejectsUnclaimedEngineCommand(t *testing.T) {
-	api := &publishProbe{ack: &jetstream.PubAck{
-		Stream:   EngineInputsStream + "_7",
-		Sequence: 1,
-	}}
-	publisher := &Publisher{js: api}
-	_, err := publisher.Publish(
-		context.Background(),
-		platformpostgres.OutboxMessage{
-			MessageID: engine.IDFromSequence(engine.ID{}, 92),
-			Subject:   "engine.input.7.command.v1",
-			Payload:   []byte(`{"kind":"command"}`),
-		},
-	)
-	if !errors.Is(err, ErrUnorderedCommandPublication) {
-		t.Fatalf("Publish error = %v, want ErrUnorderedCommandPublication", err)
-	}
-	if api.subject != "" {
-		t.Fatalf("unordered command reached transport subject %q", api.subject)
+func TestPublisherRejectsEngineInputWithoutProducerAuthority(t *testing.T) {
+	for _, subject := range []string{
+		"engine.input.7.command.v1",
+		"engine.input.7.market.hyperliquid.v1",
+		"engine.input.7.timer.v1",
+		"engine.input.7.config.v1",
+		"engine.input.7.control.v1",
+	} {
+		t.Run(subject, func(t *testing.T) {
+			api := &publishProbe{ack: &jetstream.PubAck{
+				Stream:   EngineInputsStream + "_7",
+				Sequence: 1,
+			}}
+			publisher := &Publisher{js: api}
+			_, err := publisher.Publish(
+				context.Background(),
+				platformpostgres.OutboxMessage{
+					MessageID: engine.IDFromSequence(engine.ID{}, 92),
+					Subject:   subject,
+					Payload:   []byte(`{"kind":"forged"}`),
+				},
+			)
+			if !errors.Is(err, ErrUnauthorizedEngineInputPublication) {
+				t.Fatalf(
+					"Publish error = %v, want ErrUnauthorizedEngineInputPublication",
+					err,
+				)
+			}
+			if api.subject != "" {
+				t.Fatalf("unauthorized engine input reached transport subject %q", api.subject)
+			}
+		})
 	}
 }
 

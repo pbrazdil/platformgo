@@ -14,7 +14,6 @@ import (
 	gonats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	platformnats "github.com/upcomers-org/platformgo/internal/adapters/nats"
-	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	"github.com/upcomers-org/platformgo/internal/engine"
 )
 
@@ -57,27 +56,30 @@ func TestJetStreamReconnectPreservesShardStream(t *testing.T) {
 	if err := platformnats.EnsureEngineShardStream(ctx, js, 12, limits); err != nil {
 		t.Fatalf("EnsureEngineShardStream: %v", err)
 	}
-	publisher := platformnats.NewPublisher(js)
-	firstSequence, err := publisher.Publish(ctx, platformpostgres.OutboxMessage{
-		MessageID: engine.IDFromSequence(engine.ID{}, 141),
-		Subject:   "engine.input.12.control.v1",
-		Payload:   []byte(`{"probe":"before-restart"}`),
-	})
-	if err != nil || firstSequence != 1 {
-		t.Fatalf("first publish = sequence %d error %v", firstSequence, err)
+	firstID := engine.IDFromSequence(engine.ID{}, 141)
+	firstAck, err := js.Publish(
+		ctx,
+		"engine.input.12.control.v1",
+		[]byte(`{"probe":"before-restart"}`),
+		jetstream.WithMsgID(firstID.String()),
+	)
+	if err != nil || firstAck.Sequence != 1 {
+		t.Fatalf("first publish = acknowledgment %+v error %v", firstAck, err)
 	}
 
 	stopNATSServer(server)
 	server = startNATSServer(t, serverBinary, storeDirectory, port)
 	waitForNATSStatus(t, connection, gonats.CONNECTED)
 
-	secondSequence, err := publisher.Publish(ctx, platformpostgres.OutboxMessage{
-		MessageID: engine.IDFromSequence(engine.ID{}, 142),
-		Subject:   "engine.input.12.control.v1",
-		Payload:   []byte(`{"probe":"after-restart"}`),
-	})
-	if err != nil || secondSequence != 2 {
-		t.Fatalf("second publish = sequence %d error %v", secondSequence, err)
+	secondID := engine.IDFromSequence(engine.ID{}, 142)
+	secondAck, err := js.Publish(
+		ctx,
+		"engine.input.12.control.v1",
+		[]byte(`{"probe":"after-restart"}`),
+		jetstream.WithMsgID(secondID.String()),
+	)
+	if err != nil || secondAck.Sequence != 2 {
+		t.Fatalf("second publish = acknowledgment %+v error %v", secondAck, err)
 	}
 }
 

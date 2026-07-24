@@ -2,10 +2,12 @@ package nats
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	"github.com/upcomers-org/platformgo/internal/engine"
@@ -141,6 +143,10 @@ func (processor *EngineProcessor) Handle(
 	if processor == nil || processor.store == nil {
 		return errors.New("process engine input: processor is not configured")
 	}
+	if err := processor.ownership.Check(ctx); err != nil {
+		processor.transportReady = false
+		return fmt.Errorf("process engine input: %w", err)
+	}
 	if !processor.transportReady {
 		return fmt.Errorf(
 			"%w: shard %d transport is halted",
@@ -157,7 +163,8 @@ func (processor *EngineProcessor) Handle(
 				processor.state,
 				input,
 				action,
-				err,
+				malformedTransportError(inbound, err),
+				processor.ownership,
 			)
 			if haltErr == nil {
 				processor.state = halted
@@ -165,8 +172,19 @@ func (processor *EngineProcessor) Handle(
 			processor.transportReady = false
 			return errors.Join(err, haltErr)
 		}
+		halted, haltErr := processor.store.HaltTradingInput(
+			ctx,
+			processor.state,
+			malformedTransportInput(processor.state.ShardID(), inbound),
+			engine.TradingAction{},
+			malformedTransportError(inbound, err),
+			processor.ownership,
+		)
+		if haltErr == nil {
+			processor.state = halted
+		}
 		processor.transportReady = false
-		return err
+		return errors.Join(err, haltErr)
 	}
 	if input.ShardID != processor.state.ShardID() {
 		return fmt.Errorf(
@@ -180,11 +198,47 @@ func (processor *EngineProcessor) Handle(
 		processor.state,
 		input,
 		action,
-		platformpostgres.ApplyOptions{},
+		platformpostgres.ApplyOptions{Ownership: processor.ownership},
 	)
 	processor.state = next
 	processor.transportReady = next.Ready()
 	return err
+}
+
+func malformedTransportInput(
+	shardID engine.ShardID,
+	inbound InboundMessage,
+) engine.InputEnvelope {
+	bodyHash := sha256.Sum256(inbound.Data)
+	payload, _ := engine.EncodeTradingAction(engine.TradingAction{})
+	return engine.InputEnvelope{
+		InputID:              inbound.MessageID,
+		SchemaVersion:        engine.CurrentSchemaVersion,
+		ShardID:              shardID,
+		Kind:                 engine.InputKindControl,
+		SourceID:             fmt.Sprintf("transport-envelope:%x", bodyHash),
+		SourceSequence:       inbound.StreamSequence,
+		StreamSequence:       inbound.StreamSequence,
+		LogicalTime:          engine.NewLogicalTime(time.Unix(0, 0).UTC()),
+		ConfigurationVersion: 0,
+		InstrumentVersion:    0,
+		Payload:              payload,
+	}
+}
+
+func malformedTransportError(inbound InboundMessage, decodeErr error) error {
+	headerError := ""
+	if inbound.MessageIDError != nil {
+		headerError = inbound.MessageIDError.Error()
+	}
+	return fmt.Errorf(
+		"%w [subject=%q body_sha256=%x message_id=%s header_error=%q]",
+		decodeErr,
+		inbound.Subject,
+		sha256.Sum256(inbound.Data),
+		inbound.MessageID,
+		headerError,
+	)
 }
 
 // State returns the current single-owner value for readiness and testing.
@@ -197,7 +251,16 @@ func (processor *EngineProcessor) State() engine.State {
 
 // Ready reports both durable engine readiness and transport-envelope readiness.
 func (processor *EngineProcessor) Ready() bool {
-	return processor != nil && processor.transportReady && processor.state.Ready()
+	if processor == nil || !processor.transportReady || !processor.state.Ready() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := processor.ownership.Check(ctx); err != nil {
+		processor.transportReady = false
+		return false
+	}
+	return true
 }
 
 // Close releases the process-lifetime single-writer ownership.

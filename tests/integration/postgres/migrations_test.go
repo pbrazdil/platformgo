@@ -32,6 +32,7 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 	for _, relation := range []string{
 		"engine.schema_migrations",
 		"engine.account_shards",
+		"engine.shard_ownership_epochs",
 		"engine.shard_checkpoints",
 		"engine.input_receipts",
 		"engine.duplicate_delivery_receipts",
@@ -625,6 +626,13 @@ func TestFinalBaselineRejectsUnsafeRuntimeRoleAttributes(t *testing.T) {
 			name:    "role creation capability",
 			unsafe:  "ALTER ROLE platformgo_projector CREATEROLE",
 			restore: "ALTER ROLE platformgo_projector NOCREATEROLE",
+		},
+		{
+			name: "privileged role membership",
+			unsafe: `
+				GRANT platformgo_engine TO platformgo_api`,
+			restore: `
+				REVOKE platformgo_engine FROM platformgo_api`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

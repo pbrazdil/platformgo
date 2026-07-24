@@ -23,6 +23,11 @@ BEGIN
                AND NOT rolcreaterole
                AND NOT rolreplication
                AND NOT rolbypassrls
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM pg_auth_members AS membership
+                    WHERE membership.member = pg_roles.oid
+               )
         ) THEN
             RAISE EXCEPTION
                 'required pre-provisioned runtime role % is missing or unsafe',
@@ -140,6 +145,12 @@ CREATE TABLE engine.account_shards (
 CREATE TRIGGER account_shards_are_immutable
 BEFORE UPDATE OR DELETE ON engine.account_shards
 FOR EACH ROW EXECUTE FUNCTION engine.reject_immutable_change();
+
+CREATE TABLE engine.shard_ownership_epochs (
+    shard_id bigint PRIMARY KEY CHECK (shard_id >= 0),
+    epoch bigint NOT NULL CHECK (epoch > 0),
+    acquired_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
 
 CREATE TABLE trading.idempotency_records (
     scope text NOT NULL CHECK (scope <> ''),
@@ -466,6 +477,11 @@ GRANT SELECT, INSERT ON
     engine.duplicate_delivery_receipts
 TO platformgo_engine;
 GRANT SELECT ON engine.account_shards TO platformgo_engine;
+GRANT SELECT, INSERT ON engine.shard_ownership_epochs TO platformgo_engine;
+GRANT UPDATE (
+    epoch,
+    acquired_at
+) ON engine.shard_ownership_epochs TO platformgo_engine;
 GRANT SELECT ON trading.commands TO platformgo_engine;
 GRANT UPDATE (
     status,

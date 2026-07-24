@@ -10,7 +10,6 @@ import (
 	gonats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	platformnats "github.com/upcomers-org/platformgo/internal/adapters/nats"
-	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	"github.com/upcomers-org/platformgo/internal/engine"
 )
 
@@ -45,21 +44,29 @@ func TestJetStreamDuplicatePublishAndCommittedRedelivery(t *testing.T) {
 		t.Fatalf("EnsureEngineShardStream: %v", err)
 	}
 
-	publisher := platformnats.NewPublisher(js)
 	messageID := engine.IDFromSequence(engine.ID{}, 101)
-	message := platformpostgres.OutboxMessage{
-		MessageID: messageID,
-		Subject:   "engine.input.7.control.v1",
-		Payload:   []byte(`{"kind":"probe"}`),
-	}
-	firstSequence, err := publisher.Publish(ctx, message)
+	subject := "engine.input.7.control.v1"
+	payload := []byte(`{"kind":"probe"}`)
+	firstAck, err := js.Publish(
+		ctx,
+		subject,
+		payload,
+		jetstream.WithMsgID(messageID.String()),
+	)
 	if err != nil {
 		t.Fatalf("first Publish: %v", err)
 	}
-	secondSequence, err := publisher.Publish(ctx, message)
+	secondAck, err := js.Publish(
+		ctx,
+		subject,
+		payload,
+		jetstream.WithMsgID(messageID.String()),
+	)
 	if err != nil {
 		t.Fatalf("duplicate Publish: %v", err)
 	}
+	firstSequence := firstAck.Sequence
+	secondSequence := secondAck.Sequence
 	if firstSequence != secondSequence {
 		t.Fatalf(
 			"duplicate publish sequences = %d and %d",
@@ -156,19 +163,21 @@ func TestEngineInputStreamRejectsNewMessagesAtCapacity(t *testing.T) {
 	); err != nil {
 		t.Fatalf("EnsureEngineShardStream: %v", err)
 	}
-	publisher := platformnats.NewPublisher(js)
-	first := platformpostgres.OutboxMessage{
-		MessageID: engine.IDFromSequence(engine.ID{}, 131),
-		Subject:   "engine.input.13.control.v1",
-		Payload:   []byte(`{"kind":"first"}`),
-	}
-	if _, err := publisher.Publish(ctx, first); err != nil {
+	subject := "engine.input.13.control.v1"
+	if _, err := js.Publish(
+		ctx,
+		subject,
+		[]byte(`{"kind":"first"}`),
+		jetstream.WithMsgID(engine.IDFromSequence(engine.ID{}, 131).String()),
+	); err != nil {
 		t.Fatalf("first Publish: %v", err)
 	}
-	second := first
-	second.MessageID = engine.IDFromSequence(engine.ID{}, 132)
-	second.Payload = []byte(`{"kind":"second"}`)
-	if _, err := publisher.Publish(ctx, second); err == nil {
+	if _, err := js.Publish(
+		ctx,
+		subject,
+		[]byte(`{"kind":"second"}`),
+		jetstream.WithMsgID(engine.IDFromSequence(engine.ID{}, 132).String()),
+	); err == nil {
 		t.Fatal("capacity-exceeding publish unexpectedly succeeded")
 	}
 }
