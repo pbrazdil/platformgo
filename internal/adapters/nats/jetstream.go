@@ -25,6 +25,7 @@ const (
 // rejected so a deployment cannot silently inherit unsafe server defaults.
 type StreamLimits struct {
 	Replicas        int
+	MaxMessages     int64
 	MaxBytes        int64
 	MaxMessageBytes int32
 	MaxAge          time.Duration
@@ -42,6 +43,7 @@ func EnsureStreams(
 		return errors.New("ensure streams: JetStream is required")
 	}
 	if limits.Replicas < 1 ||
+		limits.MaxMessages <= 0 ||
 		limits.MaxBytes <= 0 ||
 		limits.MaxMessageBytes <= 0 ||
 		limits.MaxAge <= 0 ||
@@ -89,6 +91,7 @@ func EnsureEngineShardStream(
 		return errors.New("ensure engine shard stream: JetStream is required")
 	}
 	if limits.Replicas < 1 ||
+		limits.MaxMessages <= 0 ||
 		limits.MaxBytes <= 0 ||
 		limits.MaxMessageBytes <= 0 ||
 		limits.MaxAge <= 0 ||
@@ -125,7 +128,7 @@ func streamConfig(
 		Description:       description,
 		Subjects:          subjects,
 		Retention:         jetstream.LimitsPolicy,
-		MaxMsgs:           -1,
+		MaxMsgs:           limits.MaxMessages,
 		MaxBytes:          limits.MaxBytes,
 		Discard:           jetstream.DiscardNew,
 		MaxAge:            limits.MaxAge,

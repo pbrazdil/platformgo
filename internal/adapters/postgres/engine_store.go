@@ -25,6 +25,7 @@ const (
 	// back together before the transaction becomes externally visible.
 	FailpointAfterPersistBeforeCommit = "postgres.after_persist_before_commit"
 	engineWriterLockNamespace         = 0x50474f45
+	engineOwnerLockNamespace          = 0x50474f4f
 )
 
 type faultSet interface {
@@ -41,9 +42,76 @@ type EngineStore struct {
 	pool *pgxpool.Pool
 }
 
+// ShardOwnership holds the lifetime singleton lock for one active engine
+// process. Close must be called during orderly shutdown.
+type ShardOwnership struct {
+	connection *pgxpool.Conn
+	shardID    engine.ShardID
+}
+
 // NewEngineStore binds the durable coordinator to PostgreSQL.
 func NewEngineStore(pool *pgxpool.Pool) *EngineStore {
 	return &EngineStore{pool: pool}
+}
+
+// AcquireShardOwnership fails immediately when another process owns the shard.
+// The dedicated PostgreSQL session retains the lock until Close.
+func (store *EngineStore) AcquireShardOwnership(
+	ctx context.Context,
+	shardID engine.ShardID,
+) (*ShardOwnership, error) {
+	if store == nil || store.pool == nil {
+		return nil, errors.New("acquire shard ownership: PostgreSQL pool is required")
+	}
+	connection, err := store.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire shard %d ownership connection: %w", shardID, err)
+	}
+	var acquired bool
+	if err := connection.QueryRow(
+		ctx,
+		"SELECT pg_try_advisory_lock($1, $2)",
+		engineOwnerLockNamespace,
+		int64(shardID),
+	).Scan(&acquired); err != nil {
+		connection.Release()
+		return nil, fmt.Errorf("acquire shard %d ownership lock: %w", shardID, err)
+	}
+	if !acquired {
+		connection.Release()
+		return nil, fmt.Errorf("%w: shard %d process ownership", ErrWriterConflict, shardID)
+	}
+	return &ShardOwnership{connection: connection, shardID: shardID}, nil
+}
+
+// Close releases the process-lifetime shard ownership lock.
+func (ownership *ShardOwnership) Close(ctx context.Context) error {
+	if ownership == nil || ownership.connection == nil {
+		return nil
+	}
+	connection := ownership.connection
+	ownership.connection = nil
+	defer connection.Release()
+	var released bool
+	if err := connection.QueryRow(
+		context.WithoutCancel(ctx),
+		"SELECT pg_advisory_unlock($1, $2)",
+		engineOwnerLockNamespace,
+		int64(ownership.shardID),
+	).Scan(&released); err != nil {
+		return fmt.Errorf(
+			"release shard %d ownership lock: %w",
+			ownership.shardID,
+			err,
+		)
+	}
+	if !released {
+		return fmt.Errorf(
+			"release shard %d ownership lock: lock was not held",
+			ownership.shardID,
+		)
+	}
+	return nil
 }
 
 // ApplyTrading commits the receipt, normalized state, balanced ledger,

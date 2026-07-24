@@ -166,8 +166,9 @@ func decodeInputKind(kind string) (engine.InputKind, error) {
 // EngineProcessor is the single-owner bridge from one shard pull consumer into
 // the PostgreSQL transaction and deterministic core.
 type EngineProcessor struct {
-	store *platformpostgres.EngineStore
-	state engine.State
+	store     *platformpostgres.EngineStore
+	ownership *platformpostgres.ShardOwnership
+	state     engine.State
 }
 
 // NewEngineProcessor restores the PostgreSQL-authoritative shard state before
@@ -180,11 +181,24 @@ func NewEngineProcessor(
 	if store == nil {
 		return nil, errors.New("create engine processor: store is required")
 	}
+	ownership, err := store.AcquireShardOwnership(ctx, shardID)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"create engine processor: acquire shard %d ownership: %w",
+			shardID,
+			err,
+		)
+	}
 	state, err := store.RecoverTradingState(ctx, shardID)
 	if err != nil {
+		_ = ownership.Close(context.WithoutCancel(ctx))
 		return nil, fmt.Errorf("create engine processor: recover shard %d: %w", shardID, err)
 	}
-	return &EngineProcessor{store: store, state: state}, nil
+	return &EngineProcessor{
+		store:     store,
+		ownership: ownership,
+		state:     state,
+	}, nil
 }
 
 // Handle applies and commits one message. The processor advances its local
@@ -224,4 +238,12 @@ func (processor *EngineProcessor) State() engine.State {
 		return engine.State{}
 	}
 	return processor.state
+}
+
+// Close releases the process-lifetime single-writer ownership.
+func (processor *EngineProcessor) Close(ctx context.Context) error {
+	if processor == nil {
+		return nil
+	}
+	return processor.ownership.Close(ctx)
 }

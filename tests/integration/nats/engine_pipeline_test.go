@@ -3,6 +3,7 @@ package nats_test
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,6 +55,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	}
 	limits := platformnats.StreamLimits{
 		Replicas:        1,
+		MaxMessages:     10_000,
 		MaxBytes:        64 << 20,
 		MaxMessageBytes: 1 << 20,
 		MaxAge:          time.Hour,
@@ -144,6 +146,9 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEngineProcessor: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = processor.Close(context.Background())
+	})
 	consumer, err := platformnats.NewEnginePullConsumer(
 		ctx,
 		js,
@@ -193,10 +198,23 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 		)
 	}
 
+	if _, err := platformnats.NewEngineProcessor(
+		ctx,
+		engineStore,
+		9,
+	); !errors.Is(err, platformpostgres.ErrWriterConflict) {
+		t.Fatalf("second active processor error = %v, want ErrWriterConflict", err)
+	}
+	if err := processor.Close(ctx); err != nil {
+		t.Fatalf("close first engine processor: %v", err)
+	}
 	restarted, err := platformnats.NewEngineProcessor(ctx, engineStore, 9)
 	if err != nil {
 		t.Fatalf("restart NewEngineProcessor: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = restarted.Close(context.Background())
+	})
 	if restarted.State().Hash() != processor.State().Hash() ||
 		restarted.State().NextStreamSequence() != 2 {
 		t.Fatalf(

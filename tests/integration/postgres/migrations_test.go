@@ -108,6 +108,61 @@ func TestMigratorTracksChecksumsAndRejectsHistoryDrift(t *testing.T) {
 	}
 }
 
+func TestMigratorUpgradesDurableExecutionFoundationForwardOnly(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+
+	migrationDirectory := filepath.Join("..", "..", "..", "migrations")
+	baselineName := "20260724000100_durable_execution_foundation.up.sql"
+	baseline, err := os.ReadFile(filepath.Join(migrationDirectory, baselineName))
+	if err != nil {
+		t.Fatalf("read baseline migration: %v", err)
+	}
+	if err := platformpostgres.NewMigrator(pool, fstest.MapFS{
+		baselineName: {Data: baseline},
+	}).Migrate(context.Background()); err != nil {
+		t.Fatalf("apply baseline migration: %v", err)
+	}
+	var faultTableBefore bool
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT to_regclass('engine.shard_faults') IS NOT NULL",
+	).Scan(&faultTableBefore); err != nil {
+		t.Fatalf("inspect pre-upgrade schema: %v", err)
+	}
+	if faultTableBefore {
+		t.Fatal("future shard fault table exists before forward upgrade")
+	}
+
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(migrationDirectory),
+	).Migrate(context.Background()); err != nil {
+		t.Fatalf("upgrade durable schema: %v", err)
+	}
+	var faultTableAfter bool
+	var migrationCount int
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT to_regclass('engine.shard_faults') IS NOT NULL",
+	).Scan(&faultTableAfter); err != nil {
+		t.Fatalf("inspect upgraded schema: %v", err)
+	}
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT count(*) FROM engine.schema_migrations",
+	).Scan(&migrationCount); err != nil {
+		t.Fatalf("count applied migrations: %v", err)
+	}
+	if !faultTableAfter || migrationCount != 4 {
+		t.Fatalf(
+			"upgraded schema = fault table %t, migrations %d, want true and 4",
+			faultTableAfter,
+			migrationCount,
+		)
+	}
+}
+
 func postgresPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 

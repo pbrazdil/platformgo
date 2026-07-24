@@ -32,6 +32,7 @@ func TestJetStreamDuplicatePublishAndCommittedRedelivery(t *testing.T) {
 	defer cancel()
 	limits := platformnats.StreamLimits{
 		Replicas:        1,
+		MaxMessages:     10_000,
 		MaxBytes:        64 << 20,
 		MaxMessageBytes: 1 << 20,
 		MaxAge:          time.Hour,
@@ -121,5 +122,53 @@ func TestJetStreamDuplicatePublishAndCommittedRedelivery(t *testing.T) {
 		delivered.StreamSequence != firstSequence ||
 		delivered.NumDelivered < 2 {
 		t.Fatalf("redelivered message = %+v", delivered)
+	}
+}
+
+func TestEngineInputStreamRejectsNewMessagesAtCapacity(t *testing.T) {
+	url := os.Getenv("PLATFORMGO_TEST_NATS_URL")
+	if url == "" {
+		t.Skip("PLATFORMGO_TEST_NATS_URL is required for NATS integration tests")
+	}
+	connection, err := gonats.Connect(url)
+	if err != nil {
+		t.Fatalf("connect NATS: %v", err)
+	}
+	t.Cleanup(connection.Close)
+	js, err := jetstream.New(connection)
+	if err != nil {
+		t.Fatalf("create JetStream context: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := platformnats.EnsureEngineShardStream(
+		ctx,
+		js,
+		13,
+		platformnats.StreamLimits{
+			Replicas:        1,
+			MaxMessages:     1,
+			MaxBytes:        1 << 20,
+			MaxMessageBytes: 1 << 10,
+			MaxAge:          time.Hour,
+			DuplicateWindow: time.Minute,
+		},
+	); err != nil {
+		t.Fatalf("EnsureEngineShardStream: %v", err)
+	}
+	publisher := platformnats.NewPublisher(js)
+	first := platformpostgres.OutboxMessage{
+		MessageID: engine.IDFromSequence(engine.ID{}, 131),
+		Subject:   "engine.input.13.command.v1",
+		Payload:   []byte(`{"kind":"first"}`),
+	}
+	if _, err := publisher.Publish(ctx, first); err != nil {
+		t.Fatalf("first Publish: %v", err)
+	}
+	second := first
+	second.MessageID = engine.IDFromSequence(engine.ID{}, 132)
+	second.Payload = []byte(`{"kind":"second"}`)
+	if _, err := publisher.Publish(ctx, second); err == nil {
+		t.Fatal("capacity-exceeding publish unexpectedly succeeded")
 	}
 }
