@@ -35,6 +35,7 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 		"trading.orders",
 		"trading.fills",
 		"trading.positions",
+		"market.books",
 		"ledger.transactions",
 		"ledger.entries",
 		"ledger.balances",
