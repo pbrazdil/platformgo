@@ -30,6 +30,7 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 		"engine.schema_migrations",
 		"engine.shard_checkpoints",
 		"engine.input_receipts",
+		"engine.duplicate_delivery_receipts",
 		"engine.shard_faults",
 		"trading.idempotency_records",
 		"trading.commands",
@@ -59,6 +60,7 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 	assertReceiptIdentityConstraints(t, pool)
 	assertLedgerBalanceConstraint(t, pool)
 	assertImmutableLedgerFacts(t, pool)
+	assertAPIRoleCannotMutateEconomicTables(t, pool)
 }
 
 func TestMigratorTracksChecksumsAndRejectsHistoryDrift(t *testing.T) {
@@ -154,11 +156,42 @@ func TestMigratorUpgradesDurableExecutionFoundationForwardOnly(t *testing.T) {
 	).Scan(&migrationCount); err != nil {
 		t.Fatalf("count applied migrations: %v", err)
 	}
-	if !faultTableAfter || migrationCount != 4 {
+	if !faultTableAfter || migrationCount != 7 {
 		t.Fatalf(
-			"upgraded schema = fault table %t, migrations %d, want true and 4",
+			"upgraded schema = fault table %t, migrations %d, want true and 7",
 			faultTableAfter,
 			migrationCount,
+		)
+	}
+}
+
+func assertAPIRoleCannotMutateEconomicTables(
+	t *testing.T,
+	pool *pgxpool.Pool,
+) {
+	t.Helper()
+	var canInsertCommand bool
+	var canUpdateBalance bool
+	if err := pool.QueryRow(context.Background(), `
+		SELECT
+			has_table_privilege(
+				'platformgo_api',
+				'trading.commands',
+				'INSERT'
+			),
+			has_table_privilege(
+				'platformgo_api',
+				'ledger.balances',
+				'UPDATE'
+			)`,
+	).Scan(&canInsertCommand, &canUpdateBalance); err != nil {
+		t.Fatalf("inspect API role privileges: %v", err)
+	}
+	if !canInsertCommand || canUpdateBalance {
+		t.Fatalf(
+			"API privileges = insert command %t update balance %t",
+			canInsertCommand,
+			canUpdateBalance,
 		)
 	}
 }
@@ -202,9 +235,11 @@ func assertReceiptIdentityConstraints(t *testing.T, pool *pgxpool.Pool) {
 	const insertReceipt = `
 		INSERT INTO engine.input_receipts (
 			shard_id, input_id, stream_sequence, schema_version,
-			input_hash_version, input_hash, decision_hash_version,
+			input_hash_version, input_hash, business_input_hash,
+			decision_hash_version,
 			decision_hash, resulting_state_hash, envelope, decision
-		) VALUES (7, $1, $2, 1, 1, decode(repeat('01', 32), 'hex'), 2,
+		) VALUES (7, $1, $2, 1, 1, decode(repeat('01', 32), 'hex'),
+		          decode(repeat('04', 32), 'hex'), 2,
 		          decode(repeat('02', 32), 'hex'), decode(repeat('03', 32), 'hex'),
 		          '{}'::jsonb, '{}'::jsonb)`
 	inputID := "019f9460-4b36-4e9b-8f44-682611f7ee01"

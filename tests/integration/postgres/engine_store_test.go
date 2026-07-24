@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,6 +158,35 @@ func TestEngineStoreCommitsReceiptLedgerStateAndCheckpointAtomically(t *testing.
 	assertRowCount(t, pool, "ledger.transactions", 2)
 	assertRowCount(t, pool, "ledger.entries", 4)
 
+	republishedInput := depositInput
+	republishedInput.StreamSequence = state.NextStreamSequence()
+	republishedState, republishedDecision, duplicate, err := store.ApplyTrading(
+		context.Background(),
+		state,
+		republishedInput,
+		deposit,
+		platformpostgres.ApplyOptions{},
+	)
+	if err != nil || !duplicate {
+		t.Fatalf(
+			"re-published duplicate = duplicate %t error %v",
+			duplicate,
+			err,
+		)
+	}
+	if republishedDecision.DuplicateOfDecisionHash != depositDecision.DecisionHash ||
+		republishedState.NextStreamSequence() != state.NextStreamSequence()+1 {
+		t.Fatalf(
+			"re-published decision/state = %+v / next %d",
+			republishedDecision,
+			republishedState.NextStreamSequence(),
+		)
+	}
+	state = republishedState
+	assertRowCount(t, pool, "engine.duplicate_delivery_receipts", 1)
+	assertRowCount(t, pool, "ledger.transactions", 2)
+	assertRowCount(t, pool, "ledger.entries", 4)
+
 	recovered, err := store.RecoverTradingState(context.Background(), 7)
 	if err != nil {
 		t.Fatalf("RecoverTradingState: %v", err)
@@ -213,6 +243,186 @@ func TestEngineStoreCommitsReceiptLedgerStateAndCheckpointAtomically(t *testing.
 			recoveredHalted.Hash(),
 			halted.Ready(),
 			halted.Hash(),
+		)
+	}
+	report, err := store.ReconcileShard(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("ReconcileShard: %v", err)
+	}
+	if report.ReceiptCount != 5 ||
+		report.DuplicateDeliveryCount != 1 ||
+		report.NextStreamSequence != 7 ||
+		report.Ready {
+		t.Fatalf("reconciliation report = %+v", report)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE ledger.balances
+		   SET total = 16, free = 16, equity = 16
+		 WHERE account_id = 'account-1' AND currency = 'USDC'`,
+	); err != nil {
+		t.Fatalf("tamper balance projection: %v", err)
+	}
+	if _, err := store.ReconcileShard(
+		context.Background(),
+		7,
+	); !errors.Is(err, platformpostgres.ErrReconciliationMismatch) {
+		t.Fatalf(
+			"tampered reconciliation error = %v, want ErrReconciliationMismatch",
+			err,
+		)
+	}
+}
+
+func TestEngineStorePersistsOrdersFillsPositionsAndEvents(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	store := platformpostgres.NewEngineStore(pool)
+	state := engine.NewState(8)
+	ids := testkit.NewShardIDSequence(8)
+	clock := testkit.NewManualClock(
+		engine.NewLogicalTime(time.Date(2026, time.July, 24, 13, 0, 0, 0, time.UTC)),
+	)
+	state, _, _, _ = applyStoredTrading(t, store, state, ids, clock, engine.TradingAction{
+		Kind: engine.TradingActionConfigureInstrument,
+		ConfigureInstrument: &engine.ConfigureInstrument{
+			InstrumentID:            "BTC-PERP",
+			Revision:                1,
+			PriceScale:              2,
+			QuantityScale:           3,
+			SettlementCurrency:      "USDC",
+			SettlementCurrencyScale: 2,
+			InitialMarginRate:       "0.1",
+			MaintenanceMarginRate:   "0.05",
+			MaxLeverage:             "10",
+			MakerFeeRate:            "0",
+			TakerFeeRate:            "0",
+		},
+	}, platformpostgres.ApplyOptions{})
+	state, _, _, _ = applyStoredTrading(t, store, state, ids, clock, engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "account-1",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	}, platformpostgres.ApplyOptions{})
+	state, _, _, _ = applyStoredTrading(t, store, state, ids, clock, engine.TradingAction{
+		Kind: engine.TradingActionAdjustBalance,
+		AdjustBalance: &engine.AdjustBalance{
+			AccountID:     "account-1",
+			Currency:      "USDC",
+			CurrencyScale: 2,
+			Operation:     engine.BalanceOperationDeposit,
+			Amount:        "1000",
+		},
+	}, platformpostgres.ApplyOptions{})
+	state, _, _, _ = applyStoredTrading(t, store, state, ids, clock, engine.TradingAction{
+		Kind: engine.TradingActionUpdateBook,
+		UpdateBook: &engine.UpdateBook{
+			InstrumentID: "BTC-PERP",
+			MarkPrice:    "100",
+			Bids:         []engine.BookLevel{{Price: "99", Quantity: "10"}},
+			Asks:         []engine.BookLevel{{Price: "100", Quantity: "10"}},
+		},
+	}, platformpostgres.ApplyOptions{})
+
+	orderID := engine.IDFromSequence(engine.ID{}, 801)
+	var orderInput engine.InputEnvelope
+	var orderDecision engine.Decision
+	state, orderDecision, orderInput, _ = applyStoredTrading(
+		t,
+		store,
+		state,
+		ids,
+		clock,
+		engine.TradingAction{
+			Kind: engine.TradingActionSubmitOrder,
+			SubmitOrder: &engine.SubmitOrder{
+				OrderID:      orderID,
+				AccountID:    "account-1",
+				InstrumentID: "BTC-PERP",
+				Side:         engine.SideBuy,
+				Type:         engine.OrderTypeMarket,
+				TimeInForce:  engine.TimeInForceIOC,
+				Quantity:     "1",
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	if len(orderDecision.Fills) != 1 ||
+		len(orderDecision.PositionChanges) != 1 ||
+		len(orderDecision.Events) == 0 {
+		t.Fatalf("order decision = %+v", orderDecision)
+	}
+	assertRowCount(t, pool, "trading.orders", 1)
+	assertRowCount(t, pool, "trading.fills", 1)
+	assertRowCount(t, pool, "trading.positions", 1)
+	assertRowCount(t, pool, "messaging.outbox", len(orderDecision.Events))
+	var eventSubject string
+	var envelopeMessageID string
+	if err := pool.QueryRow(context.Background(), `
+		SELECT subject, payload ->> 'messageId'
+		  FROM messaging.outbox
+		 ORDER BY created_at, message_id
+		 LIMIT 1`,
+	).Scan(&eventSubject, &envelopeMessageID); err != nil {
+		t.Fatalf("read event outbox envelope: %v", err)
+	}
+	if !strings.HasPrefix(eventSubject, "domain.v1.") ||
+		envelopeMessageID != orderDecision.Events[0].EventID.String() {
+		t.Fatalf(
+			"event outbox = subject %q message ID %q",
+			eventSubject,
+			envelopeMessageID,
+		)
+	}
+
+	duplicate, _, duplicateFound, err := store.ApplyTrading(
+		context.Background(),
+		state,
+		orderInput,
+		engine.TradingAction{
+			Kind: engine.TradingActionSubmitOrder,
+			SubmitOrder: &engine.SubmitOrder{
+				OrderID:      orderID,
+				AccountID:    "account-1",
+				InstrumentID: "BTC-PERP",
+				Side:         engine.SideBuy,
+				Type:         engine.OrderTypeMarket,
+				TimeInForce:  engine.TimeInForceIOC,
+				Quantity:     "1",
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	if err != nil || !duplicateFound || duplicate.Hash() != state.Hash() {
+		t.Fatalf(
+			"duplicate order = found %t hash %s error %v",
+			duplicateFound,
+			duplicate.Hash(),
+			err,
+		)
+	}
+	assertRowCount(t, pool, "trading.fills", 1)
+	assertRowCount(t, pool, "messaging.outbox", len(orderDecision.Events))
+
+	recovered, err := store.RecoverTradingState(context.Background(), 8)
+	if err != nil {
+		t.Fatalf("RecoverTradingState: %v", err)
+	}
+	if recovered.Hash() != state.Hash() ||
+		len(recovered.FillsForOrder(orderID)) != 1 ||
+		len(recovered.OpenPositions("account-1")) != 1 {
+		t.Fatalf(
+			"recovered order state = hash %s fills %d positions %d",
+			recovered.Hash(),
+			len(recovered.FillsForOrder(orderID)),
+			len(recovered.OpenPositions("account-1")),
 		)
 	}
 }
@@ -289,10 +499,20 @@ func assertRowCount(t *testing.T, pool queryRower, relation string, want int) {
 		query = "SELECT count(*) FROM engine.input_receipts"
 	case "engine.shard_faults":
 		query = "SELECT count(*) FROM engine.shard_faults"
+	case "engine.duplicate_delivery_receipts":
+		query = "SELECT count(*) FROM engine.duplicate_delivery_receipts"
 	case "ledger.transactions":
 		query = "SELECT count(*) FROM ledger.transactions"
 	case "ledger.entries":
 		query = "SELECT count(*) FROM ledger.entries"
+	case "trading.orders":
+		query = "SELECT count(*) FROM trading.orders"
+	case "trading.fills":
+		query = "SELECT count(*) FROM trading.fills"
+	case "trading.positions":
+		query = "SELECT count(*) FROM trading.positions"
+	case "messaging.outbox":
+		query = "SELECT count(*) FROM messaging.outbox"
 	default:
 		t.Fatalf("unsupported row-count relation %q", relation)
 	}

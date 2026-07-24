@@ -74,6 +74,42 @@ func TestReceiptIndexRejectsConflictingIdentity(t *testing.T) {
 	}
 }
 
+func TestRepublishedBusinessInputAdvancesSequenceWithoutEconomicEffects(t *testing.T) {
+	first := testInput(t, 1)
+	state, originalDecision, err := Apply(NewState(7), first)
+	if err != nil {
+		t.Fatalf("first Apply: %v", err)
+	}
+	original := NewReceipt(first, originalDecision)
+	republished := first
+	republished.StreamSequence = 2
+
+	next, duplicateDecision, err := ApplyDuplicateDelivery(
+		state,
+		republished,
+		original,
+	)
+	if err != nil {
+		t.Fatalf("ApplyDuplicateDelivery: %v", err)
+	}
+	if next.NextStreamSequence() != 3 ||
+		next.Hash() == state.Hash() ||
+		duplicateDecision.DuplicateOfDecisionHash != originalDecision.DecisionHash {
+		t.Fatalf(
+			"duplicate delivery = next %d state %s decision %+v",
+			next.NextStreamSequence(),
+			next.Hash(),
+			duplicateDecision,
+		)
+	}
+	if len(duplicateDecision.LedgerChanges) != 0 ||
+		len(duplicateDecision.Fills) != 0 ||
+		len(duplicateDecision.Events) != 0 ||
+		len(duplicateDecision.BalanceChanges) != 0 {
+		t.Fatalf("duplicate delivery emitted effects: %+v", duplicateDecision)
+	}
+}
+
 func TestDecisionHashBindsPreviousStateAndCanonicalEffects(t *testing.T) {
 	input := testInput(t, 1)
 	left := NewState(7)
@@ -182,9 +218,9 @@ func TestKernelHashGoldenVectors(t *testing.T) {
 	}{
 		{name: "initial state", got: state.Hash(), want: "6685cbadc498da804da2b0f316b0b598ff43f501672c619c248330380e1496ab"},
 		{name: "input", got: decision.InputHash, want: "03c13213415db9db34fd61e86021074bf078552c47218ffa054313c6a86c1e2b"},
-		{name: "effects", got: decision.EffectsHash, want: "377035ddfbebd315b0877447de9b719c5ed0774d46bb91670b5fec6e6be1f5d0"},
-		{name: "decision", got: decision.DecisionHash, want: "732d760984540b245d8deb82c7961b2461323a94611b8f0a128da6746932d399"},
-		{name: "accepted state", got: next.Hash(), want: "64b7bca66af248c0a976de5a54de25fcfede732e0e25c7be6c4ae034dd8c9e0e"},
+		{name: "effects", got: decision.EffectsHash, want: "1a6d7a5957c2bc6f2f4fe77a1d184a6b5d8bf4420aa296ebdabf6756bfe48f75"},
+		{name: "decision", got: decision.DecisionHash, want: "cf0e84ad5edfcca4a891b0831b202c5ec93a68cfda62960fffd280cd89ed99b0"},
+		{name: "accepted state", got: next.Hash(), want: "456d87bb496db7c6e94a446e0dfacd617bc45281044a5d95f1ef6a9daf5c9b2d"},
 		{name: "halted state", got: halted.Hash(), want: "cd748e998b0582ad13540b96e0bb5682faa9f10b636ef7e2c3c15ea384771565"},
 		{name: "negative logical time", got: hashInput(negativeTime), want: "c803b3138c8db07c468b249391405f394d1942207eecaebbfa1e621a52b2fa26"},
 		{name: "empty payload", got: hashInput(emptyPayload), want: "59837e1266e78dd508ae139143de7e4f23bb8d848698982be96131910a40b54b"},

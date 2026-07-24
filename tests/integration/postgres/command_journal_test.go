@@ -73,13 +73,24 @@ func TestCommandJournalRejectsConflictsAndReplaysCompletedResponse(t *testing.T)
 
 	completion := platformpostgres.CompleteCommandRequest{
 		CommandID: commandID,
-		Status:    platformpostgres.CommandCompleted,
-		Result:    []byte(`{"balance":"10"}`),
+		Status:    platformpostgres.CommandAccepted,
+		Result:    []byte(`{"Status":"accepted","Reason":""}`),
 		Response: platformpostgres.StoredResponse{
 			Status:  201,
 			Headers: []byte(`{"content-type":["application/json"]}`),
 			Body:    []byte(`{"balance":"10"}`),
 		},
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE trading.commands
+		   SET status = 'accepted',
+		       result = $2,
+		       completed_at = clock_timestamp()
+		 WHERE command_id = $1`,
+		commandID.String(),
+		completion.Result,
+	); err != nil {
+		t.Fatalf("simulate committed engine result: %v", err)
 	}
 	if err := journal.Complete(context.Background(), completion); err != nil {
 		t.Fatalf("Complete: %v", err)

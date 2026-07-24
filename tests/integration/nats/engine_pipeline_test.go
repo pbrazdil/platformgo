@@ -224,4 +224,177 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 			processor.State().Hash(),
 		)
 	}
+
+	duplicateLimits := limits
+	duplicateLimits.DuplicateWindow = 100 * time.Millisecond
+	if err := platformnats.EnsureEngineShardStream(
+		ctx,
+		js,
+		10,
+		duplicateLimits,
+	); err != nil {
+		t.Fatalf("EnsureEngineShardStream duplicate probe: %v", err)
+	}
+	duplicateAction := engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "duplicate-account",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	}
+	duplicatePayload, err := engine.EncodeTradingAction(duplicateAction)
+	if err != nil {
+		t.Fatalf("EncodeTradingAction duplicate probe: %v", err)
+	}
+	duplicateInputID := engine.IDFromSequence(engine.ID{}, 122)
+	duplicateTransport, err := platformnats.EncodeEngineInputMessage(
+		engine.InputEnvelope{
+			InputID:              duplicateInputID,
+			SchemaVersion:        engine.CurrentSchemaVersion,
+			ShardID:              10,
+			Kind:                 engine.InputKindCommand,
+			SourceID:             "duplicate-probe",
+			SourceSequence:       1,
+			LogicalTime:          engine.NewLogicalTime(logicalTime),
+			ConfigurationVersion: 1,
+			InstrumentVersion:    1,
+			Payload:              duplicatePayload,
+		},
+	)
+	if err != nil {
+		t.Fatalf("EncodeEngineInputMessage duplicate probe: %v", err)
+	}
+	duplicateMessage := platformpostgres.OutboxMessage{
+		MessageID: duplicateInputID,
+		Subject:   "engine.input.10.command.v1",
+		Payload:   duplicateTransport,
+	}
+	firstDuplicateSequence, err := platformnats.NewPublisher(js).Publish(
+		ctx,
+		duplicateMessage,
+	)
+	if err != nil {
+		t.Fatalf("publish duplicate probe first copy: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	secondDuplicateSequence, err := platformnats.NewPublisher(js).Publish(
+		ctx,
+		duplicateMessage,
+	)
+	if err != nil {
+		t.Fatalf("publish duplicate probe beyond window: %v", err)
+	}
+	if secondDuplicateSequence == firstDuplicateSequence {
+		t.Fatal("duplicate probe was still inside the server deduplication window")
+	}
+
+	duplicateProcessor, err := platformnats.NewEngineProcessor(ctx, engineStore, 10)
+	if err != nil {
+		t.Fatalf("NewEngineProcessor duplicate probe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = duplicateProcessor.Close(context.Background())
+	})
+	duplicateConsumer, err := platformnats.NewEnginePullConsumer(
+		ctx,
+		js,
+		10,
+		"engine-shard-10-duplicate-probe",
+		time.Second,
+	)
+	if err != nil {
+		t.Fatalf("NewEnginePullConsumer duplicate probe: %v", err)
+	}
+	for delivery := 1; delivery <= 2; delivery++ {
+		processed, err := duplicateConsumer.ProcessOne(ctx, duplicateProcessor.Handle)
+		if err != nil || !processed {
+			t.Fatalf(
+				"duplicate delivery %d = processed %t error %v",
+				delivery,
+				processed,
+				err,
+			)
+		}
+	}
+	var businessReceipts int
+	var duplicateReceipts int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM engine.input_receipts
+		 WHERE shard_id = 10`,
+	).Scan(&businessReceipts); err != nil {
+		t.Fatalf("count duplicate-probe business receipts: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM engine.duplicate_delivery_receipts
+		 WHERE shard_id = 10`,
+	).Scan(&duplicateReceipts); err != nil {
+		t.Fatalf("count duplicate delivery receipts: %v", err)
+	}
+	if businessReceipts != 1 ||
+		duplicateReceipts != 1 ||
+		duplicateProcessor.State().NextStreamSequence() != 3 {
+		t.Fatalf(
+			"beyond-window duplicate = business %d duplicate %d next %d",
+			businessReceipts,
+			duplicateReceipts,
+			duplicateProcessor.State().NextStreamSequence(),
+		)
+	}
+
+	if err := platformnats.EnsureEngineShardStream(
+		ctx,
+		js,
+		11,
+		limits,
+	); err != nil {
+		t.Fatalf("EnsureEngineShardStream poison probe: %v", err)
+	}
+	poisonID := engine.IDFromSequence(engine.ID{}, 123)
+	if _, err := platformnats.NewPublisher(js).Publish(
+		ctx,
+		platformpostgres.OutboxMessage{
+			MessageID: poisonID,
+			Subject:   "engine.input.11.command.v1",
+			Payload:   []byte(`{"unknown":"transport-envelope"}`),
+		},
+	); err != nil {
+		t.Fatalf("publish poison probe: %v", err)
+	}
+	poisonProcessor, err := platformnats.NewEngineProcessor(ctx, engineStore, 11)
+	if err != nil {
+		t.Fatalf("NewEngineProcessor poison probe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = poisonProcessor.Close(context.Background())
+	})
+	poisonConsumer, err := platformnats.NewEnginePullConsumer(
+		ctx,
+		js,
+		11,
+		"engine-shard-11-poison-probe",
+		time.Second,
+	)
+	if err != nil {
+		t.Fatalf("NewEnginePullConsumer poison probe: %v", err)
+	}
+	processed, err = poisonConsumer.ProcessOne(ctx, poisonProcessor.Handle)
+	if !processed || err == nil {
+		t.Fatalf("poison delivery = processed %t error %v", processed, err)
+	}
+	if poisonProcessor.Ready() {
+		t.Fatal("poison transport envelope left processor ready")
+	}
+	var poisonReceipts int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM engine.input_receipts
+		 WHERE shard_id = 11`,
+	).Scan(&poisonReceipts); err != nil {
+		t.Fatalf("count poison-probe receipts: %v", err)
+	}
+	if poisonReceipts != 0 {
+		t.Fatalf("poison envelope produced %d business receipts", poisonReceipts)
+	}
 }
