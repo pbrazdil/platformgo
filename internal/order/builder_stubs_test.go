@@ -32,9 +32,9 @@ func TestOrderBuilderPreservesConfiguredContingencyType(t *testing.T) {
 		Instrument("AUDUSD.SIM").
 		Quantity(decimal.MustQuantity("1")).
 		Price(decimal.MustPrice("1")).
-		Contingency(ContingencyTypeOto).
+		Contingency(ContingencyTypeOTO).
 		Build()
-	if order.ContingencyType != ContingencyTypeOto || !order.IsContingency() {
+	if order.ContingencyType != ContingencyTypeOTO || !order.IsContingency() {
 		t.Fatalf("contingency = %v/%v", order.ContingencyType, order.IsContingency())
 	}
 }
