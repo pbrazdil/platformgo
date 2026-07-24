@@ -96,6 +96,7 @@ const (
 	RejectionOrderTerminal      RejectionReason = "order_terminal"
 	RejectionInsufficientMarket RejectionReason = "insufficient_market"
 	RejectionDuplicateOrderID   RejectionReason = "duplicate_order_id"
+	RejectionSlippageExceeded   RejectionReason = "slippage_exceeded"
 )
 
 // CommandResult records whether a valid envelope produced or rejected a
@@ -133,22 +134,24 @@ type BookLevel struct {
 // UpdateBook atomically replaces the deterministic L2 snapshot.
 type UpdateBook struct {
 	InstrumentID string      `json:"instrumentId"`
+	MarkPrice    string      `json:"markPrice,omitempty"`
 	Bids         []BookLevel `json:"bids"`
 	Asks         []BookLevel `json:"asks"`
 }
 
 // SubmitOrder creates one order with a caller-supplied stable identity.
 type SubmitOrder struct {
-	OrderID      ID          `json:"orderId"`
-	AccountID    string      `json:"accountId"`
-	InstrumentID string      `json:"instrumentId"`
-	Side         Side        `json:"side"`
-	Type         OrderType   `json:"type"`
-	TimeInForce  TimeInForce `json:"timeInForce"`
-	Quantity     string      `json:"quantity"`
-	Price        string      `json:"price,omitempty"`
-	TriggerPrice string      `json:"triggerPrice,omitempty"`
-	ReduceOnly   bool        `json:"reduceOnly"`
+	OrderID        ID          `json:"orderId"`
+	AccountID      string      `json:"accountId"`
+	InstrumentID   string      `json:"instrumentId"`
+	Side           Side        `json:"side"`
+	Type           OrderType   `json:"type"`
+	TimeInForce    TimeInForce `json:"timeInForce"`
+	Quantity       string      `json:"quantity"`
+	Price          string      `json:"price,omitempty"`
+	TriggerPrice   string      `json:"triggerPrice,omitempty"`
+	ReduceOnly     bool        `json:"reduceOnly"`
+	MaxSlippageBPS *uint32     `json:"maxSlippageBps,omitempty"`
 }
 
 // AmendOrder changes the exact price and quantity of a working order.
@@ -185,26 +188,31 @@ type InstrumentSnapshot struct {
 // BookSnapshot is the canonical price-sorted market state.
 type BookSnapshot struct {
 	InstrumentID string
+	MarkPrice    string
 	Bids         []BookLevel
 	Asks         []BookLevel
 }
 
 // OrderSnapshot is the immutable query representation of one order version.
 type OrderSnapshot struct {
-	OrderID          ID
-	AccountID        string
-	InstrumentID     string
-	Side             Side
-	Type             OrderType
-	TimeInForce      TimeInForce
-	Status           OrderStatus
-	Quantity         string
-	FilledQuantity   string
-	AverageFillPrice string
-	Price            string
-	TriggerPrice     string
-	ReduceOnly       bool
-	Version          uint64
+	OrderID           ID
+	AccountID         string
+	InstrumentID      string
+	Side              Side
+	Type              OrderType
+	TimeInForce       TimeInForce
+	Status            OrderStatus
+	Quantity          string
+	FilledQuantity    string
+	AverageFillPrice  string
+	Price             string
+	TriggerPrice      string
+	ReduceOnly        bool
+	HasSlippageBand   bool
+	MaxSlippageBPS    uint32
+	SlippageReference string
+	RejectReason      RejectionReason
+	Version           uint64
 }
 
 // FillSnapshot is one exact, stable execution fact.

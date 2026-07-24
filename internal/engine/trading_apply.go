@@ -164,6 +164,15 @@ func newBookRecord(
 	instrument domain.InstrumentRevision,
 	update UpdateBook,
 ) (bookRecord, error) {
+	var markPrice domain.Price
+	hasMark := update.MarkPrice != ""
+	if hasMark {
+		var err error
+		markPrice, err = domain.NewPrice(update.MarkPrice, instrument)
+		if err != nil || markPrice.Decimal().Sign() <= 0 {
+			return bookRecord{}, fmt.Errorf("invalid mark price")
+		}
+	}
 	bids, err := newLevelRecords(instrument, update.Bids)
 	if err != nil {
 		return bookRecord{}, err
@@ -184,6 +193,8 @@ func newBookRecord(
 	}
 	return bookRecord{
 		instrumentID: instrument.ID(),
+		markPrice:    markPrice,
+		hasMark:      hasMark,
 		bids:         bids,
 		asks:         asks,
 	}, nil
@@ -233,14 +244,38 @@ func submitTradingOrder(
 	if !ok {
 		return rejectedTradingDecision(state, RejectionInvalidOrder)
 	}
+	if order.hasSlippageBand {
+		book, exists := state.trading.book(submit.InstrumentID)
+		if !exists || !book.hasMark {
+			return rejectedTradingDecision(state, RejectionInsufficientMarket)
+		}
+		order.slippageReference = book.markPrice
+	}
 	state.trading = state.trading.clone()
 	state.trading.orders = append(state.trading.orders, order)
 	orderIndex := len(state.trading.orders) - 1
 
 	state, decision := acceptedTradingDecision(state)
 	if orderReadyToMatch(state.trading, state.trading.orders[orderIndex]) {
-		if !executeOrder(&state.trading, input, orderIndex, &decision) {
-			return rejectedTradingDecision(removeLastTradingOrder(state), RejectionInsufficientMarket)
+		if reason := executeOrder(&state.trading, input, orderIndex, &decision); reason != "" {
+			if reason == RejectionSlippageExceeded {
+				rejected := &state.trading.orders[orderIndex]
+				rejected.status = OrderStatusRejected
+				rejected.rejectReason = reason
+				rejected.version++
+				decision.CommandResult = CommandResult{
+					Status: CommandStatusRejected,
+					Reason: reason,
+				}
+				snapshot := rejected.snapshot()
+				decision.OrderChanges = append(decision.OrderChanges, snapshot)
+				decision.Events = append(
+					decision.Events,
+					orderEvent(input, snapshot, nextEventSequence(decision.Events)),
+				)
+				return state, decision
+			}
+			return rejectedTradingDecision(removeLastTradingOrder(state), reason)
 		}
 	}
 	snapshot := state.trading.orders[orderIndex].snapshot()
@@ -293,6 +328,10 @@ func newOrderRecord(
 		filledQuantity: filled,
 		reduceOnly:     submit.ReduceOnly,
 		version:        1,
+	}
+	if submit.MaxSlippageBPS != nil {
+		order.hasSlippageBand = true
+		order.maxSlippageBPS = *submit.MaxSlippageBPS
 	}
 
 	switch submit.Type {
@@ -367,181 +406,6 @@ func stopTriggered(book bookRecord, order orderRecord) bool {
 	}
 }
 
-func executeOrder(
-	state *tradingState,
-	input InputEnvelope,
-	orderIndex int,
-	decision *Decision,
-) bool {
-	candidate := state.clone()
-	order := &candidate.orders[orderIndex]
-	book, ok := candidate.book(order.instrument.ID())
-	if !ok {
-		return order.orderType != OrderTypeMarket
-	}
-
-	requiresFullFill := order.orderType == OrderTypeMarket ||
-		order.timeInForce == TimeInForceFOK
-	if requiresFullFill && !bookCanFill(*book, *order) {
-		if order.timeInForce == TimeInForceFOK {
-			order.status = OrderStatusCancelled
-			order.version++
-			*state = candidate
-			return true
-		}
-		return false
-	}
-
-	startFillCount := len(candidate.fills)
-	pricingBook := bookRecord{
-		instrumentID: book.instrumentID,
-		bids:         append([]levelRecord(nil), book.bids...),
-		asks:         append([]levelRecord(nil), book.asks...),
-	}
-	if !matchOrder(&pricingBook, order, input, &candidate.fills) {
-		return false
-	}
-	newFills := candidate.fills[startFillCount:]
-	if len(newFills) > 0 {
-		average, err := averageOrderFillPrice(candidate.fills, order.orderID)
-		if err != nil {
-			return false
-		}
-		order.averagePrice = average
-		order.hasAverage = true
-	}
-
-	switch {
-	case order.filledQuantity.Decimal().Equal(order.quantity.Decimal()):
-		order.status = OrderStatusFilled
-	case order.timeInForce == TimeInForceIOC:
-		order.status = OrderStatusCancelled
-	case order.filledQuantity.Decimal().Sign() > 0:
-		order.status = OrderStatusPartiallyFilled
-	default:
-		order.status = OrderStatusWorking
-	}
-	order.version++
-	*state = candidate
-	for _, fill := range newFills {
-		decision.Fills = append(decision.Fills, fill.snapshot())
-	}
-	return true
-}
-
-func bookCanFill(book bookRecord, order orderRecord) bool {
-	remaining := order.quantity.Decimal()
-	for _, level := range executableLevels(book, order.side) {
-		if !levelEligible(level, order) {
-			continue
-		}
-		var err error
-		remaining, err = remaining.Sub(level.quantity.Decimal())
-		if err != nil {
-			return false
-		}
-		if remaining.Sign() <= 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func executableLevels(book bookRecord, side Side) []levelRecord {
-	if side == SideBuy {
-		return book.asks
-	}
-	return book.bids
-}
-
-func levelEligible(level levelRecord, order orderRecord) bool {
-	if order.orderType == OrderTypeMarket || order.orderType == OrderTypeStopMarket {
-		return true
-	}
-	if order.side == SideBuy {
-		return level.price.Decimal().Cmp(order.price.Decimal()) <= 0
-	}
-	return level.price.Decimal().Cmp(order.price.Decimal()) >= 0
-}
-
-func matchOrder(
-	book *bookRecord,
-	order *orderRecord,
-	input InputEnvelope,
-	fills *[]fillRecord,
-) bool {
-	levels := &book.bids
-	if order.side == SideBuy {
-		levels = &book.asks
-	}
-	for levelIndex := 0; levelIndex < len(*levels); levelIndex++ {
-		level := &(*levels)[levelIndex]
-		if !levelEligible(*level, *order) {
-			break
-		}
-		remaining, err := order.quantity.Sub(order.filledQuantity)
-		if err != nil {
-			return false
-		}
-		if remaining.Decimal().IsZero() {
-			break
-		}
-		fillQuantity := remaining
-		if level.quantity.Decimal().Cmp(remaining.Decimal()) < 0 {
-			fillQuantity = level.quantity
-		}
-		order.filledQuantity, err = order.filledQuantity.Add(fillQuantity)
-		if err != nil {
-			return false
-		}
-		level.quantity, err = level.quantity.Sub(fillQuantity)
-		if err != nil {
-			return false
-		}
-		*fills = append(*fills, fillRecord{
-			fillID:      IDFromSequence(order.orderID, nextOrderFillSequence(*fills, order.orderID)),
-			orderID:     order.orderID,
-			accountID:   order.accountID,
-			instrument:  order.instrument,
-			side:        order.side,
-			price:       level.price,
-			quantity:    fillQuantity,
-			logicalTime: input.LogicalTime,
-		})
-	}
-	compacted := (*levels)[:0]
-	for _, level := range *levels {
-		if !level.quantity.Decimal().IsZero() {
-			compacted = append(compacted, level)
-		}
-	}
-	*levels = compacted
-	return true
-}
-
-func nextOrderFillSequence(fills []fillRecord, orderID ID) uint64 {
-	sequence := uint64(1)
-	for _, fill := range fills {
-		if fill.orderID == orderID {
-			sequence++
-		}
-	}
-	return sequence
-}
-
-func averageOrderFillPrice(fills []fillRecord, orderID ID) (domain.Price, error) {
-	var values []domain.PriceQuantity
-	for _, fill := range fills {
-		if fill.orderID == orderID {
-			values = append(values, domain.PriceQuantity{
-				Price:    fill.price,
-				Quantity: fill.quantity,
-			})
-		}
-	}
-	return domain.WeightedAveragePrice(values)
-}
-
 func matchWorkingOrders(
 	state *tradingState,
 	input InputEnvelope,
@@ -557,7 +421,20 @@ func matchWorkingOrders(
 			continue
 		}
 		beforeFills := len(decision.Fills)
-		if !executeOrder(state, input, index, decision) {
+		reason := executeOrder(state, input, index, decision)
+		if reason != "" {
+			if reason == RejectionSlippageExceeded {
+				order := &state.orders[index]
+				order.status = OrderStatusRejected
+				order.rejectReason = reason
+				order.version++
+				snapshot := order.snapshot()
+				decision.OrderChanges = append(decision.OrderChanges, snapshot)
+				decision.Events = append(
+					decision.Events,
+					orderEvent(input, snapshot, nextEventSequence(decision.Events)),
+				)
+			}
 			continue
 		}
 		if len(decision.Fills) > beforeFills ||
@@ -574,6 +451,7 @@ func amendTradingOrder(
 	input InputEnvelope,
 	amend AmendOrder,
 ) (State, Decision) {
+	originalState := state
 	index, ok := state.trading.orderIndex(amend.OrderID)
 	if !ok {
 		return rejectedTradingDecision(state, RejectionOrderNotFound)
@@ -604,8 +482,8 @@ func amendTradingOrder(
 	order.version++
 	state, decision := acceptedTradingDecision(state)
 	if orderReadyToMatch(state.trading, *order) {
-		if !executeOrder(&state.trading, input, index, &decision) {
-			return rejectedTradingDecision(state, RejectionInsufficientMarket)
+		if reason := executeOrder(&state.trading, input, index, &decision); reason != "" {
+			return rejectedTradingDecision(originalState, reason)
 		}
 	}
 	snapshot := state.trading.orders[index].snapshot()
