@@ -166,9 +166,10 @@ func decodeInputKind(kind string) (engine.InputKind, error) {
 // EngineProcessor is the single-owner bridge from one shard pull consumer into
 // the PostgreSQL transaction and deterministic core.
 type EngineProcessor struct {
-	store     *platformpostgres.EngineStore
-	ownership *platformpostgres.ShardOwnership
-	state     engine.State
+	store          *platformpostgres.EngineStore
+	ownership      *platformpostgres.ShardOwnership
+	state          engine.State
+	transportReady bool
 }
 
 // NewEngineProcessor restores the PostgreSQL-authoritative shard state before
@@ -195,9 +196,10 @@ func NewEngineProcessor(
 		return nil, fmt.Errorf("create engine processor: recover shard %d: %w", shardID, err)
 	}
 	return &EngineProcessor{
-		store:     store,
-		ownership: ownership,
-		state:     state,
+		store:          store,
+		ownership:      ownership,
+		state:          state,
+		transportReady: state.Ready(),
 	}, nil
 }
 
@@ -210,8 +212,16 @@ func (processor *EngineProcessor) Handle(
 	if processor == nil || processor.store == nil {
 		return errors.New("process engine input: processor is not configured")
 	}
+	if !processor.transportReady {
+		return fmt.Errorf(
+			"%w: shard %d transport is halted",
+			engine.ErrShardNotReady,
+			processor.state.ShardID(),
+		)
+	}
 	input, action, err := decodeEngineInputMessage(inbound)
 	if err != nil {
+		processor.transportReady = false
 		return err
 	}
 	if input.ShardID != processor.state.ShardID() {
@@ -229,6 +239,7 @@ func (processor *EngineProcessor) Handle(
 		platformpostgres.ApplyOptions{},
 	)
 	processor.state = next
+	processor.transportReady = next.Ready()
 	return err
 }
 
@@ -238,6 +249,11 @@ func (processor *EngineProcessor) State() engine.State {
 		return engine.State{}
 	}
 	return processor.state
+}
+
+// Ready reports both durable engine readiness and transport-envelope readiness.
+func (processor *EngineProcessor) Ready() bool {
+	return processor != nil && processor.transportReady && processor.state.Ready()
 }
 
 // Close releases the process-lifetime single-writer ownership.

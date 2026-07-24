@@ -331,20 +331,40 @@ func (journal *CommandJournal) Complete(
 		return ErrCommandCompletionConflict
 	}
 
-	commandTag, err := tx.Exec(ctx, `
-		UPDATE trading.commands
-		   SET status = $2,
-		       result = $3,
-		       completed_at = clock_timestamp()
-		 WHERE command_id = $1 AND status = 'pending'`,
+	var commandState string
+	var currentResult []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT status, result
+		  FROM trading.commands
+		 WHERE command_id = $1
+		 FOR UPDATE`,
 		request.CommandID.String(),
-		string(request.Status),
-		result,
-	)
-	if err != nil {
-		return fmt.Errorf("complete durable command: %w", err)
+	).Scan(&commandState, &currentResult); err != nil {
+		return fmt.Errorf("load durable command completion: %w", err)
 	}
-	if commandTag.RowsAffected() != 1 {
+	switch commandState {
+	case "pending":
+		if _, err := tx.Exec(ctx, `
+			UPDATE trading.commands
+			   SET status = $2,
+			       result = $3,
+			       completed_at = clock_timestamp()
+			 WHERE command_id = $1`,
+			request.CommandID.String(),
+			string(request.Status),
+			result,
+		); err != nil {
+			return fmt.Errorf("complete durable command: %w", err)
+		}
+	case string(request.Status):
+		canonicalCurrentResult, canonicalErr := canonicalJSON(currentResult)
+		if canonicalErr != nil {
+			return fmt.Errorf("decode durable command result: %w", canonicalErr)
+		}
+		if !bytes.Equal(canonicalCurrentResult, result) {
+			return ErrCommandCompletionConflict
+		}
+	default:
 		return ErrCommandCompletionConflict
 	}
 	if _, err := tx.Exec(ctx, `

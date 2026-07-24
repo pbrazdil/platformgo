@@ -147,9 +147,69 @@ func (store *EngineStore) ApplyTrading(
 	if checkpointErr := verifyCheckpoint(ctx, tx, state); checkpointErr != nil {
 		return state, engine.Decision{}, false, checkpointErr
 	}
+	deliveryDecision, deliveryFound, deliveryMatches, err := loadDuplicateDelivery(
+		ctx,
+		tx,
+		input,
+	)
+	if err != nil {
+		return state, engine.Decision{}, false, err
+	}
+	if deliveryFound && deliveryMatches {
+		return state, deliveryDecision, true, nil
+	}
 	receipts, err := loadRelevantReceipts(ctx, tx, input)
 	if err != nil {
 		return state, engine.Decision{}, false, err
+	}
+	if original, found := receipts.LookupByInputID(input.InputID); found &&
+		original.StreamSequence != input.StreamSequence {
+		next, decision, duplicateErr := engine.ApplyDuplicateDelivery(
+			state,
+			input,
+			original,
+		)
+		if duplicateErr != nil {
+			if next.Hash() != state.Hash() {
+				if faultErr := persistEngineFault(
+					ctx,
+					tx,
+					input,
+					action,
+					next,
+					duplicateErr,
+				); faultErr != nil {
+					return state, engine.Decision{}, false, faultErr
+				}
+				if checkpointErr := persistCheckpoint(ctx, tx, next); checkpointErr != nil {
+					return state, engine.Decision{}, false, checkpointErr
+				}
+				if commitErr := tx.Commit(ctx); commitErr != nil {
+					return state, engine.Decision{}, false, fmt.Errorf(
+						"commit duplicate-delivery fault: %w",
+						commitErr,
+					)
+				}
+			}
+			return next, decision, false, duplicateErr
+		}
+		if persistErr := persistDuplicateDelivery(ctx, tx, input, decision); persistErr != nil {
+			return state, engine.Decision{}, false, persistErr
+		}
+		if checkpointErr := persistCheckpoint(ctx, tx, next); checkpointErr != nil {
+			return state, engine.Decision{}, false, checkpointErr
+		}
+		if options.Faults != nil &&
+			options.Faults.Reached(FailpointAfterPersistBeforeCommit) {
+			return state, engine.Decision{}, false, ErrInjectedFault
+		}
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return state, engine.Decision{}, false, fmt.Errorf(
+				"commit duplicate delivery: %w",
+				commitErr,
+			)
+		}
+		return next, decision, true, nil
 	}
 
 	next, decision, err := engine.ApplyTradingWithReceipts(
@@ -287,7 +347,7 @@ func loadRelevantReceipts(
 	rows, err := tx.Query(
 		ctx,
 		`SELECT input_id::text, stream_sequence, schema_version,
-		        input_hash_version, input_hash, decision
+		        input_hash_version, input_hash, business_input_hash, decision
 		   FROM engine.input_receipts
 		  WHERE shard_id = $1
 		    AND (input_id = $2 OR stream_sequence = $3)
@@ -325,6 +385,7 @@ func scanReceipt(row rowScanner) (engine.Receipt, error) {
 	var inputIDText string
 	var receipt engine.Receipt
 	var inputHash []byte
+	var businessInputHash []byte
 	var decisionJSON []byte
 	if err := row.Scan(
 		&inputIDText,
@@ -332,6 +393,7 @@ func scanReceipt(row rowScanner) (engine.Receipt, error) {
 		&receipt.SchemaVersion,
 		&receipt.InputHashVersion,
 		&inputHash,
+		&businessInputHash,
 		&decisionJSON,
 	); err != nil {
 		return engine.Receipt{}, fmt.Errorf("scan durable receipt: %w", err)
@@ -348,10 +410,62 @@ func scanReceipt(row rowScanner) (engine.Receipt, error) {
 		)
 	}
 	copy(receipt.InputHash[:], inputHash)
+	if len(businessInputHash) != len(receipt.BusinessInputHash) {
+		return engine.Receipt{}, fmt.Errorf(
+			"durable receipt business input hash length = %d",
+			len(businessInputHash),
+		)
+	}
+	copy(receipt.BusinessInputHash[:], businessInputHash)
 	if err := json.Unmarshal(decisionJSON, &receipt.Decision); err != nil {
 		return engine.Receipt{}, fmt.Errorf("decode durable decision: %w", err)
 	}
 	return receipt, nil
+}
+
+func loadDuplicateDelivery(
+	ctx context.Context,
+	tx pgx.Tx,
+	input engine.InputEnvelope,
+) (engine.Decision, bool, bool, error) {
+	var inputIDText string
+	var inputHash []byte
+	var decisionJSON []byte
+	err := tx.QueryRow(ctx, `
+		SELECT input_id::text, input_hash, decision
+		  FROM engine.duplicate_delivery_receipts
+		 WHERE shard_id = $1 AND stream_sequence = $2`,
+		int64(input.ShardID),
+		input.StreamSequence,
+	).Scan(&inputIDText, &inputHash, &decisionJSON)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return engine.Decision{}, false, false, nil
+	}
+	if err != nil {
+		return engine.Decision{}, false, false, fmt.Errorf(
+			"load duplicate delivery receipt: %w",
+			err,
+		)
+	}
+	inputID, err := engine.ParseID(inputIDText)
+	if err != nil {
+		return engine.Decision{}, false, false, fmt.Errorf(
+			"parse duplicate delivery input ID: %w",
+			err,
+		)
+	}
+	var decision engine.Decision
+	if err := json.Unmarshal(decisionJSON, &decision); err != nil {
+		return engine.Decision{}, false, false, fmt.Errorf(
+			"decode duplicate delivery decision: %w",
+			err,
+		)
+	}
+	fingerprint := engine.InputHash(input)
+	matches := inputID == input.InputID &&
+		len(inputHash) == len(fingerprint) &&
+		string(inputHash) == string(fingerprint[:])
+	return decision, true, matches, nil
 }
 
 func persistDecision(
@@ -479,7 +593,7 @@ func persistDecision(
 	if err := persistPositions(ctx, tx, decision.PositionChanges); err != nil {
 		return err
 	}
-	return persistOutbox(ctx, tx, decision.Events)
+	return persistOutbox(ctx, tx, input, decision.Events)
 }
 
 func persistCommandResult(
@@ -711,11 +825,11 @@ func persistFills(
 			change.Quantity,
 			change.PositionID.String(),
 			string(change.PositionEffect),
-			change.RealizedPnL,
-			change.SettlementCurrency,
+			nullableText(change.RealizedPnL),
+			nullableText(change.SettlementCurrency),
 			string(change.LiquiditySide),
-			change.Fee,
-			change.FeeCurrency,
+			nullableText(change.Fee),
+			nullableText(change.FeeCurrency),
 			change.LogicalTime.String(),
 		); err != nil {
 			return fmt.Errorf("persist fill %s: %w", change.FillID, err)
@@ -768,10 +882,21 @@ func persistPositions(
 func persistOutbox(
 	ctx context.Context,
 	tx pgx.Tx,
+	input engine.InputEnvelope,
 	events []engine.DomainEvent,
 ) error {
 	for _, event := range events {
-		payload, err := json.Marshal(event)
+		payload, err := json.Marshal(domainEventEnvelope{
+			MessageID:        event.EventID.String(),
+			SchemaVersion:    engine.CurrentSchemaVersion,
+			Kind:             event.Kind,
+			CorrelationID:    input.InputID.String(),
+			CausationID:      input.InputID.String(),
+			AggregateID:      event.AggregateID.String(),
+			AggregateVersion: event.AggregateVersion,
+			LogicalTime:      event.LogicalTime.String(),
+			Payload:          event,
+		})
 		if err != nil {
 			return fmt.Errorf("encode event %s: %w", event.EventID, err)
 		}
@@ -780,7 +905,7 @@ func persistOutbox(
 				message_id, subject, schema_version, payload
 			) VALUES ($1,$2,$3,$4)`,
 			event.EventID.String(),
-			"domain."+event.Kind,
+			"domain.v1."+event.Kind,
 			engine.CurrentSchemaVersion,
 			payload,
 		); err != nil {
@@ -788,6 +913,18 @@ func persistOutbox(
 		}
 	}
 	return nil
+}
+
+type domainEventEnvelope struct {
+	MessageID        string             `json:"messageId"`
+	SchemaVersion    uint32             `json:"schemaVersion"`
+	Kind             string             `json:"kind"`
+	CorrelationID    string             `json:"correlationId"`
+	CausationID      string             `json:"causationId"`
+	AggregateID      string             `json:"aggregateId"`
+	AggregateVersion uint64             `json:"aggregateVersion"`
+	LogicalTime      string             `json:"logicalTime"`
+	Payload          engine.DomainEvent `json:"payload"`
 }
 
 type persistedEnvelope struct {
@@ -874,15 +1011,17 @@ func persistReceipt(
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO engine.input_receipts (
 			shard_id, input_id, stream_sequence, schema_version,
-			input_hash_version, input_hash, decision_hash_version,
+			input_hash_version, input_hash, business_input_hash,
+			decision_hash_version,
 			decision_hash, resulting_state_hash, envelope, decision
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 		int64(input.ShardID),
 		input.InputID.String(),
 		input.StreamSequence,
 		input.SchemaVersion,
 		decision.InputHashVersion,
 		hashBytes(decision.InputHash),
+		hashBytes(engine.BusinessInputHash(input)),
 		decision.DecisionHashVersion,
 		hashBytes(decision.DecisionHash),
 		hashBytes(decision.NextStateHash),
@@ -890,6 +1029,41 @@ func persistReceipt(
 		decisionJSON,
 	); err != nil {
 		return fmt.Errorf("persist input receipt %s: %w", input.InputID, err)
+	}
+	return nil
+}
+
+func persistDuplicateDelivery(
+	ctx context.Context,
+	tx pgx.Tx,
+	input engine.InputEnvelope,
+	decision engine.Decision,
+) error {
+	envelopeJSON, err := encodeEnvelope(input)
+	if err != nil {
+		return fmt.Errorf("encode duplicate delivery envelope: %w", err)
+	}
+	decisionJSON, err := json.Marshal(decision)
+	if err != nil {
+		return fmt.Errorf("encode duplicate delivery decision: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO engine.duplicate_delivery_receipts (
+			shard_id, stream_sequence, input_id, input_hash,
+			original_decision_hash, decision_hash, resulting_state_hash,
+			envelope, decision
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		int64(input.ShardID),
+		input.StreamSequence,
+		input.InputID.String(),
+		hashBytes(decision.InputHash),
+		hashBytes(decision.DuplicateOfDecisionHash),
+		hashBytes(decision.DecisionHash),
+		hashBytes(decision.NextStateHash),
+		envelopeJSON,
+		decisionJSON,
+	); err != nil {
+		return fmt.Errorf("persist duplicate delivery receipt: %w", err)
 	}
 	return nil
 }
@@ -975,9 +1149,26 @@ func (store *EngineStore) RecoverTradingState(
 		)
 	}
 	rows, err := store.pool.Query(ctx, `
-		SELECT envelope, decision_hash, resulting_state_hash
-		  FROM engine.input_receipts
-		 WHERE shard_id = $1
+		SELECT receipt_kind, envelope, decision_hash, resulting_state_hash
+		  FROM (
+			SELECT
+				'business'::text AS receipt_kind,
+				envelope,
+				decision_hash,
+				resulting_state_hash,
+				stream_sequence
+			  FROM engine.input_receipts
+			 WHERE shard_id = $1
+			UNION ALL
+			SELECT
+				'duplicate'::text AS receipt_kind,
+				envelope,
+				decision_hash,
+				resulting_state_hash,
+				stream_sequence
+			  FROM engine.duplicate_delivery_receipts
+			 WHERE shard_id = $1
+		  ) AS receipts
 		 ORDER BY stream_sequence`,
 		int64(shardID),
 	)
@@ -989,10 +1180,12 @@ func (store *EngineStore) RecoverTradingState(
 	state := engine.NewState(shardID)
 	receipts := engine.NewMemoryReceiptIndex()
 	for rows.Next() {
+		var receiptKind string
 		var envelopeJSON []byte
 		var storedDecisionHash []byte
 		var storedStateHash []byte
 		if scanErr := rows.Scan(
+			&receiptKind,
 			&envelopeJSON,
 			&storedDecisionHash,
 			&storedStateHash,
@@ -1003,12 +1196,38 @@ func (store *EngineStore) RecoverTradingState(
 		if decodeErr != nil {
 			return engine.State{}, decodeErr
 		}
-		next, decision, applyErr := engine.ApplyTradingWithReceipts(
-			state,
-			input,
-			action,
-			receipts,
-		)
+		var next engine.State
+		var decision engine.Decision
+		var applyErr error
+		switch receiptKind {
+		case "business":
+			next, decision, applyErr = engine.ApplyTradingWithReceipts(
+				state,
+				input,
+				action,
+				receipts,
+			)
+		case "duplicate":
+			original, found := receipts.LookupByInputID(input.InputID)
+			if !found {
+				return engine.State{}, fmt.Errorf(
+					"%w: shard %d duplicate sequence %d has no business receipt",
+					ErrCheckpointMismatch,
+					shardID,
+					input.StreamSequence,
+				)
+			}
+			next, decision, applyErr = engine.ApplyDuplicateDelivery(
+				state,
+				input,
+				original,
+			)
+		default:
+			return engine.State{}, fmt.Errorf(
+				"unknown durable receipt kind %q",
+				receiptKind,
+			)
+		}
 		if applyErr != nil {
 			return engine.State{}, fmt.Errorf(
 				"replay shard %d sequence %d: %w",
@@ -1026,8 +1245,10 @@ func (store *EngineStore) RecoverTradingState(
 				input.StreamSequence,
 			)
 		}
-		if recordErr := receipts.Record(engine.NewReceipt(input, decision)); recordErr != nil {
-			return engine.State{}, fmt.Errorf("record replay receipt: %w", recordErr)
+		if receiptKind == "business" {
+			if recordErr := receipts.Record(engine.NewReceipt(input, decision)); recordErr != nil {
+				return engine.State{}, fmt.Errorf("record replay receipt: %w", recordErr)
+			}
 		}
 		state = next
 	}
