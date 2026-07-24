@@ -53,6 +53,14 @@ func applyTradingAction(
 		return configureTradingInstrument(state, *action.ConfigureInstrument)
 	case TradingActionConfigureAccount:
 		return configureTradingAccount(state, *action.ConfigureAccount)
+	case TradingActionConfigureRisk:
+		return configureTradingRisk(state, *action.ConfigureRisk)
+	case TradingActionAdjustBalance:
+		return adjustTradingBalance(state, *action.AdjustBalance)
+	case TradingActionSettleFunding:
+		return settleTradingFunding(state, input, *action.SettleFunding)
+	case TradingActionLiquidateAccount:
+		return liquidateTradingAccount(state, input, *action.LiquidateAccount)
 	case TradingActionUpdateBook:
 		return updateTradingBook(state, input, *action.UpdateBook)
 	case TradingActionSubmitOrder:
@@ -71,6 +79,10 @@ func validTradingActionUnion(action TradingAction) bool {
 	for _, memberPresent := range []bool{
 		action.ConfigureInstrument != nil,
 		action.ConfigureAccount != nil,
+		action.ConfigureRisk != nil,
+		action.AdjustBalance != nil,
+		action.SettleFunding != nil,
+		action.LiquidateAccount != nil,
 		action.UpdateBook != nil,
 		action.SubmitOrder != nil,
 		action.AmendOrder != nil,
@@ -88,6 +100,14 @@ func validTradingActionUnion(action TradingAction) bool {
 		return action.ConfigureInstrument != nil
 	case TradingActionConfigureAccount:
 		return action.ConfigureAccount != nil
+	case TradingActionConfigureRisk:
+		return action.ConfigureRisk != nil
+	case TradingActionAdjustBalance:
+		return action.AdjustBalance != nil
+	case TradingActionSettleFunding:
+		return action.SettleFunding != nil
+	case TradingActionLiquidateAccount:
+		return action.LiquidateAccount != nil
 	case TradingActionUpdateBook:
 		return action.UpdateBook != nil
 	case TradingActionSubmitOrder:
@@ -120,6 +140,9 @@ func configureTradingInstrument(
 	state State,
 	configure ConfigureInstrument,
 ) (State, Decision) {
+	if state.trading.hasEconomicStateForInstrument(configure.InstrumentID) {
+		return rejectedTradingDecision(state, RejectionRiskConfigLocked)
+	}
 	revision, err := domain.NewInstrumentRevision(
 		configure.InstrumentID,
 		configure.Revision,
@@ -136,11 +159,26 @@ func configureTradingInstrument(
 	if err != nil {
 		return rejectedTradingDecision(state, RejectionInvalidInstrument)
 	}
+	initialMarginRate, err := domain.NewRate(configure.InitialMarginRate)
+	if err != nil || initialMarginRate.Decimal().Sign() < 0 {
+		return rejectedTradingDecision(state, RejectionInvalidInstrument)
+	}
+	maintenanceMarginRate, err := domain.NewRate(configure.MaintenanceMarginRate)
+	if err != nil || maintenanceMarginRate.Decimal().Sign() < 0 {
+		return rejectedTradingDecision(state, RejectionInvalidInstrument)
+	}
+	maxLeverage, err := domain.NewRatio(configure.MaxLeverage)
+	if err != nil || maxLeverage.Decimal().Sign() <= 0 {
+		return rejectedTradingDecision(state, RejectionInvalidInstrument)
+	}
 
 	state.trading = state.trading.clone()
 	state.trading.replaceInstrument(instrumentRecord{
-		revision:           revision,
-		settlementCurrency: settlementCurrency,
+		revision:              revision,
+		settlementCurrency:    settlementCurrency,
+		initialMarginRate:     initialMarginRate,
+		maintenanceMarginRate: maintenanceMarginRate,
+		maxLeverage:           maxLeverage,
 	})
 	state, decision := acceptedTradingDecision(state)
 	decision.InstrumentChanges = []InstrumentSnapshot{{
@@ -150,6 +188,9 @@ func configureTradingInstrument(
 		QuantityScale:           revision.QuantityScale(),
 		SettlementCurrency:      settlementCurrency.Code(),
 		SettlementCurrencyScale: settlementCurrency.Scale(),
+		InitialMarginRate:       initialMarginRate.Decimal().String(),
+		MaintenanceMarginRate:   maintenanceMarginRate.Decimal().String(),
+		MaxLeverage:             maxLeverage.Decimal().String(),
 	}}
 	return state, decision
 }
@@ -293,6 +334,9 @@ func submitTradingOrder(
 		order.slippageReference = book.markPrice
 	}
 	if reason := clampReduceOnlyOrder(state.trading, &order); reason != "" {
+		return rejectedTradingDecision(state, reason)
+	}
+	if reason := marginAdmissionReason(state.trading, order); reason != "" {
 		return rejectedTradingDecision(state, reason)
 	}
 	state.trading = state.trading.clone()

@@ -96,7 +96,23 @@ func applyFillsToPositions(
 			return err
 		}
 		fill.positionID = position.positionID
+		if err := refreshPositionMargin(state, position); err != nil {
+			return err
+		}
 		position.version++
+		if fill.hasRealizedPnL {
+			if err := state.applyBalanceDelta(position.accountID, fill.realizedPnL); err != nil {
+				return err
+			}
+			balance, ok := state.balanceSnapshot(
+				position.accountID,
+				position.settlementCurrency,
+			)
+			if !ok {
+				return fmt.Errorf("project position settlement balance")
+			}
+			decision.BalanceChanges = append(decision.BalanceChanges, balance)
+		}
 		snapshot := position.snapshot()
 		decision.PositionChanges = append(decision.PositionChanges, snapshot)
 		decision.Events = append(
@@ -145,6 +161,16 @@ func positionForFill(
 	if err != nil {
 		return 0, false, err
 	}
+	zeroCollateral, err := domain.NewMoney("0", instrument.settlementCurrency)
+	if err != nil {
+		return 0, false, err
+	}
+	risk := state.risk(order.accountID, instrument)
+	marginMode := risk.marginMode
+	if state.accountMode(order.accountID) == OmsModeHedging &&
+		marginMode == MarginModeIsolated {
+		marginMode = MarginModeCross
+	}
 	positionID := IDFromSequence(order.orderID, 0)
 	state.positions = append(state.positions, positionRecord{
 		positionID:         positionID,
@@ -156,8 +182,38 @@ func positionForFill(
 		quantity:           fill.quantity,
 		averageOpenPrice:   fill.price,
 		realizedPnL:        zeroRealized,
+		marginMode:         marginMode,
+		isolatedCollateral: zeroCollateral,
 	})
 	return len(state.positions) - 1, true, nil
+}
+
+func refreshPositionMargin(
+	state *tradingState,
+	position *positionRecord,
+) error {
+	zero, err := domain.NewMoney("0", position.settlementCurrency)
+	if err != nil {
+		return err
+	}
+	if position.status == PositionStatusClosed ||
+		position.marginMode != MarginModeIsolated {
+		position.isolatedCollateral = zero
+		return nil
+	}
+	instrument, ok := state.instrumentRecord(position.instrument.ID())
+	if !ok {
+		return fmt.Errorf("position risk instrument disappeared")
+	}
+	risk := state.risk(position.accountID, instrument)
+	position.isolatedCollateral, err = domain.PositionMargin(
+		position.averageOpenPrice,
+		position.quantity,
+		instrument.initialMarginRate,
+		risk.leverage,
+		position.settlementCurrency,
+	)
+	return err
 }
 
 func applyFillToPosition(position *positionRecord, fill *fillRecord) error {

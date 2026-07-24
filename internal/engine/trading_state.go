@@ -9,6 +9,10 @@ import (
 type tradingState struct {
 	instruments []instrumentRecord
 	accounts    []accountRecord
+	risks       []riskRecord
+	balances    []balanceRecord
+	funding     []fundingRecord
+	settlements []fundingSettlementRecord
 	books       []bookRecord
 	orders      []orderRecord
 	fills       []fillRecord
@@ -16,13 +20,47 @@ type tradingState struct {
 }
 
 type instrumentRecord struct {
-	revision           domain.InstrumentRevision
-	settlementCurrency domain.Currency
+	revision              domain.InstrumentRevision
+	settlementCurrency    domain.Currency
+	initialMarginRate     domain.Rate
+	maintenanceMarginRate domain.Rate
+	maxLeverage           domain.Ratio
 }
 
 type accountRecord struct {
 	accountID string
 	omsMode   OmsMode
+}
+
+type riskRecord struct {
+	accountID    string
+	instrumentID string
+	marginMode   MarginMode
+	leverage     domain.Ratio
+}
+
+type balanceRecord struct {
+	accountID string
+	total     domain.Money
+}
+
+type fundingRecord struct {
+	fundingID      ID
+	settlementID   ID
+	positionID     ID
+	accountID      string
+	instrument     domain.InstrumentRevision
+	signedQuantity string
+	oraclePrice    domain.Price
+	rate           domain.Rate
+	amount         domain.Money
+}
+
+type fundingSettlementRecord struct {
+	settlementID ID
+	instrument   domain.InstrumentRevision
+	oraclePrice  domain.Price
+	rate         domain.Rate
 }
 
 type bookRecord struct {
@@ -88,6 +126,8 @@ type positionRecord struct {
 	quantity           domain.Quantity
 	averageOpenPrice   domain.Price
 	realizedPnL        domain.Money
+	marginMode         MarginMode
+	isolatedCollateral domain.Money
 	version            uint64
 }
 
@@ -95,6 +135,10 @@ func (state tradingState) clone() tradingState {
 	cloned := tradingState{
 		instruments: append([]instrumentRecord(nil), state.instruments...),
 		accounts:    append([]accountRecord(nil), state.accounts...),
+		risks:       append([]riskRecord(nil), state.risks...),
+		balances:    append([]balanceRecord(nil), state.balances...),
+		funding:     append([]fundingRecord(nil), state.funding...),
+		settlements: append([]fundingSettlementRecord(nil), state.settlements...),
 		orders:      append([]orderRecord(nil), state.orders...),
 		fills:       append([]fillRecord(nil), state.fills...),
 		positions:   append([]positionRecord(nil), state.positions...),
@@ -343,6 +387,8 @@ func (position positionRecord) snapshot() PositionSnapshot {
 		AverageOpenPrice:   position.averageOpenPrice.Decimal().String(),
 		RealizedPnL:        position.realizedPnL.Decimal().String(),
 		SettlementCurrency: position.settlementCurrency.Code(),
+		MarginMode:         position.marginMode,
+		IsolatedCollateral: position.isolatedCollateral.Decimal().String(),
 		Version:            position.version,
 	}
 }
