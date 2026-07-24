@@ -2131,17 +2131,17 @@ nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/currenc
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/currency.rs,test_serialization_deserialization,583,,,unit,discovered,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/currency.rs,test_try_from_str_invalid,456,,,unit,discovered,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/currency.rs,test_try_from_str_valid,446,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,prop_checked_mul_div_fixed_avoids_u128_phantom_overflow,1934,internal/decimal/fixed_test.go,TestCheckedMulDivFixedAvoidsUint128PhantomOverflow,unit,ported-failing,"deterministic 4096-case property port"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,prop_checked_mul_div_fixed_avoids_u128_phantom_overflow,1934,internal/decimal/fixed_test.go,TestCheckedMulDivFixedAvoidsUint128PhantomOverflow,unit,ported-green,"deterministic 4096-case property port"
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,prop_checked_mul_div_fixed_avoids_u64_phantom_overflow,1909,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,prop_checked_mul_div_fixed_handles_remainders_after_u128_overflow,1942,internal/decimal/fixed_test.go,TestCheckedMulDivFixedHandlesRemaindersAfterUint128Overflow,unit,ported-failing,"deterministic 4096-case property port"
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,prop_checked_mul_div_fixed_is_commutative,1956,internal/decimal/fixed_test.go,TestCheckedMulDivFixedIsCommutative,unit,ported-failing,"deterministic 4096-case property port"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,prop_checked_mul_div_fixed_handles_remainders_after_u128_overflow,1942,internal/decimal/fixed_test.go,TestCheckedMulDivFixedHandlesRemaindersAfterUint128Overflow,unit,ported-green,"deterministic 4096-case property port"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,prop_checked_mul_div_fixed_is_commutative,1956,internal/decimal/fixed_test.go,TestCheckedMulDivFixedIsCommutative,unit,ported-green,"deterministic 4096-case property port"
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,prop_checked_mul_div_fixed_matches_u128_final_fit,1898,,,unit,discovered,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,prop_checked_mul_div_fixed_matches_u128_full_range,1885,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,prop_checked_mul_div_fixed_matches_u128_ordinary,1922,internal/decimal/fixed_test.go,TestCheckedMulDivFixedMatchesUint128Ordinary,unit,ported-failing,"deterministic 4096-case property port"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,prop_checked_mul_div_fixed_matches_u128_ordinary,1922,internal/decimal/fixed_test.go,TestCheckedMulDivFixedMatchesUint128Ordinary,unit,ported-green,"deterministic 4096-case property port"
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,prop_checked_mul_div_fixed_matches_u256_full_range,1972,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_bankers_round,1702,internal/decimal/fixed_test.go,TestBankersRound,unit,ported-failing,"i128 constants represented exactly with math/big.Int"
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_bankers_round_matches_decimal,1744,internal/decimal/fixed_test.go,TestBankersRoundMatchesDecimal,unit,ported-failing,"Rust Decimal cross-check replaced by direct exact Go Decimal assertion"
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_bankers_round_negative_symmetry,1722,internal/decimal/fixed_test.go,TestBankersRoundNegativeSymmetry,unit,ported-failing,
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_bankers_round,1702,internal/decimal/fixed_test.go,TestBankersRound,unit,ported-green,"i128 constants represented exactly with math/big.Int"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_bankers_round_matches_decimal,1744,internal/decimal/fixed_test.go,TestBankersRoundMatchesDecimal,unit,ported-green,"Rust Decimal cross-check replaced by direct exact Go Decimal assertion"
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_bankers_round_negative_symmetry,1722,internal/decimal/fixed_test.go,TestBankersRoundNegativeSymmetry,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_basic_roundtrip,917,,,unit,discovered,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_basic_roundtrip,1325,,,unit,discovered,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_check_fixed_precision_returns_typed_error_with_stable_display,1000,,,unit,discovered,
@@ -2158,12 +2158,12 @@ nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.r
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_check_fixed_raw_u64_at_max_precision,1565,,,unit,discovered,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_check_fixed_raw_u64_invalid,1560,,,unit,discovered,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_check_fixed_raw_u64_valid,1549,,,unit,discovered,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_checked_mul_div_fixed_exact_boundaries,1854,internal/decimal/fixed_test.go,TestCheckedMulDivFixedExactBoundaries,unit,ported-failing,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_correct_raw_i128,1830,internal/decimal/fixed_test.go,TestCorrectRawInt128,unit,ported-failing,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_correct_raw_i64,1810,internal/decimal/fixed_test.go,TestCorrectRawInt64,unit,ported-failing,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_correct_raw_identity_at_max_precision,1835,internal/decimal/fixed_test.go,TestCorrectRawIdentityAtMaxPrecision,unit,ported-failing,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_correct_raw_u128,1819,internal/decimal/fixed_test.go,TestCorrectRawUint128,unit,ported-failing,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_correct_raw_u64,1797,internal/decimal/fixed_test.go,TestCorrectRawUint64,unit,ported-failing,
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_checked_mul_div_fixed_exact_boundaries,1854,internal/decimal/fixed_test.go,TestCheckedMulDivFixedExactBoundaries,unit,ported-green,
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_correct_raw_i128,1830,internal/decimal/fixed_test.go,TestCorrectRawInt128,unit,ported-green,
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_correct_raw_i64,1810,internal/decimal/fixed_test.go,TestCorrectRawInt64,unit,ported-green,
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_correct_raw_identity_at_max_precision,1835,internal/decimal/fixed_test.go,TestCorrectRawIdentityAtMaxPrecision,unit,ported-green,
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_correct_raw_u128,1819,internal/decimal/fixed_test.go,TestCorrectRawUint128,unit,ported-green,
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_correct_raw_u64,1797,internal/decimal/fixed_test.go,TestCorrectRawUint64,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_f64_to_fixed_i128,1133,,,unit,discovered,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_f64_to_fixed_i128_overflow_panics,1295,,,unit,discovered,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/fixed.rs,test_f64_to_fixed_i128_to_fixed,1057,,,unit,discovered,
