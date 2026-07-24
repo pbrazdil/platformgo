@@ -2,10 +2,11 @@ package domain
 
 import "testing"
 
-// TestSourceTradingFeeRoundsAtCurrencyBoundary ports:
-//   - source: crates/model/src/accounts/cash.rs
-//   - test: test_calculate_commission_for_taker_fx
-//   - pinned revision: 116c9b5159ebeb6b578b737d72298cac8d723723
+// Ported from:
+//
+//	repository: nautechsystems/nautilus_trader@116c9b5159ebeb6b578b737d72298cac8d723723
+//	source: crates/model/src/accounts/cash.rs:791
+//	test: test_calculate_commission_for_taker_fx
 //
 // The source vector is 1,500,000 * 0.8005 * 0.00002 = 24.015 USD,
 // rounded half-even once at the USD currency boundary to 24.02 USD.

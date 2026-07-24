@@ -2,10 +2,11 @@ package engine
 
 import "testing"
 
-// TestSourceRestingLimitBracketRestsWithHeldProtection ports:
-//   - source: apps/nautilus/tests/live/trading/e2e_bracket.rs
-//   - test: resting_limit_bracket_rests_working_with_held_sl_tp
-//   - pinned revision: 50141367492be46ebf5623f6191a14b94af2f2bd
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/nautilus/tests/live/trading/e2e_bracket.rs:32
+//	test: resting_limit_bracket_rests_working_with_held_sl_tp
 func TestSourceRestingLimitBracketRestsWithHeldProtection(t *testing.T) {
 	fixture := newTradingFixture(t)
 	ids := bracketIDs(fixture, 800)
@@ -34,10 +35,11 @@ func TestSourceRestingLimitBracketRestsWithHeldProtection(t *testing.T) {
 	}
 }
 
-// TestSourceMarketEntryBracketArmsReduceOnlyExits ports:
-//   - source: apps/nautilus/tests/live/trading/e2e_bracket.rs
-//   - test: market_entry_bracket_arms_reduce_only_exits
-//   - pinned revision: 50141367492be46ebf5623f6191a14b94af2f2bd
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/nautilus/tests/live/trading/e2e_bracket.rs:101
+//	test: market_entry_bracket_arms_reduce_only_exits
 func TestSourceMarketEntryBracketArmsReduceOnlyExits(t *testing.T) {
 	fixture := newTradingFixture(t)
 	ids := bracketIDs(fixture, 810)
@@ -55,10 +57,11 @@ func TestSourceMarketEntryBracketArmsReduceOnlyExits(t *testing.T) {
 	}
 }
 
-// TestSourceScaleOutLadderReconcilesProtection ports:
-//   - source: apps/nautilus/tests/live/trading/e2e_bracket_ladder.rs
-//   - test: scale_out_ladder_tp1_fill_reduces_sl_then_sl_closes_remainder
-//   - pinned revision: 50141367492be46ebf5623f6191a14b94af2f2bd
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/nautilus/tests/live/trading/e2e_bracket_ladder.rs:106
+//	test: scale_out_ladder_tp1_fill_reduces_sl_then_sl_closes_remainder
 func TestSourceScaleOutLadderReconcilesProtection(t *testing.T) {
 	fixture := newTradingFixture(t)
 	ids := bracketIDs(fixture, 820)
@@ -89,10 +92,11 @@ func TestSourceScaleOutLadderReconcilesProtection(t *testing.T) {
 	}
 }
 
-// TestSourceHedgingLadderTargetsOnlyItsEntryPosition ports:
-//   - source: apps/nautilus/tests/live/trading/e2e_bracket_ladder.rs
-//   - test: hedging_ladder_reduces_only_its_own_position
-//   - pinned revision: 50141367492be46ebf5623f6191a14b94af2f2bd
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/nautilus/tests/live/trading/e2e_bracket_ladder.rs:259
+//	test: hedging_ladder_reduces_only_its_own_position
 func TestSourceHedgingLadderTargetsOnlyItsEntryPosition(t *testing.T) {
 	fixture := newTradingFixture(t)
 	fixture.apply(t, TradingAction{
@@ -127,10 +131,11 @@ func TestSourceHedgingLadderTargetsOnlyItsEntryPosition(t *testing.T) {
 	}
 }
 
-// TestSourceFullCoverageStopOCOCancelsTakeProfit ports:
-//   - source: apps/nautilus/tests/live/trading/e2e_bracket_ladder.rs
-//   - test: full_coverage_bracket_sl_fill_oco_cancels_tp
-//   - pinned revision: 50141367492be46ebf5623f6191a14b94af2f2bd
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/nautilus/tests/live/trading/e2e_bracket_ladder.rs:451
+//	test: full_coverage_bracket_sl_fill_oco_cancels_tp
 func TestSourceFullCoverageStopOCOCancelsTakeProfit(t *testing.T) {
 	fixture := newTradingFixture(t)
 	ids := bracketIDs(fixture, 850)

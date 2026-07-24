@@ -2,10 +2,11 @@ package engine
 
 import "testing"
 
-// TestSourceRestingStopLimitsTriggerThenFill ports:
-//   - source: apps/nautilus/tests/live/trading/e2e_stop_trigger.rs
-//   - test: resting_stop_limits_trigger_then_fill
-//   - pinned revision: 50141367492be46ebf5623f6191a14b94af2f2bd
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/nautilus/tests/live/trading/e2e_stop_trigger.rs:146
+//	test: resting_stop_limits_trigger_then_fill
 //
 // Observable contract: a stop-limit trigger is durable. Once crossed, the
 // order remains triggered and may fill later even if the market moves back
@@ -57,10 +58,11 @@ func TestSourceRestingStopLimitsTriggerThenFill(t *testing.T) {
 	}
 }
 
-// TestSourceTakeProfitMarketHoldsUntilFavorableTouchCross ports:
-//   - source: apps/nautilus/tests/live/trading/e2e_touch_trigger.rs
-//   - test: take_profit_market_holds_until_the_favorable_touch_cross
-//   - pinned revision: 50141367492be46ebf5623f6191a14b94af2f2bd
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/nautilus/tests/live/trading/e2e_touch_trigger.rs:124
+//	test: take_profit_market_holds_until_the_favorable_touch_cross
 func TestSourceTakeProfitMarketHoldsUntilFavorableTouchCross(t *testing.T) {
 	fixture := newTradingFixture(t)
 	open := fixture.submit(t, SubmitOrder{
@@ -91,10 +93,11 @@ func TestSourceTakeProfitMarketHoldsUntilFavorableTouchCross(t *testing.T) {
 	}
 }
 
-// TestSourceParkedTouchOrderCancels ports:
-//   - source: apps/nautilus/tests/live/trading/e2e_touch_trigger.rs
-//   - test: a_parked_touch_order_cancels_and_does_not_stay_working
-//   - pinned revision: 50141367492be46ebf5623f6191a14b94af2f2bd
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/nautilus/tests/live/trading/e2e_touch_trigger.rs:183
+//	test: a_parked_touch_order_cancels_and_does_not_stay_working
 func TestSourceParkedTouchOrderCancels(t *testing.T) {
 	fixture := newTradingFixture(t)
 	open := fixture.submit(t, SubmitOrder{
@@ -121,10 +124,11 @@ func TestSourceParkedTouchOrderCancels(t *testing.T) {
 	assertOrderStatus(t, stillCancelled, OrderStatusCancelled)
 }
 
-// TestSourceTakeProfitLimitRestsAndFillsOnFavorableCross ports:
-//   - source: apps/nautilus/tests/live/trading/e2e_touch_trigger.rs
-//   - test: take_profit_limit_rests_and_fills_on_the_favorable_cross
-//   - pinned revision: 50141367492be46ebf5623f6191a14b94af2f2bd
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/nautilus/tests/live/trading/e2e_touch_trigger.rs:260
+//	test: take_profit_limit_rests_and_fills_on_the_favorable_cross
 func TestSourceTakeProfitLimitRestsAndFillsOnFavorableCross(t *testing.T) {
 	fixture := newTradingFixture(t)
 	open := fixture.submit(t, SubmitOrder{
