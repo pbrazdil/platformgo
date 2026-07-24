@@ -6,7 +6,7 @@ Clean-room Go replacement for `upcomers-org/platform`, using pinned source tests
 
 Last updated: 2026-07-24
 
-Current delivery stage: **Phase 2 — durable execution in progress**.
+Current delivery stage: **Phase 2 — durable execution complete**.
 
 The pinned source inventory is complete: all 2,748 tests are recorded in
 `ports/test-port-map.csv`. Forty-one source tests are independently reviewed
@@ -40,7 +40,7 @@ protection. Thirty-six pinned Phase 1 rows are reviewed, green, and wired to
 this `model-real` boundary; five numeric rows provide the underlying
 `unit-real` exact-value evidence.
 
-Phase 2 opened by hardening the contracts that will become durable. Economic
+Phase 2 hardens and persists the execution contracts. Economic
 state now retains only its bounded latest receipt while an explicit O(1)
 receipt index resolves historical identity before current-schema validation.
 Versioned decision hashes bind previous state, input, and canonical effects;
@@ -50,7 +50,27 @@ is enforced, and the shared deterministic testkit now provides shard-scoped
 IDs, manual time, receipt-aware engine execution, semantic failpoints, and
 canonical hash extraction.
 
-This repository is not yet a production-capable replacement. It has no executable `cmd` services, production PostgreSQL schema or adapter, NATS/JetStream adapter, Centrifugo adapter, or production Hyperliquid adapter. Current integration tests use deterministic in-memory fixtures and do not prove those runtime boundaries.
+Forward-only checksum-verified PostgreSQL migrations now create exact durable
+engine, trading, ledger, market, messaging, command, idempotency, outbox, inbox,
+and runtime-role boundaries. One engine transaction commits normalized state,
+balanced core-authored ledger effects, command result, immutable receipt,
+checkpoint, and versioned domain-event outbox. Recovery replays canonical
+inputs and terminal faults, verifies every hash, and reconciliation detects
+projection corruption without repair.
+
+JetStream uses bounded file-backed streams with `DiscardNew`, one physical
+input stream and lifetime PostgreSQL ownership lock per shard, stable
+`Nats-Msg-Id` publication, pull delivery with one unacknowledged input, and
+synchronous acknowledgment only after the PostgreSQL handler commits.
+Beyond-window duplicate publication advances a separate immutable delivery
+receipt and state chain without repeating ledger, fill, balance, position, or
+event effects.
+
+This repository is not yet a production-capable replacement. It has no
+executable `cmd` services, REST/gRPC/authentication compatibility edge,
+Centrifugo adapter, or production Hyperliquid adapter. Phase 2 runtime
+boundaries are production packages with live PostgreSQL and JetStream
+integration proof; deployment packaging and later phase contracts remain.
 
 ## Delivery progress
 
@@ -58,7 +78,7 @@ This repository is not yet a production-capable replacement. It has no executabl
 |---|---|---|
 | 0 — Policy and test harness | Complete | Machine-readable package scope, AST policy checks, split port/review/wiring evidence, exact function provenance, canonical source authorities, pinned Go 1.26.5, CODEOWNERS, immutable CI actions, complete-port and tidy gates, and the initial agent-evaluation corpus exist. `main` is protected and all seven required checks are enforced. The numeric foundation provides the sole `apd/v3`-backed production decimal, strict canonical parsing, explicit one-boundary rounding, immutable unit-bearing values, parser/arithmetic fuzzing, and five reviewed green source rows. The deterministic kernel adds explicit logical time and IDs, strict input sequencing, idempotent duplicate receipts, fail-closed typed errors, canonical decision/state hashes, replay properties, and the minimal synchronous engine fixture. |
 | 1 — Pure engine | Complete | Thirty-six pinned source rows are reviewed and green against the production `model-real` engine boundary. Coverage includes deterministic order lifecycle, depth/VWAP and slippage, netting and hedging positions, exact PnL, margin and reservation, idempotent funding, cross/isolated liquidation, stop/touch triggers, brackets and ladders, protection cleanup, and exact maker/taker fees. Policy-native invariant, fuzz, duplicate, replay, repeated, and race-enabled tests reinforce the source-test evidence. |
-| 2 — Durable execution | In progress | The prerequisite receipt, redelivery, versioned hash, canonical payload, dependency-direction, and shared-testkit contracts are implemented. PostgreSQL migrations and persistence, idempotency journal, transactional ledger/state, NATS/JetStream transport, outbox/inbox, and durable recovery remain. |
+| 2 — Durable execution | Complete | Eight immutable forward migrations, checksum/drift enforcement, exact normalized projections, API/engine/worker grants, command/idempotency journal, atomic engine/ledger/checkpoint/outbox transactions, transactional inbox dedupe, per-shard JetStream ordering and ownership, unknown-outcome retry, beyond-window duplicate delivery receipts, poison/capacity fail-closed behavior, replayed restart/fault recovery, and reconciliation are implemented. Live PostgreSQL and JetStream tests cover clean and prior-foundation migration, rollback before commit, commit/retry, order/fill/position/event persistence, command-to-engine flow, reconnect, stream capacity, singleton ownership, redelivery, and projection-corruption detection. |
 | 3 — Compatibility edges | Not started | Production REST, gRPC, authentication, realtime/Centrifugo, health, CLI, and deployment-compatible services are not implemented. |
 | 4 — Hyperliquid production integration | Not started | No production adapter, reconnect/resynchronization path, controlled live canary, soak test, or incident drill exists. |
 | 5 — Replacement rehearsal | Not started | Data import, cutover, rollback, reconciliation, and audited go-live rehearsal remain. |
@@ -89,11 +109,22 @@ Verified on 2026-07-24:
 - The complete Phase 1 implementation passes repository-wide tests, race tests,
   deterministic repeats, policy, formatting, strict lint, complete source
   inventory, tidy-diff, and vulnerability checks.
+- Phase 2 PostgreSQL tests pass against a temporary PostgreSQL 14 instance and
+  cover clean migration, forward upgrade, immutable/checksum constraints,
+  least-privilege roles, atomic rollback/retry, normalized execution
+  projections, idempotency replay/conflict, outbox unknown outcomes,
+  transactional inbox dedupe, restart/fault replay, and reconciliation.
+- Phase 2 JetStream tests pass against a temporary NATS Server 2.14.3 instance
+  and cover versioned bounded streams, duplicate publish acknowledgments,
+  handler redelivery, command-to-engine persistence, beyond-window duplicate
+  publication, poison-message halt, stream-full rejection, singleton shard
+  ownership, and server reconnect with retained stream sequence.
 
 ## Next milestone
 
-Add the initial immutable PostgreSQL migration and transactional engine store:
-persist command receipts, exact ledger and state changes, checkpoints, and
-outbox records in one transaction before adding NATS/JetStream delivery.
+Begin Phase 3 with the smallest compatibility edge: production health/readiness
+and command submission over HTTP, preserving the frozen authentication,
+idempotency-response, and JSON contracts while using the completed command
+journal and durable execution pipeline.
 
 The authoritative scope, phase definitions, and completion criteria are in `PROJECT_CHARTER.md`. Repository-wide execution rules are in `AGENTS.md`.
