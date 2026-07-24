@@ -290,6 +290,7 @@ func newTradingFixture(t *testing.T) *tradingFixture {
 		Kind: TradingActionUpdateBook,
 		UpdateBook: &UpdateBook{
 			InstrumentID: "BTC-PERP",
+			MarkPrice:    "100",
 			Bids:         []BookLevel{{Price: "99", Quantity: "10"}},
 			Asks:         []BookLevel{{Price: "100", Quantity: "10"}},
 		},

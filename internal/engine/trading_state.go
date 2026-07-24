@@ -19,6 +19,8 @@ type instrumentRecord struct {
 
 type bookRecord struct {
 	instrumentID string
+	markPrice    domain.Price
+	hasMark      bool
 	bids         []levelRecord
 	asks         []levelRecord
 }
@@ -29,23 +31,27 @@ type levelRecord struct {
 }
 
 type orderRecord struct {
-	orderID        ID
-	accountID      string
-	instrument     domain.InstrumentRevision
-	side           Side
-	orderType      OrderType
-	timeInForce    TimeInForce
-	status         OrderStatus
-	quantity       domain.Quantity
-	filledQuantity domain.Quantity
-	averagePrice   domain.Price
-	hasAverage     bool
-	price          domain.Price
-	hasPrice       bool
-	triggerPrice   domain.Price
-	hasTrigger     bool
-	reduceOnly     bool
-	version        uint64
+	orderID           ID
+	accountID         string
+	instrument        domain.InstrumentRevision
+	side              Side
+	orderType         OrderType
+	timeInForce       TimeInForce
+	status            OrderStatus
+	quantity          domain.Quantity
+	filledQuantity    domain.Quantity
+	averagePrice      domain.Price
+	hasAverage        bool
+	price             domain.Price
+	hasPrice          bool
+	triggerPrice      domain.Price
+	hasTrigger        bool
+	reduceOnly        bool
+	hasSlippageBand   bool
+	maxSlippageBPS    uint32
+	slippageReference domain.Price
+	rejectReason      RejectionReason
+	version           uint64
 }
 
 type fillRecord struct {
@@ -164,17 +170,23 @@ func (state State) FillsForOrder(orderID ID) []FillSnapshot {
 
 func (order orderRecord) snapshot() OrderSnapshot {
 	snapshot := OrderSnapshot{
-		OrderID:        order.orderID,
-		AccountID:      order.accountID,
-		InstrumentID:   order.instrument.ID(),
-		Side:           order.side,
-		Type:           order.orderType,
-		TimeInForce:    order.timeInForce,
-		Status:         order.status,
-		Quantity:       order.quantity.Decimal().String(),
-		FilledQuantity: order.filledQuantity.Decimal().String(),
-		ReduceOnly:     order.reduceOnly,
-		Version:        order.version,
+		OrderID:         order.orderID,
+		AccountID:       order.accountID,
+		InstrumentID:    order.instrument.ID(),
+		Side:            order.side,
+		Type:            order.orderType,
+		TimeInForce:     order.timeInForce,
+		Status:          order.status,
+		Quantity:        order.quantity.Decimal().String(),
+		FilledQuantity:  order.filledQuantity.Decimal().String(),
+		ReduceOnly:      order.reduceOnly,
+		HasSlippageBand: order.hasSlippageBand,
+		MaxSlippageBPS:  order.maxSlippageBPS,
+		RejectReason:    order.rejectReason,
+		Version:         order.version,
+	}
+	if order.hasSlippageBand {
+		snapshot.SlippageReference = order.slippageReference.Decimal().String()
 	}
 	if order.hasAverage {
 		snapshot.AverageFillPrice = order.averagePrice.Decimal().String()
@@ -202,11 +214,15 @@ func (fill fillRecord) snapshot() FillSnapshot {
 }
 
 func (book bookRecord) snapshot() BookSnapshot {
-	return BookSnapshot{
+	snapshot := BookSnapshot{
 		InstrumentID: book.instrumentID,
 		Bids:         levelSnapshots(book.bids),
 		Asks:         levelSnapshots(book.asks),
 	}
+	if book.hasMark {
+		snapshot.MarkPrice = book.markPrice.Decimal().String()
+	}
+	return snapshot
 }
 
 func levelSnapshots(levels []levelRecord) []BookLevel {

@@ -47,6 +47,7 @@ func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
 		writeUint64(hasher, uint64(len(decision.BookChanges)))
 		for _, book := range decision.BookChanges {
 			writeString(hasher, book.InstrumentID)
+			writeString(hasher, book.MarkPrice)
 			writeBookLevels(hasher, book.Bids)
 			writeBookLevels(hasher, book.Asks)
 		}
@@ -65,6 +66,10 @@ func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
 			writeString(hasher, order.Price)
 			writeString(hasher, order.TriggerPrice)
 			writeUint8(hasher, boolByte(order.ReduceOnly))
+			writeUint8(hasher, boolByte(order.HasSlippageBand))
+			writeUint32(hasher, order.MaxSlippageBPS)
+			writeString(hasher, order.SlippageReference)
+			writeString(hasher, string(order.RejectReason))
 			writeUint64(hasher, order.Version)
 		}
 		writeUint64(hasher, uint64(len(decision.Fills)))
