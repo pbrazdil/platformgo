@@ -39,7 +39,7 @@ REST / gRPC                │ auth, shape, contract │
                            └───────────┬───────────┘
                                        │ publish with stable message ID
                                        ▼
-Hyperliquid WS ─▶ Market ─────────▶ JetStream ENGINE_INPUTS (per shard)
+Hyperliquid WS ─▶ Market ─────────▶ JetStream ENGINE_INPUTS_<shard>
                  adapter              command | market | timer | config
                                              │ total stream order
                                              ▼
@@ -109,7 +109,10 @@ type InputEnvelope struct {
 }
 ```
 
-`StreamSequence` comes from the shard’s JetStream stream metadata in live execution. Tests provide it explicitly.
+`StreamSequence` comes from the shard’s physical
+`ENGINE_INPUTS_<shard>` JetStream stream metadata in live execution. Tests
+provide it explicitly. Multiple shards must not share one physical input stream
+because its global sequence would create false gaps within each shard.
 
 `LogicalTime` is the time used by business logic. Receipt and processing timestamps may exist for telemetry but cannot alter decisions.
 
