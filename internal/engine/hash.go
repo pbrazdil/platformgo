@@ -24,7 +24,7 @@ func hashInput(input InputEnvelope) Hash {
 	})
 }
 
-func hashDecision(input InputEnvelope, inputHash Hash) Hash {
+func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
 	return finishHash(func(hasher hash.Hash) {
 		writeString(hasher, "platformgo.engine.decision.v1")
 		writeBytes(hasher, input.InputID[:])
@@ -35,7 +35,73 @@ func hashDecision(input InputEnvelope, inputHash Hash) Hash {
 		writeUint64(hasher, input.ConfigurationVersion)
 		writeUint64(hasher, input.InstrumentVersion)
 		writeBytes(hasher, inputHash[:])
+		writeString(hasher, string(decision.CommandResult.Status))
+		writeString(hasher, string(decision.CommandResult.Reason))
+		writeUint64(hasher, uint64(len(decision.InstrumentChanges)))
+		for _, instrument := range decision.InstrumentChanges {
+			writeString(hasher, instrument.InstrumentID)
+			writeUint64(hasher, instrument.Revision)
+			writeUint8(hasher, instrument.PriceScale)
+			writeUint8(hasher, instrument.QuantityScale)
+		}
+		writeUint64(hasher, uint64(len(decision.BookChanges)))
+		for _, book := range decision.BookChanges {
+			writeString(hasher, book.InstrumentID)
+			writeBookLevels(hasher, book.Bids)
+			writeBookLevels(hasher, book.Asks)
+		}
+		writeUint64(hasher, uint64(len(decision.OrderChanges)))
+		for _, order := range decision.OrderChanges {
+			writeBytes(hasher, order.OrderID[:])
+			writeString(hasher, order.AccountID)
+			writeString(hasher, order.InstrumentID)
+			writeString(hasher, string(order.Side))
+			writeString(hasher, string(order.Type))
+			writeString(hasher, string(order.TimeInForce))
+			writeString(hasher, string(order.Status))
+			writeString(hasher, order.Quantity)
+			writeString(hasher, order.FilledQuantity)
+			writeString(hasher, order.AverageFillPrice)
+			writeString(hasher, order.Price)
+			writeString(hasher, order.TriggerPrice)
+			writeUint8(hasher, boolByte(order.ReduceOnly))
+			writeUint64(hasher, order.Version)
+		}
+		writeUint64(hasher, uint64(len(decision.Fills)))
+		for _, fill := range decision.Fills {
+			writeBytes(hasher, fill.FillID[:])
+			writeBytes(hasher, fill.OrderID[:])
+			writeString(hasher, fill.AccountID)
+			writeString(hasher, fill.InstrumentID)
+			writeString(hasher, string(fill.Side))
+			writeString(hasher, fill.Price)
+			writeString(hasher, fill.Quantity)
+			writeInt64(hasher, fill.LogicalTime.UnixNano())
+		}
+		writeUint64(hasher, uint64(len(decision.Events)))
+		for _, event := range decision.Events {
+			writeBytes(hasher, event.EventID[:])
+			writeString(hasher, event.Kind)
+			writeBytes(hasher, event.AggregateID[:])
+			writeUint64(hasher, event.AggregateVersion)
+			writeInt64(hasher, event.LogicalTime.UnixNano())
+		}
 	})
+}
+
+func writeBookLevels(hasher hash.Hash, levels []BookLevel) {
+	writeUint64(hasher, uint64(len(levels)))
+	for _, level := range levels {
+		writeString(hasher, level.Price)
+		writeString(hasher, level.Quantity)
+	}
+}
+
+func boolByte(value bool) uint8 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func hashInitialState(shardID ShardID) Hash {

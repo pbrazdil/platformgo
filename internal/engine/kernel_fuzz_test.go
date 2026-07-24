@@ -20,7 +20,7 @@ func FuzzApplyDuplicateAndReplay(f *testing.F) {
 		if err != nil {
 			t.Fatalf("duplicate Apply: %v", err)
 		}
-		if duplicateState.Hash() != state.Hash() || duplicateDecision != firstDecision {
+		if duplicateState.Hash() != state.Hash() || !equalDecision(duplicateDecision, firstDecision) {
 			t.Fatalf("duplicate input was not idempotent")
 		}
 
@@ -30,7 +30,7 @@ func FuzzApplyDuplicateAndReplay(f *testing.F) {
 			t.Fatalf("replay state hash differs: %s != %s", leftState.Hash(), rightState.Hash())
 		}
 		for index := range leftDecisions {
-			if leftDecisions[index] != rightDecisions[index] {
+			if !equalDecision(leftDecisions[index], rightDecisions[index]) {
 				t.Fatalf("replay decision %d differs", index)
 			}
 		}

@@ -62,7 +62,7 @@ func TestEngineFixtureUsesManualTimeIDsAndSynchronousApply(t *testing.T) {
 	rightFirst := right.apply(t, `{"command":"first"}`)
 	rightSecond := right.apply(t, `{"command":"second"}`)
 
-	if leftFirst != rightFirst || leftSecond != rightSecond {
+	if !equalDecision(leftFirst, rightFirst) || !equalDecision(leftSecond, rightSecond) {
 		t.Fatalf("identical fixture runs differed:\nleft:  %+v %+v\nright: %+v %+v", leftFirst, leftSecond, rightFirst, rightSecond)
 	}
 	if left.state.Hash() != right.state.Hash() {

@@ -6,7 +6,7 @@ Clean-room Go replacement for `upcomers-org/platform`, using pinned source tests
 
 Last updated: 2026-07-24
 
-Current delivery stage: **Phase 0 — complete**.
+Current delivery stage: **Phase 1 — order lifecycle implementation in progress**.
 
 The pinned source inventory is complete: all 2,748 tests are recorded in
 `ports/test-port-map.csv`. Five numeric tests are independently reviewed and
@@ -23,6 +23,13 @@ synchronous fixture with manual time and IDs. Its replay and duplicate
 properties are policy-native evidence derived from the repository invariants;
 they are not presented as reviewed ports of unrelated source tests.
 
+The first Phase 1 implementation cohort now exercises the production engine
+for market and limit admission, exact cumulative fills, GTC resting, IOC/FOK
+non-resting behavior, stop admission, amend, cancel, immutable economic
+decisions, and committed business rejections. Its six pinned source rows remain
+unreviewed until the separate evidence-only promotion lands, so this does not
+yet advance Phase 1 under the reviewed-evidence definition.
+
 This repository is not yet a production-capable replacement. It has no executable `cmd` services, production PostgreSQL schema or adapter, NATS/JetStream adapter, Centrifugo adapter, or production Hyperliquid adapter. Current integration tests use deterministic in-memory fixtures and do not prove those runtime boundaries.
 
 ## Delivery progress
@@ -30,7 +37,7 @@ This repository is not yet a production-capable replacement. It has no executabl
 | Phase | Status | Evidence and remaining work |
 |---|---|---|
 | 0 — Policy and test harness | Complete | Machine-readable package scope, AST policy checks, split port/review/wiring evidence, exact function provenance, canonical source authorities, pinned Go 1.26.5, CODEOWNERS, immutable CI actions, complete-port and tidy gates, and the initial agent-evaluation corpus exist. `main` is protected and all seven required checks are enforced. The numeric foundation provides the sole `apd/v3`-backed production decimal, strict canonical parsing, explicit one-boundary rounding, immutable unit-bearing values, parser/arithmetic fuzzing, and five reviewed green source rows. The deterministic kernel adds explicit logical time and IDs, strict input sequencing, idempotent duplicate receipts, fail-closed typed errors, canonical decision/state hashes, replay properties, and the minimal synchronous engine fixture. |
-| 1 — Pure engine | Not started under the reviewed-evidence definition | Extensive native compatibility models and placeholder tests exist, but no implementation cohort is semantically reviewed and wired to the intended deterministic engine boundary. |
+| 1 — Pure engine | Order lifecycle implementation in progress; reviewed evidence pending | The production engine now has an implementation candidate for market/limit/stop admission, GTC/IOC/FOK behavior, exact cumulative fills, amend, cancel, typed business rejection, immutable decisions, and deterministic replay. Six pinned source tests and policy-native invariant/fuzz coverage exercise that boundary. Their ledger rows remain `unreviewed/placeholder/spec-fixture` until a separate evidence-only review promotes the real wiring. Matching depth/slippage, positions and OMS modes, margin/funding/liquidation, and brackets/triggers remain. |
 | 2 — Durable execution | Not started | PostgreSQL migrations and persistence, idempotency journal, transactional ledger/state, NATS/JetStream transport, outbox/inbox, and durable recovery are not implemented. |
 | 3 — Compatibility edges | Not started | Production REST, gRPC, authentication, realtime/Centrifugo, health, CLI, and deployment-compatible services are not implemented. |
 | 4 — Hyperliquid production integration | Not started | No production adapter, reconnect/resynchronization path, controlled live canary, soak test, or incident drill exists. |
@@ -56,12 +63,15 @@ Verified on 2026-07-24:
   state, canonical hash, manual-time, deterministic-ID, fuzz/property, repeated,
   and race-enabled coverage. It does not claim durable transaction or transport
   behavior.
+- The Phase 1 order-lifecycle candidate passes focused source, invariant, fuzz
+  seed, 100-repeat, and race-enabled tests locally. It is not counted as
+  accepted production evidence until its separate ledger promotion.
 
 ## Next milestone
 
-Start Phase 1 with a vertically narrow, semantically reviewed order-state
-cohort: port the observable source tests first, bind them to the production
-engine boundary, and implement only the deterministic behavior they require.
-PostgreSQL and NATS remain Phase 2 work.
+Complete semantic review and evidence promotion for the order-lifecycle cohort,
+then implement deterministic depth/VWAP, bid/ask selection, fill identity,
+slippage-band, and partial-fill behavior. PostgreSQL and NATS remain Phase 2
+work.
 
 The authoritative scope, phase definitions, and completion criteria are in `PROJECT_CHARTER.md`. Repository-wide execution rules are in `AGENTS.md`.
