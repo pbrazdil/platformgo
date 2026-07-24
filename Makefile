@@ -40,7 +40,7 @@ test-race:
 test-repeat:
 	@if [ -d internal ] || [ -d testkit ]; then \
 	  pkgs="$$(go list ./internal/... ./testkit/... 2>/dev/null || true)"; \
-	  if [ -n "$$pkgs" ]; then go test $$pkgs -count=20; fi; \
+	  if [ -n "$$pkgs" ]; then go test $$pkgs -shuffle=on -count=20; fi; \
 	fi
 
 vuln:

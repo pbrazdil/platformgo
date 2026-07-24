@@ -105,7 +105,7 @@ type InputEnvelope struct {
     LogicalTime          time.Time
     ConfigurationVersion uint64
     InstrumentVersion    uint64
-    Payload              []byte
+    Payload              CanonicalPayload
 }
 ```
 
@@ -188,17 +188,19 @@ For every engine input, including market and timer inputs, the engine follows th
 
 For each input, the engine:
 
-1. verifies schema and sequence;
+1. parses the stable envelope identity needed for receipt lookup;
 2. begins a PostgreSQL transaction;
-3. checks `engine.input_receipts` for prior processing;
-4. loads and locks required state in deterministic order;
-5. applies the pure decision;
-6. inserts immutable fills and ledger entries;
-7. updates market state, orders, positions, balances, margin state and any command result;
-8. inserts domain/realtime outbox entries;
-9. inserts the input receipt and checkpoint;
-10. commits;
-11. acknowledges the JetStream input synchronously.
+3. checks `engine.input_receipts` by input ID and stream sequence;
+4. returns an exact committed duplicate using the receipt's recorded fingerprint version, even if its schema is no longer accepted for new inputs;
+5. rejects conflicting committed identity, then validates schema and sequence for a genuinely new input;
+6. loads and locks required state in deterministic order;
+7. applies the pure decision;
+8. inserts immutable fills and ledger entries;
+9. updates market state, orders, positions, balances, margin state and any command result;
+10. inserts domain/realtime outbox entries;
+11. inserts the input receipt and checkpoint;
+12. commits;
+13. acknowledges the JetStream input synchronously.
 
 If the process crashes before commit, redelivery repeats the decision against unchanged durable state. If it crashes after commit and before acknowledgment, the input receipt turns redelivery into a no-op that returns the prior result.
 
