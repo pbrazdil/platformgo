@@ -1,0 +1,380 @@
+package postgres
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/upcomers-org/platformgo/internal/engine"
+)
+
+var (
+	// ErrIdempotencyConflict means a key was reused for different request bytes.
+	ErrIdempotencyConflict = errors.New("idempotency key request hash conflict")
+	// ErrCommandNotFound means completion referenced no durable command.
+	ErrCommandNotFound = errors.New("durable command not found")
+	// ErrCommandCompletionConflict means a completed command was given a
+	// different terminal result.
+	ErrCommandCompletionConflict = errors.New("command completion conflict")
+)
+
+// IdempotencyState is the durable lifecycle of a request key.
+type IdempotencyState string
+
+const (
+	IdempotencyInProgress IdempotencyState = "in_progress"
+	IdempotencyCompleted  IdempotencyState = "completed"
+)
+
+// CommandStatus is the durable command outcome.
+type CommandStatus string
+
+const (
+	CommandAccepted  CommandStatus = "accepted"
+	CommandRejected  CommandStatus = "rejected"
+	CommandCompleted CommandStatus = "completed"
+)
+
+// StoredResponse is the exact replayable response body plus canonical headers.
+type StoredResponse struct {
+	Status  int
+	Headers []byte
+	Body    []byte
+}
+
+// BeginCommandRequest contains one canonical command and its stable identity.
+type BeginCommandRequest struct {
+	Scope            string
+	IdempotencyKey   string
+	RequestHash      [32]byte
+	CommandID        engine.ID
+	AccountID        string
+	AccountSequence  uint64
+	CommandType      string
+	SchemaVersion    uint32
+	CanonicalPayload []byte
+	LogicalTime      time.Time
+	ExpiresAt        time.Time
+}
+
+// BeginCommandResult reports either a newly-created command or a replay.
+type BeginCommandResult struct {
+	Created   bool
+	CommandID engine.ID
+	State     IdempotencyState
+	Response  StoredResponse
+}
+
+// CompleteCommandRequest atomically finalizes the command and replay record.
+type CompleteCommandRequest struct {
+	CommandID engine.ID
+	Status    CommandStatus
+	Result    []byte
+	Response  StoredResponse
+}
+
+// CommandJournal owns durable command and idempotency records.
+type CommandJournal struct {
+	pool *pgxpool.Pool
+}
+
+// NewCommandJournal binds a command journal to PostgreSQL.
+func NewCommandJournal(pool *pgxpool.Pool) *CommandJournal {
+	return &CommandJournal{pool: pool}
+}
+
+// Begin inserts a key and command atomically or returns the existing identical
+// request. A reused key with a different canonical request hash is rejected.
+func (journal *CommandJournal) Begin(
+	ctx context.Context,
+	request BeginCommandRequest,
+) (BeginCommandResult, error) {
+	if journal == nil || journal.pool == nil {
+		return BeginCommandResult{}, errors.New(
+			"begin command: PostgreSQL pool is required",
+		)
+	}
+	if err := validateBeginCommand(request); err != nil {
+		return BeginCommandResult{}, err
+	}
+	tx, err := journal.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.Serializable,
+	})
+	if err != nil {
+		return BeginCommandResult{}, fmt.Errorf("begin command transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+	}()
+
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO trading.idempotency_records (
+			scope, idempotency_key, request_hash, command_id, state, expires_at
+		) VALUES ($1,$2,$3,$4,'in_progress',$5)
+		ON CONFLICT (scope, idempotency_key) DO NOTHING`,
+		request.Scope,
+		request.IdempotencyKey,
+		request.RequestHash[:],
+		request.CommandID.String(),
+		request.ExpiresAt,
+	)
+	if err != nil {
+		return BeginCommandResult{}, fmt.Errorf("insert idempotency record: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		if _, insertErr := tx.Exec(ctx, `
+			INSERT INTO trading.commands (
+				command_id, account_id, account_sequence, command_type,
+				schema_version, canonical_payload, status, logical_time
+			) VALUES ($1,$2,$3,$4,$5,$6,'pending',$7)`,
+			request.CommandID.String(),
+			request.AccountID,
+			request.AccountSequence,
+			request.CommandType,
+			request.SchemaVersion,
+			request.CanonicalPayload,
+			request.LogicalTime,
+		); insertErr != nil {
+			return BeginCommandResult{}, fmt.Errorf("insert durable command: %w", insertErr)
+		}
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return BeginCommandResult{}, fmt.Errorf("commit new command: %w", commitErr)
+		}
+		return BeginCommandResult{
+			Created:   true,
+			CommandID: request.CommandID,
+			State:     IdempotencyInProgress,
+		}, nil
+	}
+
+	result, recordedHash, err := loadIdempotencyForUpdate(
+		ctx,
+		tx,
+		request.Scope,
+		request.IdempotencyKey,
+	)
+	if err != nil {
+		return BeginCommandResult{}, err
+	}
+	if !bytes.Equal(recordedHash, request.RequestHash[:]) {
+		return BeginCommandResult{}, ErrIdempotencyConflict
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return BeginCommandResult{}, fmt.Errorf("commit command replay: %w", err)
+	}
+	return result, nil
+}
+
+func validateBeginCommand(request BeginCommandRequest) error {
+	switch {
+	case request.Scope == "":
+		return errors.New("begin command: scope is required")
+	case request.IdempotencyKey == "":
+		return errors.New("begin command: idempotency key is required")
+	case request.CommandID.IsZero():
+		return errors.New("begin command: command ID is required")
+	case request.AccountID == "":
+		return errors.New("begin command: account ID is required")
+	case request.AccountSequence == 0:
+		return errors.New("begin command: account sequence is required")
+	case request.CommandType == "":
+		return errors.New("begin command: command type is required")
+	case request.SchemaVersion == 0:
+		return errors.New("begin command: schema version is required")
+	case !json.Valid(request.CanonicalPayload):
+		return errors.New("begin command: canonical payload is not JSON")
+	case request.ExpiresAt.IsZero():
+		return errors.New("begin command: expiration is required")
+	default:
+		return nil
+	}
+}
+
+func loadIdempotencyForUpdate(
+	ctx context.Context,
+	tx pgx.Tx,
+	scope string,
+	key string,
+) (BeginCommandResult, []byte, error) {
+	var result BeginCommandResult
+	var commandIDText string
+	var requestHash []byte
+	var state string
+	var responseStatus *int32
+	var responseHeaders []byte
+	var responseBody []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT request_hash, command_id::text, state, response_status,
+		       response_headers, response_body
+		  FROM trading.idempotency_records
+		 WHERE scope = $1 AND idempotency_key = $2
+		 FOR UPDATE`,
+		scope,
+		key,
+	).Scan(
+		&requestHash,
+		&commandIDText,
+		&state,
+		&responseStatus,
+		&responseHeaders,
+		&responseBody,
+	); err != nil {
+		return BeginCommandResult{}, nil, fmt.Errorf(
+			"load idempotency record: %w",
+			err,
+		)
+	}
+	commandID, err := engine.ParseID(commandIDText)
+	if err != nil {
+		return BeginCommandResult{}, nil, fmt.Errorf(
+			"parse idempotency command ID: %w",
+			err,
+		)
+	}
+	result.CommandID = commandID
+	result.State = IdempotencyState(state)
+	if responseStatus != nil {
+		result.Response.Status = int(*responseStatus)
+		result.Response.Headers, err = canonicalJSON(responseHeaders)
+		if err != nil {
+			return BeginCommandResult{}, nil, fmt.Errorf(
+				"decode stored response headers: %w",
+				err,
+			)
+		}
+		result.Response.Body = append([]byte(nil), responseBody...)
+	}
+	return result, requestHash, nil
+}
+
+// Complete atomically writes a terminal command result and replay response.
+// Repeating the exact completion is harmless; a different one is rejected.
+func (journal *CommandJournal) Complete(
+	ctx context.Context,
+	request CompleteCommandRequest,
+) error {
+	if journal == nil || journal.pool == nil {
+		return errors.New("complete command: PostgreSQL pool is required")
+	}
+	if err := validateCompletion(request); err != nil {
+		return err
+	}
+	headers, err := canonicalJSON(request.Response.Headers)
+	if err != nil {
+		return fmt.Errorf("complete command response headers: %w", err)
+	}
+	result, err := canonicalJSON(request.Result)
+	if err != nil {
+		return fmt.Errorf("complete command result: %w", err)
+	}
+
+	tx, err := journal.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.Serializable,
+	})
+	if err != nil {
+		return fmt.Errorf("complete command transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+	}()
+
+	var currentState string
+	var currentStatus *int32
+	var currentHeaders []byte
+	var currentBody []byte
+	err = tx.QueryRow(ctx, `
+		SELECT state, response_status, response_headers, response_body
+		  FROM trading.idempotency_records
+		 WHERE command_id = $1
+		 FOR UPDATE`,
+		request.CommandID.String(),
+	).Scan(&currentState, &currentStatus, &currentHeaders, &currentBody)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrCommandNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("load command completion: %w", err)
+	}
+	if IdempotencyState(currentState) == IdempotencyCompleted {
+		canonicalCurrentHeaders, headerErr := canonicalJSON(currentHeaders)
+		if headerErr != nil {
+			return fmt.Errorf("decode completed response headers: %w", headerErr)
+		}
+		if currentStatus != nil &&
+			int(*currentStatus) == request.Response.Status &&
+			bytes.Equal(canonicalCurrentHeaders, headers) &&
+			bytes.Equal(currentBody, request.Response.Body) {
+			return nil
+		}
+		return ErrCommandCompletionConflict
+	}
+
+	commandTag, err := tx.Exec(ctx, `
+		UPDATE trading.commands
+		   SET status = $2,
+		       result = $3,
+		       completed_at = clock_timestamp()
+		 WHERE command_id = $1 AND status = 'pending'`,
+		request.CommandID.String(),
+		string(request.Status),
+		result,
+	)
+	if err != nil {
+		return fmt.Errorf("complete durable command: %w", err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		return ErrCommandCompletionConflict
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE trading.idempotency_records
+		   SET state = 'completed',
+		       response_status = $2,
+		       response_headers = $3,
+		       response_body = $4
+		 WHERE command_id = $1 AND state = 'in_progress'`,
+		request.CommandID.String(),
+		request.Response.Status,
+		headers,
+		request.Response.Body,
+	); err != nil {
+		return fmt.Errorf("complete idempotency response: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit command completion: %w", err)
+	}
+	return nil
+}
+
+func validateCompletion(request CompleteCommandRequest) error {
+	switch request.Status {
+	case CommandAccepted, CommandRejected, CommandCompleted:
+	default:
+		return fmt.Errorf("complete command: invalid status %q", request.Status)
+	}
+	if request.CommandID.IsZero() {
+		return errors.New("complete command: command ID is required")
+	}
+	if request.Response.Status < 100 || request.Response.Status > 599 {
+		return errors.New("complete command: response status is invalid")
+	}
+	if !json.Valid(request.Result) {
+		return errors.New("complete command: result is not JSON")
+	}
+	if !json.Valid(request.Response.Headers) {
+		return errors.New("complete command: response headers are not JSON")
+	}
+	return nil
+}
+
+func canonicalJSON(encoded []byte) ([]byte, error) {
+	var value any
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		return nil, err
+	}
+	return json.Marshal(value)
+}
