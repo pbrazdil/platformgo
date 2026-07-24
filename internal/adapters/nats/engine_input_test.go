@@ -1,6 +1,7 @@
 package nats
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -104,5 +105,66 @@ func TestEngineInputCodecRejectsSubjectEnvelopeMismatch(t *testing.T) {
 				t.Fatalf("decodeEngineInputMessage subject %q succeeded", subject)
 			}
 		})
+	}
+}
+
+func TestEngineInputCodecPreservesEnvelopeForMessageIDPoison(t *testing.T) {
+	action := engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "account-1",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	}
+	payload, err := engine.EncodeTradingAction(action)
+	if err != nil {
+		t.Fatalf("EncodeTradingAction: %v", err)
+	}
+	inputID := engine.IDFromSequence(engine.ID{}, 113)
+	input := engine.InputEnvelope{
+		InputID:              inputID,
+		SchemaVersion:        engine.CurrentSchemaVersion,
+		ShardID:              7,
+		Kind:                 engine.InputKindCommand,
+		SourceID:             "command-journal",
+		SourceSequence:       1,
+		LogicalTime:          engine.NewLogicalTime(time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)),
+		ConfigurationVersion: 1,
+		InstrumentVersion:    1,
+		Payload:              payload,
+	}
+	encoded, err := EncodeEngineInputMessage(input)
+	if err != nil {
+		t.Fatalf("EncodeEngineInputMessage: %v", err)
+	}
+	tests := []InboundMessage{
+		{
+			MessageID:      engine.IDFromSequence(engine.ID{}, 114),
+			Subject:        "engine.input.7.command.v1",
+			Data:           encoded,
+			StreamSequence: 1,
+		},
+		{
+			MessageIDError: errors.New("missing message ID"),
+			Subject:        "engine.input.7.command.v1",
+			Data:           encoded,
+			StreamSequence: 1,
+		},
+	}
+	for index, inbound := range tests {
+		decoded, decodedAction, err := decodeEngineInputMessage(inbound)
+		if err == nil {
+			t.Fatalf("decode poison %d succeeded", index)
+		}
+		if decoded.InputID != inputID ||
+			decoded.StreamSequence != 1 ||
+			decodedAction.Kind != action.Kind {
+			t.Fatalf(
+				"decode poison %d lost envelope/action: %+v / %+v",
+				index,
+				decoded,
+				decodedAction,
+			)
+		}
 	}
 }

@@ -888,6 +888,88 @@ func TestEngineStoreBindsRedundantCommandMetadata(t *testing.T) {
 	}
 }
 
+func TestEngineStoreDurablyHaltsNonCommandReuseOfCommandID(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	commandID := engine.IDFromSequence(engine.ID{}, 851)
+	request := validCommandRequest(t, commandID, "account-1", 1, 7, now)
+	if _, err := platformpostgres.NewCommandJournal(pool).Begin(
+		ctx,
+		request,
+	); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	action := engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "account-1",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	}
+	payload, err := engine.EncodeTradingAction(action)
+	if err != nil {
+		t.Fatalf("EncodeTradingAction: %v", err)
+	}
+	input := engine.InputEnvelope{
+		InputID:              commandID,
+		SchemaVersion:        engine.CurrentSchemaVersion,
+		ShardID:              7,
+		Kind:                 engine.InputKindConfiguration,
+		SourceID:             "configuration",
+		SourceSequence:       1,
+		StreamSequence:       1,
+		LogicalTime:          engine.NewLogicalTime(now),
+		ConfigurationVersion: 1,
+		InstrumentVersion:    1,
+		Payload:              payload,
+	}
+	state := engine.NewState(7)
+	next, _, _, err := platformpostgres.NewEngineStore(pool).ApplyTrading(
+		ctx,
+		state,
+		input,
+		action,
+		platformpostgres.ApplyOptions{},
+	)
+	if !errors.Is(err, platformpostgres.ErrCommandInputConflict) ||
+		!errors.Is(err, engine.ErrDurableInputConflict) {
+		t.Fatalf(
+			"ApplyTrading error = %v, want command and durable input conflicts",
+			err,
+		)
+	}
+	if next.Ready() || next.Hash() == state.Hash() {
+		t.Fatal("non-command command-ID collision did not halt shard")
+	}
+	for _, relation := range []string{
+		"trading.accounts",
+		"ledger.transactions",
+		"ledger.entries",
+		"engine.input_receipts",
+		"messaging.domain_outbox",
+	} {
+		assertRowCount(t, pool, relation, 0)
+	}
+	assertRowCount(t, pool, "engine.shard_faults", 1)
+	assertRowCount(t, pool, "engine.shard_checkpoints", 1)
+	recovered, err := platformpostgres.NewEngineStore(pool).RecoverTradingState(ctx, 7)
+	if err != nil {
+		t.Fatalf("RecoverTradingState: %v", err)
+	}
+	if recovered.Ready() || recovered.Hash() != next.Hash() {
+		t.Fatalf("recovered state = %+v, want halted hash %s", recovered, next.Hash())
+	}
+}
+
 func applyStoredTrading(
 	t *testing.T,
 	pool *pgxpool.Pool,

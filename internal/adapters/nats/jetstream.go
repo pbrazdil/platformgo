@@ -219,6 +219,7 @@ func isEngineCommandSubject(subject string) bool {
 // consumer handler.
 type InboundMessage struct {
 	MessageID      engine.ID
+	MessageIDError error
 	Subject        string
 	Data           []byte
 	StreamSequence uint64
@@ -338,28 +339,30 @@ func (consumer *PullConsumer) ProcessOne(
 }
 
 func decodeInboundMessage(message jetstream.Msg) (InboundMessage, error) {
-	messageIDText := message.Headers().Get(gonats.MsgIdHdr)
-	messageID, err := engine.ParseID(messageIDText)
-	if err != nil {
-		return InboundMessage{}, fmt.Errorf(
-			"decode JetStream message ID %q: %w",
-			messageIDText,
-			err,
-		)
-	}
 	metadata, err := message.Metadata()
 	if err != nil {
 		return InboundMessage{}, fmt.Errorf(
-			"decode JetStream message %s metadata: %w",
-			messageID,
+			"decode JetStream message on %q metadata: %w",
+			message.Subject(),
 			err,
 		)
 	}
-	return InboundMessage{
-		MessageID:      messageID,
+	inbound := InboundMessage{
 		Subject:        message.Subject(),
 		Data:           append([]byte(nil), message.Data()...),
 		StreamSequence: metadata.Sequence.Stream,
 		NumDelivered:   metadata.NumDelivered,
-	}, nil
+	}
+	messageIDText := message.Headers().Get(gonats.MsgIdHdr)
+	messageID, err := engine.ParseID(messageIDText)
+	if err != nil {
+		inbound.MessageIDError = fmt.Errorf(
+			"decode JetStream message ID %q: %w",
+			messageIDText,
+			err,
+		)
+		return inbound, nil
+	}
+	inbound.MessageID = messageID
+	return inbound, nil
 }

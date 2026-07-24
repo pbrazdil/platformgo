@@ -29,8 +29,11 @@ func decodeEngineInputMessage(
 		return engine.InputEnvelope{}, engine.TradingAction{}, err
 	}
 	input.StreamSequence = inbound.StreamSequence
+	if inbound.MessageIDError != nil {
+		return input, action, inbound.MessageIDError
+	}
 	if input.InputID != inbound.MessageID {
-		return engine.InputEnvelope{}, engine.TradingAction{}, errors.New(
+		return input, action, errors.New(
 			"decode engine input message: header and envelope IDs differ",
 		)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -545,6 +546,132 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	}
 	if mismatchAccounts != 0 {
 		t.Fatalf("subject mismatch configured %d accounts", mismatchAccounts)
+	}
+
+	for index, poisonKind := range []string{"different", "missing", "malformed"} {
+		shardID := engine.ShardID(16 + index)
+		if err := platformnats.EnsureEngineShardStream(
+			ctx,
+			js,
+			shardID,
+			limits,
+		); err != nil {
+			t.Fatalf("EnsureEngineShardStream %s ID poison: %v", poisonKind, err)
+		}
+		accountID := "message-id-" + poisonKind
+		action := engine.TradingAction{
+			Kind: engine.TradingActionConfigureAccount,
+			ConfigureAccount: &engine.ConfigureAccount{
+				AccountID: accountID,
+				OmsMode:   engine.OmsModeNetting,
+			},
+		}
+		payload, err := engine.EncodeTradingAction(action)
+		if err != nil {
+			t.Fatalf("EncodeTradingAction %s ID poison: %v", poisonKind, err)
+		}
+		inputID := engine.IDFromSequence(engine.ID{}, uint64(125+index))
+		input := engine.InputEnvelope{
+			InputID:              inputID,
+			SchemaVersion:        engine.CurrentSchemaVersion,
+			ShardID:              shardID,
+			Kind:                 engine.InputKindCommand,
+			SourceID:             "command-journal",
+			SourceSequence:       1,
+			LogicalTime:          engine.NewLogicalTime(logicalTime),
+			ConfigurationVersion: 1,
+			InstrumentVersion:    1,
+			Payload:              payload,
+		}
+		transport, err := platformnats.EncodeEngineInputMessage(input)
+		if err != nil {
+			t.Fatalf("EncodeEngineInputMessage %s ID poison: %v", poisonKind, err)
+		}
+		subject := fmt.Sprintf("engine.input.%d.command.v1", shardID)
+		switch poisonKind {
+		case "different":
+			_, err = js.Publish(
+				ctx,
+				subject,
+				transport,
+				jetstream.WithMsgID(
+					engine.IDFromSequence(engine.ID{}, uint64(135+index)).String(),
+				),
+			)
+		case "missing":
+			_, err = js.Publish(ctx, subject, transport)
+		case "malformed":
+			message := gonats.NewMsg(subject)
+			message.Data = transport
+			message.Header.Set(gonats.MsgIdHdr, "not-a-canonical-id")
+			_, err = js.PublishMsg(ctx, message)
+		}
+		if err != nil {
+			t.Fatalf("publish %s ID poison: %v", poisonKind, err)
+		}
+		processor, err := platformnats.NewEngineProcessor(ctx, engineStore, shardID)
+		if err != nil {
+			t.Fatalf("NewEngineProcessor %s ID poison: %v", poisonKind, err)
+		}
+		consumer, err := platformnats.NewEnginePullConsumer(
+			ctx,
+			js,
+			shardID,
+			fmt.Sprintf("engine-shard-%d-message-id-%s", shardID, poisonKind),
+			time.Second,
+		)
+		if err != nil {
+			t.Fatalf("NewEnginePullConsumer %s ID poison: %v", poisonKind, err)
+		}
+		processed, err := consumer.ProcessOne(ctx, processor.Handle)
+		if !processed || err == nil || processor.Ready() {
+			t.Fatalf(
+				"%s ID poison = processed %t ready %t error %v",
+				poisonKind,
+				processed,
+				processor.Ready(),
+				err,
+			)
+		}
+		if err := processor.Close(ctx); err != nil {
+			t.Fatalf("close %s ID poison processor: %v", poisonKind, err)
+		}
+		restarted, err := platformnats.NewEngineProcessor(ctx, engineStore, shardID)
+		if err != nil {
+			t.Fatalf("restart %s ID poison processor: %v", poisonKind, err)
+		}
+		if restarted.Ready() {
+			t.Fatalf("%s ID poison processor became ready after restart", poisonKind)
+		}
+		if err := restarted.Close(ctx); err != nil {
+			t.Fatalf("close restarted %s ID poison processor: %v", poisonKind, err)
+		}
+		var faults int
+		var accounts int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*)
+			  FROM engine.shard_faults
+			 WHERE shard_id = $1`,
+			int64(shardID),
+		).Scan(&faults); err != nil {
+			t.Fatalf("count %s ID poison faults: %v", poisonKind, err)
+		}
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*)
+			  FROM trading.accounts
+			 WHERE account_id = $1`,
+			accountID,
+		).Scan(&accounts); err != nil {
+			t.Fatalf("count %s ID poison accounts: %v", poisonKind, err)
+		}
+		if faults != 1 || accounts != 0 {
+			t.Fatalf(
+				"%s ID poison = faults %d accounts %d, want 1 and 0",
+				poisonKind,
+				faults,
+				accounts,
+			)
+		}
 	}
 }
 
