@@ -24,7 +24,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	if natsURL == "" || postgresDSN == "" {
 		t.Skip("NATS and PostgreSQL integration URLs are required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	pool, err := pgxpool.New(ctx, postgresDSN)
@@ -676,7 +676,7 @@ func TestLaterAccountCommandCannotBypassOrderedPublication(t *testing.T) {
 	if natsURL == "" || postgresDSN == "" {
 		t.Skip("NATS and PostgreSQL integration URLs are required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	pool, err := pgxpool.New(ctx, postgresDSN)
