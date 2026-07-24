@@ -18,6 +18,7 @@ internal/money,ported-compatibility,true,true
 internal/order,ported-compatibility,true,true
 internal/position,ported-compatibility,true,true
 internal/report,ported-compatibility,true,true
+internal/testsupport/postgresfixture,infrastructure,false,false
 testkit,test-placeholder,false,true
 tests,test-placeholder,false,false
 scripts,tooling,false,false
