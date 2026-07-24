@@ -203,17 +203,23 @@ func assertImmutableLedgerFacts(t *testing.T, pool *pgxpool.Pool) {
 	_, err := pool.Exec(
 		context.Background(),
 		`INSERT INTO ledger.transactions (transaction_id, business_key, input_id, logical_time)
-		 VALUES ($1, 'balanced', $2, '2026-07-24T10:00:00Z');
-		 INSERT INTO ledger.entries (
-			entry_id, transaction_id, account_id, currency, amount
-		 ) VALUES
-		 ($3, $1, 'account-1', 'USDC', 1),
-		 ($4, $1, 'system:clearing', 'USDC', -1);`,
+		 VALUES ($1, 'balanced', $2, '2026-07-24T10:00:00Z')`,
 		transactionID,
 		"019f9460-4b36-4e9b-8f44-682611f7ee01",
-		"019f9460-4b36-4e9b-8f44-682611f7ee21",
-		"019f9460-4b36-4e9b-8f44-682611f7ee22",
 	)
+	if err == nil {
+		_, err = pool.Exec(
+			context.Background(),
+			`INSERT INTO ledger.entries (
+				entry_id, transaction_id, account_id, currency, amount
+			 ) VALUES
+			 ($1, $2, 'account-1', 'USDC', 1),
+			 ($3, $2, 'system:clearing', 'USDC', -1)`,
+			"019f9460-4b36-4e9b-8f44-682611f7ee21",
+			transactionID,
+			"019f9460-4b36-4e9b-8f44-682611f7ee22",
+		)
+	}
 	if err != nil {
 		t.Fatalf("insert balanced ledger facts: %v", err)
 	}
