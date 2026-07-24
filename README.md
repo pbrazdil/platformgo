@@ -6,7 +6,7 @@ Clean-room Go replacement for `upcomers-org/platform`, using pinned source tests
 
 Last updated: 2026-07-24
 
-Current delivery stage: **Phase 0 — repository preflight; external governance activation pending**.
+Current delivery stage: **Phase 0 — numeric foundation**.
 
 The pinned source inventory is complete: all 2,748 tests are recorded in
 `ports/test-port-map.csv`. Of those, 2,651 have native Go representations but
@@ -20,7 +20,7 @@ This repository is not yet a production-capable replacement. It has no executabl
 
 | Phase | Status | Evidence and remaining work |
 |---|---|---|
-| 0 — Policy and test harness | Local preflight complete; hosted activation pending | Machine-readable package scope, AST policy checks, split port/review/wiring evidence, exact function provenance, canonical source authorities, pinned Go 1.26.5, CODEOWNERS, immutable CI actions, complete-port and tidy gates, and the initial agent-evaluation corpus exist. Local required checks pass. `main` is not yet protected and no hosted run has exercised this candidate. |
+| 0 — Policy and test harness | Repository preflight complete; numeric foundation in progress | Machine-readable package scope, AST policy checks, split port/review/wiring evidence, exact function provenance, canonical source authorities, pinned Go 1.26.5, CODEOWNERS, immutable CI actions, complete-port and tidy gates, and the initial agent-evaluation corpus exist. `main` is protected, all seven required checks are enforced, and the current `main` passed the complete hosted workflow. The next narrow slice is the production exact-decimal and typed-value foundation. |
 | 1 — Pure engine | Not started under the reviewed-evidence definition | Extensive native compatibility models and placeholder tests exist, but no implementation cohort is semantically reviewed and wired to the intended deterministic engine boundary. |
 | 2 — Durable execution | Not started | PostgreSQL migrations and persistence, idempotency journal, transactional ledger/state, NATS/JetStream transport, outbox/inbox, and durable recovery are not implemented. |
 | 3 — Compatibility edges | Not started | Production REST, gRPC, authentication, realtime/Centrifugo, health, CLI, and deployment-compatible services are not implemented. |
@@ -40,16 +40,14 @@ Verified on 2026-07-24:
   remain quarantined but still compile, test, vet, and pass AST safety checks.
 - All 2,748 ledger rows pass structural validation and exact Go `FuncDecl`
   provenance binding.
-- The latest hosted run on the existing `main` commit still predates this
-  preflight candidate and failed; hosted green status is not yet claimed.
+- The complete hosted workflow passed on current `main` commit
+  `325c7231553059b81579bb0962f1959655931d11`.
 
 ## Next milestone
 
-Publish the preflight candidate, protect `main`, require the policy,
-module-consistency, lint, test, race, deterministic-repeat, and vulnerability
-jobs, and obtain one complete green hosted run. Then begin the numeric
-foundation cohort: independently review its source tests, fix malformed decimal
-parsing, settle the one exact economic representation and precision rules, wire
-the reviewed tests red to real code, and implement them green.
+Complete the numeric foundation cohort: independently review its source tests,
+settle the one exact economic representation and precision rules, wire the
+reviewed tests red to real code, and implement them green without allowing the
+quarantined compatibility decimal tree into production.
 
 The authoritative scope, phase definitions, and completion criteria are in `PROJECT_CHARTER.md`. Repository-wide execution rules are in `AGENTS.md`.

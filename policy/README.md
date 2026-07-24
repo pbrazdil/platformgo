@@ -31,3 +31,10 @@ packages remain outside that strict profile until their implementation cohort
 is reviewed and reclassified; they are still compiled, tested, vetted, and
 subject to the AST safety policy. Production packages may not import a
 quarantined compatibility package.
+
+`github.com/cockroachdb/apd/v3` is restricted to
+`internal/decimal/economic`. That package is the sole production exact-decimal
+implementation; the parent `internal/decimal` compatibility tree remains
+quarantined. Classification rows may predeclare a package boundary for the
+next implementation PR; strict lint selects only classified directories that
+exist in the current tree.

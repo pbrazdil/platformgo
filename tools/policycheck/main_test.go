@@ -150,6 +150,47 @@ var _ *sql.DB
 	requireProblem(t, problems, `infrastructure import "database/sql" is forbidden in deterministic package`)
 }
 
+func TestCheckRestrictsAPDToEconomicDecimalPackage(t *testing.T) {
+	for _, sourcePath := range []string{
+		"internal/domain/value.go",
+		"internal/decimal/value.go",
+		"internal/decimal/other/value.go",
+	} {
+		t.Run(sourcePath, func(t *testing.T) {
+			root := policyFixture(t)
+			writeFixtureFile(t, root, sourcePath, `package decimal
+
+import "github.com/cockroachdb/apd/v3"
+
+var _ apd.Decimal
+`)
+
+			problems, err := checkRoot(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireProblem(t, problems, "apd/v3 may only be imported by internal/decimal/economic")
+		})
+	}
+
+	root := policyFixture(t)
+	writeFixtureFile(t, root, "internal/decimal/economic/value.go", `package decimal
+
+import "github.com/cockroachdb/apd/v3"
+
+var _ apd.Decimal
+`)
+	problems, err := checkRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, problem := range problems {
+		if strings.Contains(problem.String(), "apd/v3") {
+			t.Fatalf("production decimal import rejected: %s", problem)
+		}
+	}
+}
+
 func TestCheckRejectsProductionImportOfPortedCompatibilityPackage(t *testing.T) {
 	root := policyFixture(t)
 	writeFixtureFile(t, root, packagePolicyPath, strings.Join([]string{

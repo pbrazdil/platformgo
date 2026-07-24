@@ -23,7 +23,12 @@ fmt-check:
 
 lint:
 	go vet ./...
-	@packages="$$(awk -F, 'NR > 1 && $$2 != "ported-compatibility" && $$2 != "test-placeholder" { print "./" $$1 "/..." }' policy/go-package-policy.csv)"; \
+	@packages=""; \
+	while IFS=, read -r path classification _; do \
+	  if [ -d "$$path" ] && [ "$$classification" != "ported-compatibility" ] && [ "$$classification" != "test-placeholder" ]; then \
+	    packages="$$packages ./$$path/..."; \
+	  fi; \
+	done < <(tail -n +2 policy/go-package-policy.csv); \
 	  $(GOLANGCI_LINT) run $$packages
 
 test:
