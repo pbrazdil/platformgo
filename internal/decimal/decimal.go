@@ -50,6 +50,9 @@ func Parse(text string) (Decimal, error) {
 	if input == "" {
 		return Decimal{}, fmt.Errorf("invalid decimal %q", text)
 	}
+	if !strings.ContainsAny(input, "0123456789") {
+		return Decimal{}, fmt.Errorf("invalid decimal %q", text)
+	}
 
 	exponent := int64(0)
 	if index := strings.IndexAny(input, "eE"); index >= 0 {
@@ -121,6 +124,104 @@ func (d Decimal) Scale() uint8 {
 // IsZero reports whether the value is zero.
 func (d Decimal) IsZero() bool {
 	return d.coefficient == nil || d.coefficient.Sign() == 0
+}
+
+// Sign returns -1, 0, or 1 according to the value's sign.
+func (d Decimal) Sign() int {
+	return d.coefficientCopy().Sign()
+}
+
+// Add returns the exact sum at the greater operand scale.
+func (d Decimal) Add(other Decimal) Decimal {
+	left, right := aligned(d, other)
+	scale := max(d.scale, other.scale)
+	return newDecimal(new(big.Int).Add(left, right), scale)
+}
+
+// Sub returns the exact difference at the greater operand scale.
+func (d Decimal) Sub(other Decimal) Decimal {
+	left, right := aligned(d, other)
+	scale := max(d.scale, other.scale)
+	return newDecimal(new(big.Int).Sub(left, right), scale)
+}
+
+// Neg returns the additive inverse.
+func (d Decimal) Neg() Decimal {
+	return newDecimal(new(big.Int).Neg(d.coefficientCopy()), d.scale)
+}
+
+// Mul returns the exact product.
+func (d Decimal) Mul(other Decimal) Decimal {
+	scale := uint16(d.scale) + uint16(other.scale)
+	if scale > 255 {
+		panic("decimal multiplication scale exceeds 255")
+	}
+	return newDecimal(
+		new(big.Int).Mul(d.coefficientCopy(), other.coefficientCopy()),
+		uint8(scale),
+	)
+}
+
+// Quo divides by other and returns targetScale digits using mode.
+func (d Decimal) Quo(other Decimal, targetScale uint8, mode RoundingMode) (Decimal, error) {
+	if other.IsZero() {
+		return Decimal{}, errors.New("decimal division by zero")
+	}
+
+	numerator := d.coefficientCopy()
+	denominator := other.coefficientCopy()
+	exponent := int(targetScale) + int(other.scale) - int(d.scale)
+	if exponent >= 0 {
+		numerator.Mul(numerator, powerOfTen(uint32(exponent)))
+	} else {
+		denominator.Mul(denominator, powerOfTen(uint32(-exponent)))
+	}
+
+	coefficient, remainder := new(big.Int), new(big.Int)
+	coefficient.QuoRem(numerator, denominator, remainder)
+	switch mode {
+	case RoundHalfEven:
+		if remainder.Sign() != 0 {
+			twiceRemainder := new(big.Int).Lsh(new(big.Int).Abs(remainder), 1)
+			absoluteDenominator := new(big.Int).Abs(new(big.Int).Set(denominator))
+			comparison := twiceRemainder.Cmp(absoluteDenominator)
+			coefficientOdd := new(big.Int).Abs(new(big.Int).Set(coefficient)).Bit(0) == 1
+			if comparison > 0 || (comparison == 0 && coefficientOdd) {
+				if numerator.Sign() == denominator.Sign() {
+					coefficient.Add(coefficient, big.NewInt(1))
+				} else {
+					coefficient.Sub(coefficient, big.NewInt(1))
+				}
+			}
+		}
+	case RoundTowardZero:
+	default:
+		return Decimal{}, fmt.Errorf("unsupported rounding mode %d", mode)
+	}
+	return newDecimal(coefficient, targetScale), nil
+}
+
+// Cmp compares d and other numerically.
+func (d Decimal) Cmp(other Decimal) int {
+	left, right := aligned(d, other)
+	return left.Cmp(right)
+}
+
+// Normalize removes trailing fractional zeros.
+func (d Decimal) Normalize() Decimal {
+	coefficient := d.coefficientCopy()
+	scale := d.scale
+	ten := big.NewInt(10)
+	remainder := new(big.Int)
+	for scale > 0 {
+		remainder.Rem(coefficient, ten)
+		if remainder.Sign() != 0 {
+			break
+		}
+		coefficient.Quo(coefficient, ten)
+		scale--
+	}
+	return newDecimal(coefficient, scale)
 }
 
 // Quantize returns the same value at targetScale using mode when digits must
