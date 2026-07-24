@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -95,7 +96,7 @@ func TestDuplicateInputReturnsRecordedDecisionWithoutMutation(t *testing.T) {
 	if next.Hash() != beforeHash || next.NextStreamSequence() != state.NextStreamSequence() {
 		t.Fatalf("duplicate mutated state: before=%s after=%s", beforeHash, next.Hash())
 	}
-	if duplicate != recorded {
+	if !equalDecision(duplicate, recorded) {
 		t.Fatalf("duplicate decision differs:\nrecorded:  %+v\nduplicate: %+v", recorded, duplicate)
 	}
 }
@@ -110,7 +111,7 @@ func TestReplayProducesIdenticalHashes(t *testing.T) {
 		t.Fatalf("replayed state hash differs: %s != %s", leftState.Hash(), rightState.Hash())
 	}
 	for index := range leftDecisions {
-		if leftDecisions[index] != rightDecisions[index] {
+		if !equalDecision(leftDecisions[index], rightDecisions[index]) {
 			t.Fatalf("decision %d differs:\nleft:  %+v\nright: %+v", index, leftDecisions[index], rightDecisions[index])
 		}
 	}
@@ -156,7 +157,7 @@ func TestApplyDoesNotMutateInputState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("duplicate on input state: %v", err)
 	}
-	if duplicateState.Hash() != firstHash || duplicateDecision != firstDecision {
+	if duplicateState.Hash() != firstHash || !equalDecision(duplicateDecision, firstDecision) {
 		t.Fatal("later branches mutated the input state's receipt")
 	}
 	if leftState.Hash() == rightState.Hash() {
@@ -337,4 +338,8 @@ func mustID(t *testing.T, input string) ID {
 		t.Fatalf("ParseID(%q): %v", input, err)
 	}
 	return id
+}
+
+func equalDecision(left, right Decision) bool {
+	return reflect.DeepEqual(left, right)
 }
