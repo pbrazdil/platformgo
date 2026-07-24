@@ -363,6 +363,14 @@ func (c *checker) inspectFile(
 		if importPath == "unsafe" {
 			c.add(relative, fileSet.Position(imported.Pos()).Line, "unsafe import is forbidden")
 		}
+		if importPath == "github.com/cockroachdb/apd/v3" &&
+			!strings.HasPrefix(relative, "internal/decimal/economic/") {
+			c.add(
+				relative,
+				fileSet.Position(imported.Pos()).Line,
+				"apd/v3 may only be imported by internal/decimal/economic",
+			)
+		}
 		if classified && rule.deterministic && isInfrastructureImport(importPath) {
 			c.add(
 				relative,

@@ -3,6 +3,7 @@ internal/account,ported-compatibility,true,true
 internal/adapters,infrastructure,false,false
 internal/currency,ported-compatibility,true,true
 internal/decimal,ported-compatibility,true,true
+internal/decimal/economic,production-economic,true,true
 internal/defi,ported-compatibility,true,true
 internal/domain,production-economic,true,true
 internal/edge,infrastructure,false,false
