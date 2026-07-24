@@ -63,6 +63,36 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 	assertAPIRoleCannotMutateEconomicTables(t, pool)
 }
 
+func TestMigratorEnforcesMinimumPostgresVersion(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+
+	var versionNumber int
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT current_setting('server_version_num')::integer",
+	).Scan(&versionNumber); err != nil {
+		t.Fatalf("read PostgreSQL version: %v", err)
+	}
+
+	err := platformpostgres.NewMigrator(pool, fstest.MapFS{}).
+		Migrate(context.Background())
+	majorVersion := versionNumber / 10000
+	if majorVersion < platformpostgres.MinimumPostgresMajorVersion {
+		if !errors.Is(err, platformpostgres.ErrUnsupportedPostgresVersion) {
+			t.Fatalf(
+				"PostgreSQL %d migration error = %v, want ErrUnsupportedPostgresVersion",
+				majorVersion,
+				err,
+			)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("PostgreSQL %d migration error = %v, want nil", majorVersion, err)
+	}
+}
+
 func TestMigratorTracksChecksumsAndRejectsHistoryDrift(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)

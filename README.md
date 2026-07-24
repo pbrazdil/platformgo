@@ -1,6 +1,6 @@
 # platformgo
 
-Clean-room Go replacement for `upcomers-org/platform`, using pinned source tests as the executable specification. The intended production stack is Go, PostgreSQL, NATS with JetStream, Centrifugo, and Hyperliquid first.
+Clean-room Go replacement for `upcomers-org/platform`, using pinned source tests as the executable specification. The intended production stack is Go, PostgreSQL 17 or newer, NATS with JetStream, Centrifugo, and Hyperliquid first.
 
 ## Current status
 

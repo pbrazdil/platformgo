@@ -11,7 +11,7 @@ The rewrite exists as an independent contingency implementation. It must be safe
 The intended runtime stack is:
 
 - Go
-- PostgreSQL
+- PostgreSQL 17 or newer
 - NATS with JetStream
 - Centrifugo
 - Hyperliquid as the first market-data and market-rules integration

@@ -22,9 +22,17 @@ var (
 	// ErrDatabaseSchemaAhead means the database contains an applied migration
 	// unknown to this binary.
 	ErrDatabaseSchemaAhead = errors.New("database schema is ahead of this binary")
+	// ErrUnsupportedPostgresVersion means the server is older than the
+	// repository's supported PostgreSQL floor.
+	ErrUnsupportedPostgresVersion = errors.New("unsupported PostgreSQL version")
 )
 
-const migrationAdvisoryLockKey int64 = 0x504c4154474f
+const (
+	// MinimumPostgresMajorVersion is the oldest PostgreSQL release supported by
+	// the platform.
+	MinimumPostgresMajorVersion = 17
+	migrationAdvisoryLockKey    = int64(0x504c4154474f)
+)
 
 var migrationNamePattern = regexp.MustCompile(`^[0-9]{14}_[a-z0-9_]+\.up\.sql$`)
 
@@ -58,6 +66,17 @@ func (migrator *Migrator) Migrate(ctx context.Context) error {
 		return fmt.Errorf("migrate: acquire PostgreSQL connection: %w", err)
 	}
 	defer connection.Release()
+
+	var postgresVersionNumber int
+	if versionErr := connection.QueryRow(
+		ctx,
+		"SELECT current_setting('server_version_num')::integer",
+	).Scan(&postgresVersionNumber); versionErr != nil {
+		return fmt.Errorf("migrate: read PostgreSQL server version: %w", versionErr)
+	}
+	if versionErr := validatePostgresVersionNumber(postgresVersionNumber); versionErr != nil {
+		return fmt.Errorf("migrate: %w", versionErr)
+	}
 
 	if _, lockErr := connection.Exec(
 		ctx,
@@ -121,6 +140,19 @@ func (migrator *Migrator) Migrate(ctx context.Context) error {
 		if err := transaction.Commit(ctx); err != nil {
 			return fmt.Errorf("migrate %s: commit: %w", file.name, err)
 		}
+	}
+	return nil
+}
+
+func validatePostgresVersionNumber(versionNumber int) error {
+	majorVersion := versionNumber / 10000
+	if majorVersion < MinimumPostgresMajorVersion {
+		return fmt.Errorf(
+			"%w: server major version %d, minimum %d",
+			ErrUnsupportedPostgresVersion,
+			majorVersion,
+			MinimumPostgresMajorVersion,
+		)
 	}
 	return nil
 }
