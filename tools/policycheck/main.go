@@ -401,12 +401,14 @@ func (c *checker) inspectFile(
 		}
 		if classified && rule.classification == "production-economic" {
 			target, ok := c.ruleForImport(importPath)
-			if ok && target.classification == "ported-compatibility" {
+			if ok && target.classification != "production-economic" &&
+				(!isTest || target.classification != "test-placeholder") {
 				c.add(
 					relative,
 					fileSet.Position(imported.Pos()).Line,
 					fmt.Sprintf(
-						"production package must not import quarantined compatibility package %q",
+						"production package must not import %s package %q",
+						target.classification,
 						target.path,
 					),
 				)

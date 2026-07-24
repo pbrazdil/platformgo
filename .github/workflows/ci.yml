@@ -65,6 +65,22 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: platformgo_test
+          POSTGRES_PASSWORD: platformgo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d platformgo_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PLATFORMGO_TEST_POSTGRES_DSN: postgres://postgres:platformgo@127.0.0.1:5432/platformgo_test?sslmode=disable
+      PLATFORMGO_TEST_NATS_URL: nats://127.0.0.1:4222
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -72,11 +88,43 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Start NATS with JetStream
+        run: |
+          nats_server_bin="$RUNNER_TEMP/nats-server"
+          docker run --detach --name platformgo-nats \
+            --publish 127.0.0.1:4222:4222 \
+            nats:2.14.3-alpine -js
+          docker cp platformgo-nats:/usr/local/bin/nats-server "$nats_server_bin"
+          echo "PLATFORMGO_TEST_NATS_SERVER_BIN=$nats_server_bin" >> "$GITHUB_ENV"
+          for attempt in {1..20}; do
+            if (echo > /dev/tcp/127.0.0.1/4222) 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs platformgo-nats
+          exit 1
       - if: ${{ hashFiles('go.mod') != '' }}
-        run: go test ./... -count=1
+        run: go test -p 1 ./... -count=1
 
   race:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: platformgo_test
+          POSTGRES_PASSWORD: platformgo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d platformgo_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PLATFORMGO_TEST_POSTGRES_DSN: postgres://postgres:platformgo@127.0.0.1:5432/platformgo_test?sslmode=disable
+      PLATFORMGO_TEST_NATS_URL: nats://127.0.0.1:4222
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -84,8 +132,24 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Start NATS with JetStream
+        run: |
+          nats_server_bin="$RUNNER_TEMP/nats-server"
+          docker run --detach --name platformgo-nats \
+            --publish 127.0.0.1:4222:4222 \
+            nats:2.14.3-alpine -js
+          docker cp platformgo-nats:/usr/local/bin/nats-server "$nats_server_bin"
+          echo "PLATFORMGO_TEST_NATS_SERVER_BIN=$nats_server_bin" >> "$GITHUB_ENV"
+          for attempt in {1..20}; do
+            if (echo > /dev/tcp/127.0.0.1/4222) 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs platformgo-nats
+          exit 1
       - if: ${{ hashFiles('go.mod') != '' }}
-        run: go test -race ./... -count=1
+        run: go test -race -p 1 ./... -count=1
 
   deterministic-repeat:
     runs-on: ubuntu-latest

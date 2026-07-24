@@ -210,7 +210,37 @@ import _ "example.com/project/internal/legacy"
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireProblem(t, problems, "production package must not import quarantined compatibility package")
+	requireProblem(t, problems, "production package must not import ported-compatibility package")
+}
+
+func TestCheckRejectsForbiddenInternalClassificationImportsFromProduction(t *testing.T) {
+	for _, classification := range []string{
+		"infrastructure",
+		"test-placeholder",
+		"tooling",
+		"non-economic",
+	} {
+		t.Run(classification, func(t *testing.T) {
+			root := policyFixture(t)
+			writeFixtureFile(t, root, packagePolicyPath, strings.Join([]string{
+				"path,classification,economic,deterministic",
+				"internal/domain,production-economic,true,true",
+				"internal/forbidden," + classification + ",false,false",
+				"",
+			}, "\n"))
+			writeFixtureFile(t, root, "internal/domain/value.go", `package domain
+
+import _ "example.com/project/internal/forbidden"
+`)
+			writeFixtureFile(t, root, "internal/forbidden/value.go", "package forbidden\n")
+
+			problems, err := checkRoot(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireProblem(t, problems, "production package must not import "+classification+" package")
+		})
+	}
 }
 
 func TestCheckRejectsUnsafeAndForbiddenTestControls(t *testing.T) {
