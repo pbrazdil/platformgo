@@ -109,7 +109,7 @@ Verified on 2026-07-24:
 - The complete Phase 1 implementation passes repository-wide tests, race tests,
   deterministic repeats, policy, formatting, strict lint, complete source
   inventory, tidy-diff, and vulnerability checks.
-- Phase 2 PostgreSQL tests pass against a temporary PostgreSQL 14 instance and
+- Phase 2 PostgreSQL tests pass against a temporary PostgreSQL 17 instance and
   cover clean migration, forward upgrade, immutable/checksum constraints,
   least-privilege roles, atomic rollback/retry, normalized execution
   projections, idempotency replay/conflict, outbox unknown outcomes,
