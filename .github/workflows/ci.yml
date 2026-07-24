@@ -80,6 +80,7 @@ jobs:
           --health-retries 20
     env:
       PLATFORMGO_TEST_POSTGRES_DSN: postgres://postgres:platformgo@127.0.0.1:5432/platformgo_test?sslmode=disable
+      PLATFORMGO_TEST_POSTGRES_RESET_AUTHORIZED: YES_I_UNDERSTAND_THIS_DROPS_SCHEMAS
       PLATFORMGO_TEST_NATS_URL: nats://127.0.0.1:4222
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -124,6 +125,7 @@ jobs:
           --health-retries 20
     env:
       PLATFORMGO_TEST_POSTGRES_DSN: postgres://postgres:platformgo@127.0.0.1:5432/platformgo_test?sslmode=disable
+      PLATFORMGO_TEST_POSTGRES_RESET_AUTHORIZED: YES_I_UNDERSTAND_THIS_DROPS_SCHEMAS
       PLATFORMGO_TEST_NATS_URL: nats://127.0.0.1:4222
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
