@@ -106,7 +106,11 @@ func (l *Level) Exposure() decimal.Decimal {
 
 // SizeRaw returns size scaled to the model's fixed precision.
 func (l *Level) SizeRaw() *big.Int {
-	return fixedRaw(l.Size(), false)
+	total := new(big.Int)
+	for _, order := range l.orders {
+		total.Add(total, order.Quantity.Raw())
+	}
+	return total
 }
 
 // ExposureRaw returns exposure scaled to the model's fixed precision,

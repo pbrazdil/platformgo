@@ -367,6 +367,12 @@ func (q Quantity) Equal(other Quantity) bool {
 	return q.undefined == other.undefined && q.rawValue().Cmp(other.rawValue()) == 0
 }
 
+// Raw returns the fixed-point integer representation scaled by MaxPrecision.
+// The returned integer is a copy and can be mutated by the caller.
+func (q Quantity) Raw() *big.Int {
+	return new(big.Int).Set(q.rawValue())
+}
+
 // AddDecimal returns the exact decimal sum.
 func (q Quantity) AddDecimal(other Decimal) Decimal {
 	return q.value.Add(other)

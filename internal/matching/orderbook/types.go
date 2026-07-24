@@ -12,12 +12,15 @@ import (
 type Side uint8
 
 const (
-	Buy Side = iota + 1
+	NoSide Side = iota
+	Buy
 	Sell
 )
 
 func (s Side) String() string {
 	switch s {
+	case NoSide:
+		return "NO_ORDER_SIDE"
 	case Buy:
 		return "BUY"
 	case Sell:
@@ -33,8 +36,22 @@ type BookType uint8
 
 const (
 	L1MBP BookType = iota + 1
+	L2MBP
 	L3MBO
 )
+
+func (b BookType) String() string {
+	switch b {
+	case L1MBP:
+		return "L1_MBP"
+	case L2MBP:
+		return "L2_MBP"
+	case L3MBO:
+		return "L3_MBO"
+	default:
+		return fmt.Sprintf("BookType(%d)", b)
+	}
+}
 
 // Record flags used by market-data batches.
 const (

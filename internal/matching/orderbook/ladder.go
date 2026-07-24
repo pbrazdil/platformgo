@@ -59,6 +59,15 @@ func (l *Ladder) Add(order Order, flags uint8) {
 	}
 
 	price := order.bookPrice()
+	if l.BookType == L2MBP {
+		if level := l.find(price); level != nil {
+			for _, existing := range level.orders {
+				delete(l.cache, existing.ID)
+			}
+			level.orders = nil
+			clear(level.index)
+		}
+	}
 	l.cache[order.ID] = price
 	if level := l.find(price); level != nil {
 		level.Add(order)
