@@ -11,7 +11,11 @@ ALTER TABLE trading.risk_configs
 ALTER TABLE trading.orders
     DROP CONSTRAINT orders_side_check,
     ADD CONSTRAINT orders_side_check
-        CHECK (side IN ('BUY', 'SELL'));
+        CHECK (side IN ('BUY', 'SELL')),
+    ADD COLUMN has_slippage_band boolean NOT NULL DEFAULT false,
+    ADD COLUMN max_slippage_bps integer NOT NULL DEFAULT 0
+        CHECK (max_slippage_bps >= 0),
+    ADD COLUMN slippage_reference numeric(38,18);
 
 ALTER TABLE trading.fills
     DROP CONSTRAINT fills_side_check,

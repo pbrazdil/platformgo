@@ -30,6 +30,7 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 		"engine.schema_migrations",
 		"engine.shard_checkpoints",
 		"engine.input_receipts",
+		"engine.shard_faults",
 		"trading.idempotency_records",
 		"trading.commands",
 		"trading.orders",
@@ -133,7 +134,7 @@ func resetDurableSchemas(t *testing.T, pool *pgxpool.Pool) {
 
 	_, err := pool.Exec(
 		context.Background(),
-		`DROP SCHEMA IF EXISTS messaging, ledger, trading, engine CASCADE`,
+		`DROP SCHEMA IF EXISTS market, messaging, ledger, trading, engine CASCADE`,
 	)
 	if err != nil {
 		t.Fatalf("reset durable schemas: %v", err)

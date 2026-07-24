@@ -1,6 +1,11 @@
 package engine
 
-import "fmt"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+)
 
 // TradingActionKind identifies one deterministic trading state transition.
 type TradingActionKind string
@@ -346,6 +351,47 @@ func EncodeTradingAction(action TradingAction) (CanonicalPayload, error) {
 		return CanonicalPayload{}, fmt.Errorf("encode trading action: %w", err)
 	}
 	return payload, nil
+}
+
+// DecodeTradingActionPayload restores a persisted canonical action while
+// rejecting unknown fields, trailing values, and non-canonical encodings.
+func DecodeTradingActionPayload(
+	encoded []byte,
+) (TradingAction, CanonicalPayload, error) {
+	var action TradingAction
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&action); err != nil {
+		return TradingAction{}, CanonicalPayload{}, fmt.Errorf(
+			"decode trading action: %w",
+			err,
+		)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return TradingAction{}, CanonicalPayload{}, err
+	}
+	canonical, err := EncodeTradingAction(action)
+	if err != nil {
+		return TradingAction{}, CanonicalPayload{}, err
+	}
+	if !bytes.Equal(encoded, canonical.value) {
+		return TradingAction{}, CanonicalPayload{}, fmt.Errorf(
+			"decode trading action: payload is not canonical",
+		)
+	}
+	return action, canonical, nil
+}
+
+func requireJSONEOF(decoder *json.Decoder) error {
+	var trailing any
+	err := decoder.Decode(&trailing)
+	if err == io.EOF {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("decode trading action trailing data: %w", err)
+	}
+	return fmt.Errorf("decode trading action: multiple JSON values")
 }
 
 // InstrumentSnapshot is the externally inspectable configured revision.

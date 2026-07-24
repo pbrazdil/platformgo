@@ -175,6 +175,46 @@ func TestEngineStoreCommitsReceiptLedgerStateAndCheckpointAtomically(t *testing.
 	if !ok || balance.Total != "15" {
 		t.Fatalf("recovered balance = %+v, %t, want total 15", balance, ok)
 	}
+
+	gapAction := engine.TradingAction{
+		Kind: engine.TradingActionUpdateBook,
+		UpdateBook: &engine.UpdateBook{
+			InstrumentID: "BTC-PERP",
+			MarkPrice:    "102",
+			Bids:         []engine.BookLevel{{Price: "101", Quantity: "1"}},
+			Asks:         []engine.BookLevel{{Price: "103", Quantity: "1"}},
+		},
+	}
+	gapInput := nextStoredInput(t, state, ids, clock, gapAction)
+	gapInput.StreamSequence++
+	halted, _, _, err := store.ApplyTrading(
+		context.Background(),
+		state,
+		gapInput,
+		gapAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if !errors.Is(err, engine.ErrSequenceGap) {
+		t.Fatalf("sequence gap error = %v, want ErrSequenceGap", err)
+	}
+	if halted.Ready() {
+		t.Fatal("sequence gap did not durably halt the shard")
+	}
+	assertRowCount(t, pool, "engine.shard_faults", 1)
+
+	recoveredHalted, err := store.RecoverTradingState(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("RecoverTradingState after halt: %v", err)
+	}
+	if recoveredHalted.Ready() || recoveredHalted.Hash() != halted.Hash() {
+		t.Fatalf(
+			"recovered halt = (%t, %s), want (%t, %s)",
+			recoveredHalted.Ready(),
+			recoveredHalted.Hash(),
+			halted.Ready(),
+			halted.Hash(),
+		)
+	}
 }
 
 func applyStoredTrading(
@@ -247,6 +287,8 @@ func assertRowCount(t *testing.T, pool queryRower, relation string, want int) {
 	switch relation {
 	case "engine.input_receipts":
 		query = "SELECT count(*) FROM engine.input_receipts"
+	case "engine.shard_faults":
+		query = "SELECT count(*) FROM engine.shard_faults"
 	case "ledger.transactions":
 		query = "SELECT count(*) FROM ledger.transactions"
 	case "ledger.entries":
