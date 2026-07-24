@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/upcomers-org/platformgo/internal/decimal"
+	decimal "github.com/upcomers-org/platformgo/internal/decimal/economic"
 )
 
 type State struct {
@@ -372,9 +372,16 @@ func deriveLedgerChanges(
 				return nil, invalidLedgerEffect(input, "previous balance total", err)
 			}
 		}
-		delta := nextTotal.Sub(previousTotal).Normalize()
+		delta, err := nextTotal.Sub(previousTotal)
+		if err != nil {
+			return nil, invalidLedgerEffect(input, "balance delta", err)
+		}
 		if delta.IsZero() {
 			continue
+		}
+		counterAmount, err := (decimal.Decimal{}).Sub(delta)
+		if err != nil {
+			return nil, invalidLedgerEffect(input, "clearing delta", err)
 		}
 		transactionID := IDFromSequence(input.InputID, uint64(len(transactions)+1))
 		transactions = append(transactions, LedgerTransactionSnapshot{
@@ -398,7 +405,7 @@ func deriveLedgerChanges(
 					EntryID:   IDFromSequence(transactionID, 2),
 					AccountID: SystemClearingAccount,
 					Currency:  key.currency,
-					Amount:    delta.Neg().String(),
+					Amount:    counterAmount.String(),
 				},
 			},
 		})
