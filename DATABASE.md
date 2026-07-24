@@ -120,6 +120,12 @@ Stores stable ID, account and account sequence, type, canonical payload, status,
 
 Unique by shard and input ID; also records stream sequence, decision hash and resulting state hash.
 
+### Duplicate delivery receipts
+
+Unique by shard and later stream sequence. Records a re-published stable input,
+the original decision hash, the no-effect delivery decision hash, and resulting
+state hash. It never replaces or duplicates the unique business receipt.
+
 ### Outbox
 
 Stores stable message ID, subject/topic, schema version, payload, attempts, next attempt and publication acknowledgment metadata.

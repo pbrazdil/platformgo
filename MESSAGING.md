@@ -17,7 +17,7 @@ Initial stream set:
 
 | Stream | Subjects | Purpose |
 |---|---|---|
-| `ENGINE_INPUTS` | `engine.input.<shard>.>` | total ordered input history per shard |
+| `ENGINE_INPUTS_<shard>` | `engine.input.<shard>.>` | one physical total-ordered input history per shard |
 | `DOMAIN_EVENTS` | `domain.<version>.<aggregate>.<event>` | committed domain events |
 | `JOBS` | `jobs.<version>.<kind>` | non-engine durable work where appropriate |
 | `OPS` | `ops.<version>.>` | operational events, never economic authority |
@@ -92,6 +92,12 @@ A direct post-commit fast publish is allowed to reduce latency only when the out
 
 JetStream duplicate detection is not sufficient by itself because its deduplication window is finite. Consumers and engine inputs have PostgreSQL receipts.
 
+If the same stable business input is published again after the server
+deduplication window, it receives a new shard stream sequence. The engine
+commits a separate immutable delivery receipt and advances the shard audit
+chain without repeating command, ledger, fill, balance, position, order, or
+event effects. The unique business receipt remains the exactly-once authority.
+
 ## 6. Consumers
 
 Durable consumers use pull mode by default.
@@ -116,6 +122,7 @@ Never acknowledge before commit.
 For each shard:
 
 - one durable consumer;
+- one physical `ENGINE_INPUTS_<shard>` stream;
 - exactly one active process;
 - `MaxAckPending = 1` or equivalent serialized delivery;
 - strict stream sequence processing;
@@ -137,7 +144,7 @@ Projection and notification consumers may use bounded retry and quarantine/dead-
 
 ## 9. Ordering
 
-NATS subject order alone is not a cross-subject business guarantee. The engine relies on one shard stream’s assigned JetStream stream sequence for its total input order.
+NATS subject order alone is not a cross-subject business guarantee. The engine relies on its physical `ENGINE_INPUTS_<shard>` stream sequence for total input order. A shared multi-shard stream is forbidden because unrelated shard traffic would create gaps.
 
 Domain-event consumers rely only on ordering explicitly stated by aggregate version or subject partitioning. They detect gaps and do not infer order from timestamps.
 
