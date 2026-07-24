@@ -1,8 +1,141 @@
 package decimal
 
-import "math/big"
+import (
+	"fmt"
+	"math"
+	"math/big"
+)
 
 var fixedScalar = powerOfTen(uint32(MaxPrecision))
+
+// FixedError identifies a stable fixed-point validation failure.
+type FixedError struct {
+	Kind    string
+	Message string
+}
+
+func (e *FixedError) Error() string { return e.Message }
+
+// CheckFixedPrecision validates precision against the Go model's pinned
+// high-precision fixed scale.
+func CheckFixedPrecision(precision uint8) error {
+	return checkFixedPrecisionLimit(precision, MaxPrecision, "FIXED_PRECISION")
+}
+
+func checkFixedPrecisionLimit(precision, maximum uint8, name string) error {
+	if precision <= maximum {
+		return nil
+	}
+	return &FixedError{
+		Kind: "predicate_violation",
+		Message: fmt.Sprintf(
+			"`precision` exceeded maximum `%s` (%d), was %d",
+			name,
+			maximum,
+			precision,
+		),
+	}
+}
+
+// CheckFixedRaw validates that raw contains no digits beyond precision.
+func CheckFixedRaw(raw *big.Int, precision uint8) error {
+	return checkFixedRawAt(raw, precision, MaxPrecision)
+}
+
+func checkFixedRawAt(raw *big.Int, precision, fixedPrecision uint8) error {
+	if precision >= fixedPrecision {
+		return nil
+	}
+	scale := powerOfTen(uint32(fixedPrecision - precision))
+	remainder := new(big.Int).Rem(new(big.Int).Set(raw), scale)
+	if remainder.Sign() == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"Invalid fixed-point raw value %s for precision %d: remainder %s when divided by scale %s. Raw value should be a multiple of %s. This indicates data corruption or incorrect precision/scaling upstream",
+		raw,
+		precision,
+		remainder,
+		scale,
+		scale,
+	)
+}
+
+// Float64ToFixedInt64 converts value into a signed 64-bit raw value at the
+// pinned fixed scale.
+func Float64ToFixedInt64(value float64, precision uint8) int64 {
+	raw := float64ToFixedBig(value, precision, MaxPrecision, true, 64, "i64")
+	return raw.Int64()
+}
+
+// Float64ToFixedInt128 converts value into a signed 128-bit raw value.
+func Float64ToFixedInt128(value float64, precision uint8) *big.Int {
+	return float64ToFixedBig(value, precision, MaxPrecision, true, 128, "i128")
+}
+
+// Float64ToFixedUint64 converts value into an unsigned 64-bit raw value.
+func Float64ToFixedUint64(value float64, precision uint8) uint64 {
+	raw := float64ToFixedBig(value, precision, MaxPrecision, false, 64, "u64")
+	return raw.Uint64()
+}
+
+// Float64ToFixedUint128 converts value into an unsigned 128-bit raw value.
+func Float64ToFixedUint128(value float64, precision uint8) *big.Int {
+	return float64ToFixedBig(value, precision, MaxPrecision, false, 128, "u128")
+}
+
+func float64ToFixedBig(
+	value float64,
+	precision, fixedPrecision uint8,
+	signed bool,
+	bits uint,
+	typeName string,
+) *big.Int {
+	if err := checkFixedPrecisionLimit(precision, fixedPrecision, "FIXED_PRECISION"); err != nil {
+		panic("Condition failed: " + err.Error())
+	}
+	rounded := math.Round(value * math.Pow10(int(precision)))
+	if math.IsNaN(rounded) || math.IsInf(rounded, 0) {
+		panic("Overflow when scaling f64 to fixed-point " + typeName)
+	}
+	integer, _ := new(big.Float).SetFloat64(rounded).Int(nil)
+	if integer == nil {
+		panic("Overflow when scaling f64 to fixed-point " + typeName)
+	}
+	integer.Mul(integer, powerOfTen(uint32(fixedPrecision-precision)))
+
+	var minimum, maximum *big.Int
+	if signed {
+		minimum, maximum = signedBounds(bits)
+	} else {
+		minimum, maximum = unsignedBounds(bits)
+	}
+	if integer.Cmp(minimum) < 0 || integer.Cmp(maximum) > 0 {
+		panic("Overflow when scaling f64 to fixed-point " + typeName)
+	}
+	return integer
+}
+
+func fixedBigToFloat64(value *big.Int, fixedPrecision uint8) float64 {
+	numerator, _ := new(big.Float).SetInt(value).Float64()
+	return numerator / math.Pow10(int(fixedPrecision))
+}
+
+func FixedInt64ToFloat64(value int64) float64 {
+	return fixedBigToFloat64(big.NewInt(value), MaxPrecision)
+}
+
+func FixedInt128ToFloat64(value *big.Int) float64 {
+	return fixedBigToFloat64(value, MaxPrecision)
+}
+
+func FixedUint64ToFloat64(value uint64) float64 {
+	return fixedBigToFloat64(new(big.Int).SetUint64(value), MaxPrecision)
+}
+
+func FixedUint128ToFloat64(value *big.Int) float64 {
+	return fixedBigToFloat64(value, MaxPrecision)
+}
 
 // BankersRound removes excess base-10 digits using round-half-to-even.
 //
@@ -74,11 +207,15 @@ func correctRaw(raw *big.Int, precision uint8, minimum, maximum *big.Int) *big.I
 // checkedMulDivFixed returns lhs*rhs/10^MaxPrecision, truncated toward zero,
 // when the unsigned result fits maximum.
 func checkedMulDivFixed(lhs, rhs, maximum *big.Int) (*big.Int, bool) {
+	return checkedMulDivScaled(lhs, rhs, fixedScalar, maximum)
+}
+
+func checkedMulDivScaled(lhs, rhs, scalar, maximum *big.Int) (*big.Int, bool) {
 	if lhs.Sign() < 0 || rhs.Sign() < 0 {
 		return nil, false
 	}
 	result := new(big.Int).Mul(lhs, rhs)
-	result.Quo(result, fixedScalar)
+	result.Quo(result, scalar)
 	if result.Cmp(maximum) > 0 {
 		return nil, false
 	}
