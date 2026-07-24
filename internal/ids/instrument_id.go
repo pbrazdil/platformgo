@@ -130,15 +130,8 @@ func (id *InstrumentID) UnmarshalJSON(data []byte) error {
 }
 
 func validateDEXVenue(venue string) error {
-	chain, dex, _ := splitFirst(venue, ":")
-	if chain == "" || dex == "" {
-		return fmt.Errorf("Error creating `Venue` from '%s': invalid blockchain venue '%s': expected format 'Chain:DexId'", venue, venue)
-	}
-	if chain != "Arbitrum" && chain != "Ethereum" {
-		return fmt.Errorf("Error creating `Venue` from '%s': invalid blockchain venue '%s': chain '%s' not recognized", venue, venue, chain)
-	}
-	if dex != "UniswapV3" {
-		return fmt.Errorf("Error creating `Venue` from '%s': invalid blockchain venue '%s': DEX '%s' not recognized", venue, venue, dex)
+	if err := ValidateBlockchainVenue(venue); err != nil {
+		return fmt.Errorf("Error creating `Venue` from '%s': %w", venue, err)
 	}
 	return nil
 }
