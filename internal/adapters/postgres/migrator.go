@@ -59,29 +59,23 @@ func (migrator *Migrator) Migrate(ctx context.Context) error {
 	}
 	defer connection.Release()
 
-	if _, err := connection.Exec(
+	if _, lockErr := connection.Exec(
 		ctx,
 		"SELECT pg_advisory_lock($1)",
 		migrationAdvisoryLockKey,
-	); err != nil {
-		return fmt.Errorf("migrate: acquire advisory lock: %w", err)
+	); lockErr != nil {
+		return fmt.Errorf("migrate: acquire advisory lock: %w", lockErr)
 	}
-	defer func() {
-		_, _ = connection.Exec(
-			context.Background(),
-			"SELECT pg_advisory_unlock($1)",
-			migrationAdvisoryLockKey,
-		)
-	}()
+	defer releaseMigrationLock(context.WithoutCancel(ctx), connection)
 
-	if _, err := connection.Exec(ctx, `
+	if _, metadataErr := connection.Exec(ctx, `
 		CREATE SCHEMA IF NOT EXISTS engine;
 		CREATE TABLE IF NOT EXISTS engine.schema_migrations (
 			filename text PRIMARY KEY,
 			checksum bytea NOT NULL CHECK (octet_length(checksum) = 32),
 			applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
-		)`); err != nil {
-		return fmt.Errorf("migrate: initialize migration metadata: %w", err)
+		)`); metadataErr != nil {
+		return fmt.Errorf("migrate: initialize migration metadata: %w", metadataErr)
 	}
 
 	applied, err := loadAppliedMigrations(ctx, connection)
@@ -129,6 +123,14 @@ func (migrator *Migrator) Migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func releaseMigrationLock(ctx context.Context, connection *pgxpool.Conn) {
+	_, _ = connection.Exec(
+		ctx,
+		"SELECT pg_advisory_unlock($1)",
+		migrationAdvisoryLockKey,
+	)
 }
 
 type migrationFile struct {
