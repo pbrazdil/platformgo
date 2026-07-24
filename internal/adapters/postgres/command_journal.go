@@ -21,7 +21,12 @@ var (
 	// ErrCommandCompletionConflict means a completed command was given a
 	// different terminal result.
 	ErrCommandCompletionConflict = errors.New("command completion conflict")
+	// ErrCommandSequenceGap means a new command did not use the next contiguous
+	// sequence for its account.
+	ErrCommandSequenceGap = errors.New("command account sequence gap")
 )
+
+const commandAccountLockNamespace = 0x5047434d
 
 // IdempotencyState is the durable lifecycle of a request key.
 type IdempotencyState string
@@ -129,6 +134,41 @@ func (journal *CommandJournal) Begin(
 		return BeginCommandResult{}, fmt.Errorf("insert idempotency record: %w", err)
 	}
 	if tag.RowsAffected() == 1 {
+		if _, lockErr := tx.Exec(
+			ctx,
+			"SELECT pg_advisory_xact_lock($1, hashtext($2))",
+			commandAccountLockNamespace,
+			request.AccountID,
+		); lockErr != nil {
+			return BeginCommandResult{}, fmt.Errorf(
+				"lock account %q command sequence: %w",
+				request.AccountID,
+				lockErr,
+			)
+		}
+		var lastSequence int64
+		if sequenceErr := tx.QueryRow(ctx, `
+			SELECT COALESCE(max(account_sequence), 0)
+			  FROM trading.commands
+			 WHERE account_id = $1`,
+			request.AccountID,
+		).Scan(&lastSequence); sequenceErr != nil {
+			return BeginCommandResult{}, fmt.Errorf(
+				"read account %q command sequence: %w",
+				request.AccountID,
+				sequenceErr,
+			)
+		}
+		expectedSequence := uint64(lastSequence) + 1
+		if request.AccountSequence != expectedSequence {
+			return BeginCommandResult{}, fmt.Errorf(
+				"%w: account %q got %d, want %d",
+				ErrCommandSequenceGap,
+				request.AccountID,
+				request.AccountSequence,
+				expectedSequence,
+			)
+		}
 		if _, insertErr := tx.Exec(ctx, `
 			INSERT INTO trading.commands (
 				command_id, account_id, account_sequence, command_type,
@@ -344,18 +384,7 @@ func (journal *CommandJournal) Complete(
 	}
 	switch commandState {
 	case "pending":
-		if _, err := tx.Exec(ctx, `
-			UPDATE trading.commands
-			   SET status = $2,
-			       result = $3,
-			       completed_at = clock_timestamp()
-			 WHERE command_id = $1`,
-			request.CommandID.String(),
-			string(request.Status),
-			result,
-		); err != nil {
-			return fmt.Errorf("complete durable command: %w", err)
-		}
+		return ErrCommandCompletionConflict
 	case string(request.Status):
 		canonicalCurrentResult, canonicalErr := canonicalJSON(currentResult)
 		if canonicalErr != nil {
@@ -367,7 +396,7 @@ func (journal *CommandJournal) Complete(
 	default:
 		return ErrCommandCompletionConflict
 	}
-	if _, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE trading.idempotency_records
 		   SET state = 'completed',
 		       response_status = $2,
@@ -378,8 +407,12 @@ func (journal *CommandJournal) Complete(
 		request.Response.Status,
 		headers,
 		request.Response.Body,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("complete idempotency response: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrCommandCompletionConflict
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit command completion: %w", err)

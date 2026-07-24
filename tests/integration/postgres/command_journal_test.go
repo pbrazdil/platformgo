@@ -138,3 +138,78 @@ func TestCommandJournalRejectsConflictsAndReplaysCompletedResponse(t *testing.T)
 		)
 	}
 }
+
+func TestCommandJournalRejectsOutOfOrderAndPrematureCompletion(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	journal := platformpostgres.NewCommandJournal(pool)
+	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	request := platformpostgres.BeginCommandRequest{
+		Scope:            "account:account-1",
+		IdempotencyKey:   "sequence-1",
+		RequestHash:      sha256.Sum256([]byte("sequence-1")),
+		CommandID:        engine.IDFromSequence(engine.ID{}, 101),
+		AccountID:        "account-1",
+		AccountSequence:  2,
+		CommandType:      "deposit",
+		SchemaVersion:    1,
+		CanonicalPayload: []byte(`{"amount":"10"}`),
+		OutboxSubject:    "engine.input.7.command.v1",
+		OutboxPayload:    []byte(`{"messageId":"019f0000-0000-4000-8000-000000000101"}`),
+		LogicalTime:      now,
+		ExpiresAt:        now.Add(24 * time.Hour),
+	}
+	if _, err := journal.Begin(
+		context.Background(),
+		request,
+	); !errors.Is(err, platformpostgres.ErrCommandSequenceGap) {
+		t.Fatalf("sequence 2 first Begin error = %v, want ErrCommandSequenceGap", err)
+	}
+
+	request.AccountSequence = 1
+	if _, err := journal.Begin(context.Background(), request); err != nil {
+		t.Fatalf("sequence 1 Begin: %v", err)
+	}
+	if err := journal.Complete(context.Background(), platformpostgres.CompleteCommandRequest{
+		CommandID: request.CommandID,
+		Status:    platformpostgres.CommandRejected,
+		Result:    []byte(`{"Status":"rejected","Reason":"invalid_order"}`),
+		Response: platformpostgres.StoredResponse{
+			Status:  400,
+			Headers: []byte(`{"content-type":["application/json"]}`),
+			Body:    []byte(`{"error":"invalid_order"}`),
+		},
+	}); !errors.Is(err, platformpostgres.ErrCommandCompletionConflict) {
+		t.Fatalf(
+			"premature Complete error = %v, want ErrCommandCompletionConflict",
+			err,
+		)
+	}
+
+	var commandStatus string
+	var idempotencyState string
+	if err := pool.QueryRow(context.Background(), `
+		SELECT command.status, idempotency.state
+		  FROM trading.commands AS command
+		  JOIN trading.idempotency_records AS idempotency
+		    ON idempotency.command_id = command.command_id
+		 WHERE command.command_id = $1`,
+		request.CommandID.String(),
+	).Scan(&commandStatus, &idempotencyState); err != nil {
+		t.Fatalf("read pending command: %v", err)
+	}
+	if commandStatus != "pending" || idempotencyState != "in_progress" {
+		t.Fatalf(
+			"premature completion state = command %s idempotency %s",
+			commandStatus,
+			idempotencyState,
+		)
+	}
+}

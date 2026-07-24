@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,9 @@ var (
 	ErrWriterConflict = errors.New("another engine writer owns the shard")
 	// ErrCheckpointMismatch means caller state and PostgreSQL authority disagree.
 	ErrCheckpointMismatch = errors.New("engine checkpoint mismatch")
+	// ErrCommandInputConflict means the delivered engine input does not match
+	// the pending durable command with the same identity.
+	ErrCommandInputConflict = errors.New("engine input conflicts with durable command")
 )
 
 const (
@@ -607,11 +611,52 @@ func persistCommandResult(
 	if input.Kind != engine.InputKindCommand {
 		return nil
 	}
+	var commandStatus string
+	var schemaVersion uint32
+	var accountSequence uint64
+	var storedPayload []byte
+	if err := tx.QueryRow(ctx, `
+		SELECT status, schema_version, account_sequence, canonical_payload
+		  FROM trading.commands
+		 WHERE command_id = $1
+		 FOR UPDATE`,
+		input.InputID.String(),
+	).Scan(
+		&commandStatus,
+		&schemaVersion,
+		&accountSequence,
+		&storedPayload,
+	); errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: %s", ErrCommandNotFound, input.InputID)
+	} else if err != nil {
+		return fmt.Errorf("load command %s for engine commit: %w", input.InputID, err)
+	}
+	if commandStatus != "pending" {
+		return fmt.Errorf(
+			"%w: command %s is %s",
+			ErrCommandCompletionConflict,
+			input.InputID,
+			commandStatus,
+		)
+	}
+	canonicalStored, err := canonicalJSON(storedPayload)
+	if err != nil {
+		return fmt.Errorf("decode command %s canonical payload: %w", input.InputID, err)
+	}
+	canonicalInput, err := canonicalJSON(input.Payload.Bytes())
+	if err != nil {
+		return fmt.Errorf("decode command %s input payload: %w", input.InputID, err)
+	}
+	if schemaVersion != input.SchemaVersion ||
+		accountSequence != input.SourceSequence ||
+		!bytes.Equal(canonicalStored, canonicalInput) {
+		return fmt.Errorf("%w: command %s", ErrCommandInputConflict, input.InputID)
+	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		return fmt.Errorf("encode command %s result: %w", input.InputID, err)
 	}
-	if _, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE trading.commands
 		   SET status = $2,
 		       result = $3,
@@ -620,8 +665,16 @@ func persistCommandResult(
 		input.InputID.String(),
 		string(result.Status),
 		encoded,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("persist command %s result: %w", input.InputID, err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf(
+			"%w: command %s changed before engine commit",
+			ErrCommandCompletionConflict,
+			input.InputID,
+		)
 	}
 	return nil
 }

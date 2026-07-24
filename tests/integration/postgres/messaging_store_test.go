@@ -86,6 +86,90 @@ func TestOutboxRetriesUnknownOutcomeWithStableMessageID(t *testing.T) {
 	}
 }
 
+func TestOutboxDoesNotPublishLaterAccountCommandBeforeEarlierCommand(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	journal := platformpostgres.NewCommandJournal(pool)
+	commandIDs := []engine.ID{
+		engine.IDFromSequence(engine.ID{}, 201),
+		engine.IDFromSequence(engine.ID{}, 202),
+	}
+	for index, commandID := range commandIDs {
+		sequence := uint64(index + 1)
+		request := platformpostgres.BeginCommandRequest{
+			Scope:            "account:account-1",
+			IdempotencyKey:   commandID.String(),
+			RequestHash:      [32]byte{byte(sequence)},
+			CommandID:        commandID,
+			AccountID:        "account-1",
+			AccountSequence:  sequence,
+			CommandType:      "command",
+			SchemaVersion:    1,
+			CanonicalPayload: []byte(`{"kind":"command"}`),
+			OutboxSubject:    "engine.input.7.command.v1",
+			OutboxPayload:    []byte(`{"kind":"command"}`),
+			LogicalTime:      now,
+			ExpiresAt:        now.Add(24 * time.Hour),
+		}
+		if _, err := journal.Begin(context.Background(), request); err != nil {
+			t.Fatalf("Begin sequence %d: %v", sequence, err)
+		}
+	}
+
+	publisher := &failFirstPublisher{}
+	store := platformpostgres.NewMessagingStore(pool)
+	publishNow := time.Now().UTC().Add(time.Second)
+	if published, err := store.PublishOutboxBatch(
+		context.Background(),
+		publisher,
+		publishNow,
+		10,
+		time.Minute,
+		time.Second,
+	); !errors.Is(err, errUnknownPublishOutcome) || published != 0 {
+		t.Fatalf("first publish = %d, error %v", published, err)
+	}
+	if len(publisher.ids) != 1 || publisher.ids[0] != commandIDs[0] {
+		t.Fatalf("first publish IDs = %v, want only %s", publisher.ids, commandIDs[0])
+	}
+
+	if published, err := store.PublishOutboxBatch(
+		context.Background(),
+		publisher,
+		publishNow.Add(time.Second),
+		10,
+		time.Minute,
+		time.Second,
+	); err != nil || published != 1 {
+		t.Fatalf("sequence 1 retry = %d, error %v", published, err)
+	}
+	if len(publisher.ids) != 2 || publisher.ids[1] != commandIDs[0] {
+		t.Fatalf("retry publish IDs = %v, want sequence 1 twice", publisher.ids)
+	}
+
+	if published, err := store.PublishOutboxBatch(
+		context.Background(),
+		publisher,
+		publishNow.Add(2*time.Second),
+		10,
+		time.Minute,
+		time.Second,
+	); err != nil || published != 1 {
+		t.Fatalf("sequence 2 publish = %d, error %v", published, err)
+	}
+	if len(publisher.ids) != 3 || publisher.ids[2] != commandIDs[1] {
+		t.Fatalf("ordered publish IDs = %v, want %v", publisher.ids, commandIDs)
+	}
+}
+
 func TestInboxClaimAndConsumerEffectCommitTogether(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
@@ -182,4 +266,19 @@ func (publisher *unknownOutcomePublisher) Publish(
 		return 0, errUnknownPublishOutcome
 	}
 	return 71, nil
+}
+
+type failFirstPublisher struct {
+	ids []engine.ID
+}
+
+func (publisher *failFirstPublisher) Publish(
+	_ context.Context,
+	message platformpostgres.OutboxMessage,
+) (uint64, error) {
+	publisher.ids = append(publisher.ids, message.MessageID)
+	if len(publisher.ids) == 1 {
+		return 0, errUnknownPublishOutcome
+	}
+	return uint64(80 + len(publisher.ids)), nil
 }

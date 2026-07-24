@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	"github.com/upcomers-org/platformgo/internal/engine"
 	"github.com/upcomers-org/platformgo/testkit"
@@ -50,7 +52,8 @@ func TestEngineStoreCommitsReceiptLedgerStateAndCheckpointAtomically(t *testing.
 		},
 	}
 	state, _, _, _ = applyStoredTrading(
-		t, store, state, ids, clock, configureInstrument, platformpostgres.ApplyOptions{},
+		t, pool, store, state, ids, clock, configureInstrument,
+		platformpostgres.ApplyOptions{},
 	)
 
 	configureAccount := engine.TradingAction{
@@ -61,7 +64,8 @@ func TestEngineStoreCommitsReceiptLedgerStateAndCheckpointAtomically(t *testing.
 		},
 	}
 	state, _, _, _ = applyStoredTrading(
-		t, store, state, ids, clock, configureAccount, platformpostgres.ApplyOptions{},
+		t, pool, store, state, ids, clock, configureAccount,
+		platformpostgres.ApplyOptions{},
 	)
 
 	deposit := engine.TradingAction{
@@ -77,7 +81,7 @@ func TestEngineStoreCommitsReceiptLedgerStateAndCheckpointAtomically(t *testing.
 	var depositInput engine.InputEnvelope
 	var depositDecision engine.Decision
 	state, depositDecision, depositInput, _ = applyStoredTrading(
-		t, store, state, ids, clock, deposit, platformpostgres.ApplyOptions{},
+		t, pool, store, state, ids, clock, deposit, platformpostgres.ApplyOptions{},
 	)
 
 	faultedDeposit := deposit
@@ -89,6 +93,7 @@ func TestEngineStoreCommitsReceiptLedgerStateAndCheckpointAtomically(t *testing.
 		Amount:        "5",
 	}
 	faultInput := nextStoredInput(t, state, ids, clock, faultedDeposit)
+	seedPendingCommand(t, pool, faultInput, faultedDeposit)
 	beforeFaultHash := state.Hash()
 	faults := testkit.NewFaults(platformpostgres.FailpointAfterPersistBeforeCommit)
 	next, _, _, err := store.ApplyTrading(
@@ -111,6 +116,7 @@ func TestEngineStoreCommitsReceiptLedgerStateAndCheckpointAtomically(t *testing.
 	var faultDecision engine.Decision
 	state, faultDecision, _, _ = applyStoredInput(
 		t,
+		pool,
 		store,
 		state,
 		faultInput,
@@ -131,7 +137,7 @@ func TestEngineStoreCommitsReceiptLedgerStateAndCheckpointAtomically(t *testing.
 		},
 	}
 	state, _, _, _ = applyStoredTrading(
-		t, store, state, ids, clock, book, platformpostgres.ApplyOptions{},
+		t, pool, store, state, ids, clock, book, platformpostgres.ApplyOptions{},
 	)
 
 	beforeDuplicateHash := state.Hash()
@@ -288,7 +294,7 @@ func TestEngineStorePersistsOrdersFillsPositionsAndEvents(t *testing.T) {
 	clock := testkit.NewManualClock(
 		engine.NewLogicalTime(time.Date(2026, time.July, 24, 13, 0, 0, 0, time.UTC)),
 	)
-	state, _, _, _ = applyStoredTrading(t, store, state, ids, clock, engine.TradingAction{
+	state, _, _, _ = applyStoredTrading(t, pool, store, state, ids, clock, engine.TradingAction{
 		Kind: engine.TradingActionConfigureInstrument,
 		ConfigureInstrument: &engine.ConfigureInstrument{
 			InstrumentID:            "BTC-PERP",
@@ -304,14 +310,14 @@ func TestEngineStorePersistsOrdersFillsPositionsAndEvents(t *testing.T) {
 			TakerFeeRate:            "0",
 		},
 	}, platformpostgres.ApplyOptions{})
-	state, _, _, _ = applyStoredTrading(t, store, state, ids, clock, engine.TradingAction{
+	state, _, _, _ = applyStoredTrading(t, pool, store, state, ids, clock, engine.TradingAction{
 		Kind: engine.TradingActionConfigureAccount,
 		ConfigureAccount: &engine.ConfigureAccount{
 			AccountID: "account-1",
 			OmsMode:   engine.OmsModeNetting,
 		},
 	}, platformpostgres.ApplyOptions{})
-	state, _, _, _ = applyStoredTrading(t, store, state, ids, clock, engine.TradingAction{
+	state, _, _, _ = applyStoredTrading(t, pool, store, state, ids, clock, engine.TradingAction{
 		Kind: engine.TradingActionAdjustBalance,
 		AdjustBalance: &engine.AdjustBalance{
 			AccountID:     "account-1",
@@ -321,7 +327,7 @@ func TestEngineStorePersistsOrdersFillsPositionsAndEvents(t *testing.T) {
 			Amount:        "1000",
 		},
 	}, platformpostgres.ApplyOptions{})
-	state, _, _, _ = applyStoredTrading(t, store, state, ids, clock, engine.TradingAction{
+	state, _, _, _ = applyStoredTrading(t, pool, store, state, ids, clock, engine.TradingAction{
 		Kind: engine.TradingActionUpdateBook,
 		UpdateBook: &engine.UpdateBook{
 			InstrumentID: "BTC-PERP",
@@ -336,6 +342,7 @@ func TestEngineStorePersistsOrdersFillsPositionsAndEvents(t *testing.T) {
 	var orderDecision engine.Decision
 	state, orderDecision, orderInput, _ = applyStoredTrading(
 		t,
+		pool,
 		store,
 		state,
 		ids,
@@ -427,8 +434,128 @@ func TestEngineStorePersistsOrdersFillsPositionsAndEvents(t *testing.T) {
 	}
 }
 
+func TestEngineStoreRejectsCommandInputThatDiffersFromJournal(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	storedAction := engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "account-1",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	}
+	storedPayload, err := engine.EncodeTradingAction(storedAction)
+	if err != nil {
+		t.Fatalf("EncodeTradingAction stored: %v", err)
+	}
+	deliveredAction := engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "account-2",
+			OmsMode:   engine.OmsModeHedging,
+		},
+	}
+	deliveredPayload, err := engine.EncodeTradingAction(deliveredAction)
+	if err != nil {
+		t.Fatalf("EncodeTradingAction delivered: %v", err)
+	}
+
+	commandID := engine.IDFromSequence(engine.ID{}, 301)
+	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	if _, err := platformpostgres.NewCommandJournal(pool).Begin(
+		context.Background(),
+		platformpostgres.BeginCommandRequest{
+			Scope:            "account:account-1",
+			IdempotencyKey:   "configure-account",
+			RequestHash:      [32]byte{1},
+			CommandID:        commandID,
+			AccountID:        "account-1",
+			AccountSequence:  1,
+			CommandType:      string(storedAction.Kind),
+			SchemaVersion:    engine.CurrentSchemaVersion,
+			CanonicalPayload: storedPayload.Bytes(),
+			OutboxSubject:    "engine.input.7.command.v1",
+			OutboxPayload:    []byte(`{"kind":"mismatched"}`),
+			LogicalTime:      now,
+			ExpiresAt:        now.Add(24 * time.Hour),
+		},
+	); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+
+	input := engine.InputEnvelope{
+		InputID:              commandID,
+		SchemaVersion:        engine.CurrentSchemaVersion,
+		ShardID:              7,
+		Kind:                 engine.InputKindCommand,
+		SourceID:             "command-journal",
+		SourceSequence:       1,
+		StreamSequence:       1,
+		LogicalTime:          engine.NewLogicalTime(now),
+		ConfigurationVersion: 1,
+		InstrumentVersion:    1,
+		Payload:              deliveredPayload,
+	}
+	state := engine.NewState(7)
+	next, _, _, err := platformpostgres.NewEngineStore(pool).ApplyTrading(
+		context.Background(),
+		state,
+		input,
+		deliveredAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if !errors.Is(err, platformpostgres.ErrCommandInputConflict) {
+		t.Fatalf("ApplyTrading error = %v, want ErrCommandInputConflict", err)
+	}
+	if next.Hash() != state.Hash() || next.NextStreamSequence() != 1 {
+		t.Fatalf("failed command advanced state to %+v", next)
+	}
+	assertRowCount(t, pool, "trading.accounts", 0)
+	assertRowCount(t, pool, "engine.input_receipts", 0)
+	assertRowCount(t, pool, "engine.shard_checkpoints", 0)
+
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE trading.commands
+		   SET status = 'rejected',
+		       result = '{"Status":"rejected","Reason":"invalid_order"}',
+		       completed_at = clock_timestamp()
+		 WHERE command_id = $1`,
+		commandID.String(),
+	); err != nil {
+		t.Fatalf("preterminalize command: %v", err)
+	}
+	input.Payload = storedPayload
+	next, _, _, err = platformpostgres.NewEngineStore(pool).ApplyTrading(
+		context.Background(),
+		state,
+		input,
+		storedAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if !errors.Is(err, platformpostgres.ErrCommandCompletionConflict) {
+		t.Fatalf(
+			"preterminalized ApplyTrading error = %v, want ErrCommandCompletionConflict",
+			err,
+		)
+	}
+	if next.Hash() != state.Hash() || next.NextStreamSequence() != 1 {
+		t.Fatalf("preterminalized command advanced state to %+v", next)
+	}
+	assertRowCount(t, pool, "trading.accounts", 0)
+	assertRowCount(t, pool, "engine.input_receipts", 0)
+	assertRowCount(t, pool, "engine.shard_checkpoints", 0)
+}
+
 func applyStoredTrading(
 	t *testing.T,
+	pool *pgxpool.Pool,
 	store *platformpostgres.EngineStore,
 	state engine.State,
 	ids *testkit.IDSequence,
@@ -438,7 +565,7 @@ func applyStoredTrading(
 ) (engine.State, engine.Decision, engine.InputEnvelope, bool) {
 	t.Helper()
 	input := nextStoredInput(t, state, ids, clock, action)
-	return applyStoredInput(t, store, state, input, action, options)
+	return applyStoredInput(t, pool, store, state, input, action, options)
 }
 
 func nextStoredInput(
@@ -471,6 +598,7 @@ func nextStoredInput(
 
 func applyStoredInput(
 	t *testing.T,
+	pool *pgxpool.Pool,
 	store *platformpostgres.EngineStore,
 	state engine.State,
 	input engine.InputEnvelope,
@@ -478,6 +606,7 @@ func applyStoredInput(
 	options platformpostgres.ApplyOptions,
 ) (engine.State, engine.Decision, engine.InputEnvelope, bool) {
 	t.Helper()
+	seedPendingCommand(t, pool, input, action)
 	next, decision, duplicate, err := store.ApplyTrading(
 		context.Background(),
 		state,
@@ -491,12 +620,42 @@ func applyStoredInput(
 	return next, decision, input, duplicate
 }
 
+func seedPendingCommand(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	input engine.InputEnvelope,
+	action engine.TradingAction,
+) {
+	t.Helper()
+	if input.Kind != engine.InputKindCommand {
+		return
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO trading.commands (
+			command_id, account_id, account_sequence, command_type,
+			schema_version, canonical_payload, status, logical_time
+		) VALUES ($1,$2,$3,$4,$5,$6,'pending',$7)
+		ON CONFLICT (command_id) DO NOTHING`,
+		input.InputID.String(),
+		fmt.Sprintf("test-shard-%d", input.ShardID),
+		input.SourceSequence,
+		string(action.Kind),
+		input.SchemaVersion,
+		input.Payload.Bytes(),
+		time.Unix(0, input.LogicalTime.UnixNano()).UTC(),
+	); err != nil {
+		t.Fatalf("seed pending command %s: %v", input.InputID, err)
+	}
+}
+
 func assertRowCount(t *testing.T, pool queryRower, relation string, want int) {
 	t.Helper()
 	query := ""
 	switch relation {
 	case "engine.input_receipts":
 		query = "SELECT count(*) FROM engine.input_receipts"
+	case "engine.shard_checkpoints":
+		query = "SELECT count(*) FROM engine.shard_checkpoints"
 	case "engine.shard_faults":
 		query = "SELECT count(*) FROM engine.shard_faults"
 	case "engine.duplicate_delivery_receipts":
@@ -511,6 +670,8 @@ func assertRowCount(t *testing.T, pool queryRower, relation string, want int) {
 		query = "SELECT count(*) FROM trading.fills"
 	case "trading.positions":
 		query = "SELECT count(*) FROM trading.positions"
+	case "trading.accounts":
+		query = "SELECT count(*) FROM trading.accounts"
 	case "messaging.outbox":
 		query = "SELECT count(*) FROM messaging.outbox"
 	default:

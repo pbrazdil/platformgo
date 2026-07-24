@@ -131,14 +131,29 @@ func (store *MessagingStore) claimOutbox(
 	}()
 
 	rows, err := tx.Query(ctx, `
-		SELECT message_id::text, subject, schema_version, payload, attempts
-		  FROM messaging.outbox
-		 WHERE published_at IS NULL
-		   AND next_attempt_at <= $1
-		   AND (claimed_at IS NULL OR claimed_at <= $2)
-		 ORDER BY next_attempt_at, created_at, message_id
+		SELECT outbox.message_id::text, outbox.subject,
+		       outbox.schema_version, outbox.payload, outbox.attempts
+		  FROM messaging.outbox AS outbox
+		  LEFT JOIN trading.commands AS command
+		    ON command.command_id = outbox.message_id
+		 WHERE outbox.published_at IS NULL
+		   AND outbox.next_attempt_at <= $1
+		   AND (outbox.claimed_at IS NULL OR outbox.claimed_at <= $2)
+		   AND (
+		       command.command_id IS NULL
+		       OR NOT EXISTS (
+		           SELECT 1
+		             FROM trading.commands AS prior_command
+		             JOIN messaging.outbox AS prior_outbox
+		               ON prior_outbox.message_id = prior_command.command_id
+		            WHERE prior_command.account_id = command.account_id
+		              AND prior_command.account_sequence < command.account_sequence
+		              AND prior_outbox.published_at IS NULL
+		       )
+		   )
+		 ORDER BY outbox.next_attempt_at, outbox.created_at, outbox.message_id
 		 LIMIT $3
-		 FOR UPDATE SKIP LOCKED`,
+		 FOR UPDATE OF outbox SKIP LOCKED`,
 		now,
 		now.Add(-claimLease),
 		limit,

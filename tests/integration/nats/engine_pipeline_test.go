@@ -264,6 +264,26 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeEngineInputMessage duplicate probe: %v", err)
 	}
+	if _, err := platformpostgres.NewCommandJournal(pool).Begin(
+		ctx,
+		platformpostgres.BeginCommandRequest{
+			Scope:            "account:duplicate-account",
+			IdempotencyKey:   "duplicate-probe",
+			RequestHash:      sha256.Sum256(duplicateTransport),
+			CommandID:        duplicateInputID,
+			AccountID:        "duplicate-account",
+			AccountSequence:  1,
+			CommandType:      string(duplicateAction.Kind),
+			SchemaVersion:    engine.CurrentSchemaVersion,
+			CanonicalPayload: duplicatePayload.Bytes(),
+			OutboxSubject:    "engine.input.10.command.v1",
+			OutboxPayload:    duplicateTransport,
+			LogicalTime:      logicalTime,
+			ExpiresAt:        now.Add(24 * time.Hour),
+		},
+	); err != nil {
+		t.Fatalf("Begin duplicate probe command: %v", err)
+	}
 	duplicateMessage := platformpostgres.OutboxMessage{
 		MessageID: duplicateInputID,
 		Subject:   "engine.input.10.command.v1",
