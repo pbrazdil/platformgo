@@ -486,6 +486,21 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 			},
 		},
 		{
+			name: "order side",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, fixture reconciliationFixture) {
+				_, err := pool.Exec(context.Background(), `
+					UPDATE trading.orders SET side = 'SELL' WHERE order_id = $1`,
+					fixture.orderID.String(),
+				)
+				if err != nil {
+					t.Fatalf("corrupt order side: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.OrderFillMismatchCount
+			},
+		},
+		{
 			name: "position fold",
 			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
 				_, err := pool.Exec(context.Background(), `
@@ -534,6 +549,146 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 			},
 			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
 				return report.CommandMismatchCount
+			},
+		},
+		{
+			name: "command canonical payload",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, fixture reconciliationFixture) {
+				_, err := pool.Exec(context.Background(), `
+					UPDATE trading.commands
+					   SET canonical_payload = '{}'::jsonb
+					 WHERE command_id = $1`,
+					fixture.orderInputID.String(),
+				)
+				if err != nil {
+					t.Fatalf("corrupt command canonical payload: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.CommandMismatchCount
+			},
+		},
+		{
+			name: "balance reservation",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				_, err := pool.Exec(context.Background(), `
+					UPDATE ledger.balances
+					   SET used = used + 1,
+					       free = free - 1,
+					       ledger_sequence = ledger_sequence + 1
+					 WHERE account_id = 'account-1'
+					   AND currency = 'USDC'`,
+				)
+				if err != nil {
+					t.Fatalf("corrupt balance reservation: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.LedgerMismatchCount
+			},
+		},
+		{
+			name: "risk leverage",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				_, err := pool.Exec(context.Background(), `
+					UPDATE trading.risk_configs
+					   SET leverage = leverage + 1,
+					       version = version + 1
+					 WHERE account_id = 'account-1'
+					   AND instrument_id = 'BTC-PERP'`,
+				)
+				if err != nil {
+					t.Fatalf("corrupt risk leverage: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.ConfigurationMismatchCount
+			},
+		},
+		{
+			name: "market book",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				_, err := pool.Exec(context.Background(), `
+					UPDATE market.books
+					   SET mark_price = mark_price + 1,
+					       stream_sequence = stream_sequence + 1
+					 WHERE instrument_id = 'BTC-PERP'`,
+				)
+				if err != nil {
+					t.Fatalf("corrupt market book: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.MarketMismatchCount
+			},
+		},
+		{
+			name: "funding amount",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				_, err := pool.Exec(context.Background(), `
+					ALTER TABLE trading.funding_settlements
+						DISABLE TRIGGER funding_settlements_are_immutable;
+					UPDATE trading.funding_settlements
+					   SET amount = amount + 1
+					 WHERE account_id = 'account-1'
+					   AND instrument_id = 'BTC-PERP';
+					ALTER TABLE trading.funding_settlements
+						ENABLE TRIGGER funding_settlements_are_immutable`,
+				)
+				if err != nil {
+					t.Fatalf("corrupt funding amount: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.FundingMismatchCount
+			},
+		},
+		{
+			name: "ledger business identity",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				_, err := pool.Exec(context.Background(), `
+					ALTER TABLE ledger.transactions
+						DISABLE TRIGGER ledger_transactions_are_immutable;
+					UPDATE ledger.transactions
+					   SET business_key = business_key || ':corrupt'
+					 WHERE transaction_id = (
+						SELECT transaction_id
+						  FROM ledger.transactions
+						 ORDER BY transaction_id
+						 LIMIT 1
+					 );
+					ALTER TABLE ledger.transactions
+						ENABLE TRIGGER ledger_transactions_are_immutable`,
+				)
+				if err != nil {
+					t.Fatalf("corrupt ledger business identity: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.LedgerMismatchCount
+			},
+		},
+		{
+			name: "domain event payload",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				_, err := pool.Exec(context.Background(), `
+					UPDATE messaging.outbox
+					   SET payload = jsonb_set(payload, '{kind}', '"corrupt"')
+					 WHERE subject LIKE 'domain.v1.%'
+					   AND message_id = (
+						SELECT message_id
+						  FROM messaging.outbox
+						 WHERE subject LIKE 'domain.v1.%'
+						 ORDER BY message_id
+						 LIMIT 1
+					   )`,
+				)
+				if err != nil {
+					t.Fatalf("corrupt domain event payload: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.MessagingMismatchCount
 			},
 		},
 		{
@@ -667,6 +822,10 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 func TestReconcileShardIgnoresOtherShardCorruption(t *testing.T) {
 	pool := postgresPool(t)
 	fixture := seedReconciliationFixture(t, pool, 8)
+	baseline, err := fixture.store.ReconcileShard(context.Background(), 8)
+	if err != nil || !baseline.Ready {
+		t.Fatalf("baseline reconciliation = %+v, error %v", baseline, err)
+	}
 	commandID := engine.IDFromSequence(engine.ID{}, 9801)
 	transactionID := engine.IDFromSequence(engine.ID{}, 9802)
 	inputID := engine.IDFromSequence(engine.ID{}, 9803)
@@ -699,6 +858,14 @@ func TestReconcileShardIgnoresOtherShardCorruption(t *testing.T) {
 		commandID.String(),
 	); err != nil {
 		t.Fatalf("seed other-shard command corruption: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO messaging.outbox (
+			message_id, subject, schema_version, payload
+		) VALUES ($1, 'engine.input.9.command.v1', 1, '{}'::jsonb)`,
+		commandID.String(),
+	); err != nil {
+		t.Fatalf("seed other-shard pending outbox: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO ledger.transactions (
@@ -742,10 +909,122 @@ func TestReconcileShardIgnoresOtherShardCorruption(t *testing.T) {
 	if report.CommandMismatchCount != 0 || report.LedgerMismatchCount != 0 {
 		t.Fatalf("other-shard mismatches leaked into shard 8 report: %+v", report)
 	}
+	if report.PendingOutboxMessages != baseline.PendingOutboxMessages {
+		t.Fatalf(
+			"other-shard outbox changed shard 8 backlog from %d to %d",
+			baseline.PendingOutboxMessages,
+			report.PendingOutboxMessages,
+		)
+	}
+}
+
+func TestReconcileShardAcceptsRoundedMultiFillAndClosedPosition(t *testing.T) {
+	pool := postgresPool(t)
+	fixture := seedReconciliationFixture(t, pool, 8)
+	baseline, err := fixture.store.ReconcileShard(context.Background(), 8)
+	if err != nil || !baseline.Ready {
+		t.Fatalf("rounded multi-fill reconciliation = %+v, error %v", baseline, err)
+	}
+	closeOrderID := engine.IDFromSequence(engine.ID{}, 9810)
+	state, _, _, _ := applyStoredTrading(
+		t,
+		pool,
+		fixture.store,
+		fixture.state,
+		fixture.ids,
+		fixture.clock,
+		engine.TradingAction{
+			Kind: engine.TradingActionSubmitOrder,
+			SubmitOrder: &engine.SubmitOrder{
+				OrderID:      closeOrderID,
+				AccountID:    "account-1",
+				InstrumentID: "BTC-PERP",
+				Side:         engine.SideSell,
+				Type:         engine.OrderTypeMarket,
+				TimeInForce:  engine.TimeInForceIOC,
+				Quantity:     "3",
+				ReduceOnly:   true,
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	if !state.Ready() {
+		t.Fatal("healthy close halted deterministic state")
+	}
+	report, err := fixture.store.ReconcileShard(context.Background(), 8)
+	if err != nil || !report.Ready {
+		t.Fatalf("closed-position reconciliation = %+v, error %v", report, err)
+	}
+}
+
+func TestEngineStorePersistsAmendedOrderQuantity(t *testing.T) {
+	pool := postgresPool(t)
+	fixture := seedReconciliationFixture(t, pool, 8)
+	orderID := engine.IDFromSequence(engine.ID{}, 9820)
+	state, _, _, _ := applyStoredTrading(
+		t,
+		pool,
+		fixture.store,
+		fixture.state,
+		fixture.ids,
+		fixture.clock,
+		engine.TradingAction{
+			Kind: engine.TradingActionSubmitOrder,
+			SubmitOrder: &engine.SubmitOrder{
+				OrderID:      orderID,
+				AccountID:    "account-1",
+				InstrumentID: "BTC-PERP",
+				Side:         engine.SideBuy,
+				Type:         engine.OrderTypeLimit,
+				TimeInForce:  engine.TimeInForceGTC,
+				Quantity:     "1",
+				Price:        "90",
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		fixture.store,
+		state,
+		fixture.ids,
+		fixture.clock,
+		engine.TradingAction{
+			Kind: engine.TradingActionAmendOrder,
+			AmendOrder: &engine.AmendOrder{
+				AccountID: "account-1",
+				OrderID:   orderID,
+				Quantity:  "2",
+				Price:     "91",
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	var quantity string
+	var price string
+	if err := pool.QueryRow(context.Background(), `
+		SELECT trim_scale(quantity)::text, trim_scale(limit_price)::text
+		  FROM trading.orders
+		 WHERE order_id = $1`,
+		orderID.String(),
+	).Scan(&quantity, &price); err != nil {
+		t.Fatalf("read amended durable order: %v", err)
+	}
+	if quantity != "2" || price != "91" {
+		t.Fatalf("amended durable order = quantity %s price %s", quantity, price)
+	}
+	report, err := fixture.store.ReconcileShard(context.Background(), 8)
+	if err != nil || !report.Ready {
+		t.Fatalf("amended-order reconciliation = %+v, error %v", report, err)
+	}
 }
 
 type reconciliationFixture struct {
 	store        *platformpostgres.EngineStore
+	state        engine.State
+	ids          *testkit.IDSequence
+	clock        *testkit.ManualClock
 	orderID      engine.ID
 	orderInputID engine.ID
 }
@@ -804,12 +1083,24 @@ func seedReconciliationFixture(
 			},
 		},
 		{
+			Kind: engine.TradingActionConfigureRisk,
+			ConfigureRisk: &engine.ConfigureRisk{
+				AccountID:    "account-1",
+				InstrumentID: "BTC-PERP",
+				MarginMode:   engine.MarginModeCross,
+				Leverage:     "5",
+			},
+		},
+		{
 			Kind: engine.TradingActionUpdateBook,
 			UpdateBook: &engine.UpdateBook{
 				InstrumentID: "BTC-PERP",
 				MarkPrice:    "100",
 				Bids:         []engine.BookLevel{{Price: "99", Quantity: "10"}},
-				Asks:         []engine.BookLevel{{Price: "100", Quantity: "10"}},
+				Asks: []engine.BookLevel{
+					{Price: "100", Quantity: "1"},
+					{Price: "105", Quantity: "2"},
+				},
 			},
 		},
 	}
@@ -842,7 +1133,25 @@ func seedReconciliationFixture(
 				Side:         engine.SideBuy,
 				Type:         engine.OrderTypeMarket,
 				TimeInForce:  engine.TimeInForceIOC,
-				Quantity:     "1",
+				Quantity:     "3",
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		engine.TradingAction{
+			Kind: engine.TradingActionSettleFunding,
+			SettleFunding: &engine.SettleFunding{
+				SettlementID: engine.IDFromSequence(engine.ID{}, 8802),
+				InstrumentID: "BTC-PERP",
+				OraclePrice:  "100",
+				Rate:         "0.01",
 			},
 		},
 		platformpostgres.ApplyOptions{},
@@ -852,6 +1161,9 @@ func seedReconciliationFixture(
 	}
 	return reconciliationFixture{
 		store:        store,
+		state:        state,
+		ids:          ids,
+		clock:        clock,
 		orderID:      orderID,
 		orderInputID: input.InputID,
 	}

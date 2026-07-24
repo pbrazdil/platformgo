@@ -13,6 +13,7 @@ import (
 	"time"
 
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
+	"github.com/upcomers-org/platformgo/internal/testsupport/postgresfixture"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -1063,9 +1064,9 @@ func resetDurableSchemas(t *testing.T, pool *pgxpool.Pool) {
 func dropDurableSchemas(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 
-	_, err := pool.Exec(
+	err := postgresfixture.ResetDurableSchemas(
 		context.Background(),
-		`DROP SCHEMA IF EXISTS market, messaging, ledger, trading, engine CASCADE`,
+		pool,
 	)
 	if err != nil {
 		t.Fatalf("reset durable schemas: %v", err)

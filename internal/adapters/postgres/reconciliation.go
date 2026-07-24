@@ -14,20 +14,23 @@ var ErrReconciliationMismatch = errors.New("durable reconciliation mismatch")
 
 // ReconciliationReport is the measured durable shard summary.
 type ReconciliationReport struct {
-	ShardID                 engine.ShardID
-	ReceiptCount            uint64
-	DuplicateDeliveryCount  uint64
-	DeliveryMismatchCount   uint64
-	NextStreamSequence      uint64
-	Ready                   bool
-	LedgerMismatchCount     uint64
-	UnbalancedGroupCount    uint64
-	OrderFillMismatchCount  uint64
-	PositionMismatchCount   uint64
-	CommandMismatchCount    uint64
-	ProtectionMismatchCount uint64
-	FundingMismatchCount    uint64
-	PendingOutboxMessages   uint64
+	ShardID                    engine.ShardID
+	ReceiptCount               uint64
+	DuplicateDeliveryCount     uint64
+	DeliveryMismatchCount      uint64
+	NextStreamSequence         uint64
+	Ready                      bool
+	LedgerMismatchCount        uint64
+	UnbalancedGroupCount       uint64
+	OrderFillMismatchCount     uint64
+	PositionMismatchCount      uint64
+	CommandMismatchCount       uint64
+	ProtectionMismatchCount    uint64
+	FundingMismatchCount       uint64
+	ConfigurationMismatchCount uint64
+	MarketMismatchCount        uint64
+	MessagingMismatchCount     uint64
+	PendingOutboxMessages      uint64
 }
 
 // ReconcileShard replays and hash-verifies the shard, then checks contiguous
@@ -41,9 +44,18 @@ func (store *EngineStore) ReconcileShard(
 			"reconcile shard: PostgreSQL pool is required",
 		)
 	}
-	tx, beginErr := store.pool.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel: pgx.Serializable,
-	})
+	ownership, ownershipErr := store.AcquireShardOwnership(ctx, shardID)
+	if ownershipErr != nil {
+		return ReconciliationReport{}, fmt.Errorf(
+			"reconcile shard %d ownership: %w",
+			shardID,
+			ownershipErr,
+		)
+	}
+	defer func() {
+		_ = ownership.Close(context.WithoutCancel(ctx))
+	}()
+	tx, token, releaseOwnership, beginErr := store.beginEngineTx(ctx, ownership)
 	if beginErr != nil {
 		return ReconciliationReport{}, fmt.Errorf(
 			"reconcile shard %d: begin transaction: %w",
@@ -51,11 +63,20 @@ func (store *EngineStore) ReconcileShard(
 			beginErr,
 		)
 	}
+	defer releaseOwnership()
 	defer func() {
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
 	if writerErr := acquireShardWriter(ctx, tx, shardID); writerErr != nil {
 		return ReconciliationReport{}, writerErr
+	}
+	if ownershipErr := verifyOwnershipEpoch(
+		ctx,
+		tx,
+		shardID,
+		token,
+	); ownershipErr != nil {
+		return ReconciliationReport{}, ownershipErr
 	}
 	recovered, recoverErr := recoverTradingState(ctx, tx, shardID)
 	if recoverErr != nil {
@@ -121,11 +142,6 @@ func (store *EngineStore) ReconcileShard(
 				COALESCE(fill_totals.filled_quantity, 0) = 0
 				AND orders.average_fill_price <> 0
 			)
-		    OR (
-				COALESCE(fill_totals.filled_quantity, 0) > 0
-				AND orders.average_fill_price <>
-					fill_totals.fill_notional / fill_totals.filled_quantity
-			)
 		    OR fill_totals.account_id IS DISTINCT FROM fill_totals.maximum_account_id
 		    OR fill_totals.instrument_id IS DISTINCT FROM fill_totals.maximum_instrument_id
 		    OR (
@@ -187,11 +203,13 @@ func (store *EngineStore) ReconcileShard(
 		    OR positions.instrument_id <> fill_totals.instrument_id
 		    OR positions.signed_quantity <> fill_totals.signed_quantity
 		    OR positions.realized_pnl <> fill_totals.realized_pnl
-		    OR positions.side <> CASE
-				WHEN fill_totals.signed_quantity > 0 THEN 'LONG'
-				WHEN fill_totals.signed_quantity < 0 THEN 'SHORT'
-				ELSE 'FLAT'
-			END
+		    OR (
+				fill_totals.signed_quantity <> 0
+				AND positions.side <> CASE
+					WHEN fill_totals.signed_quantity > 0 THEN 'LONG'
+					ELSE 'SHORT'
+				END
+			)
 		    OR positions.status <> CASE
 				WHEN fill_totals.signed_quantity = 0 THEN 'closed'
 				ELSE 'open'
@@ -218,6 +236,24 @@ func (store *EngineStore) ReconcileShard(
 		)
 	}
 	report.PositionMismatchCount += positionProjectionMismatches
+	projectionMismatches, err := compareDurableProjections(ctx, tx, shardID)
+	if err != nil {
+		return ReconciliationReport{}, fmt.Errorf(
+			"reconcile shard %d exact projections: %w",
+			shardID,
+			err,
+		)
+	}
+	report.ConfigurationMismatchCount += projectionMismatches.configuration
+	report.LedgerMismatchCount += projectionMismatches.balance
+	report.OrderFillMismatchCount += projectionMismatches.orderFill
+	report.PositionMismatchCount += projectionMismatches.position
+	report.CommandMismatchCount += projectionMismatches.command
+	report.FundingMismatchCount += projectionMismatches.funding
+	report.MarketMismatchCount += projectionMismatches.market
+	report.LedgerMismatchCount += projectionMismatches.ledger
+	report.MessagingMismatchCount += projectionMismatches.messaging
+	var commandInvariantMismatches uint64
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*)
 		  FROM trading.commands AS command
@@ -247,13 +283,15 @@ func (store *EngineStore) ReconcileShard(
 				)
 			)`,
 		int64(shardID),
-	).Scan(&report.CommandMismatchCount); err != nil {
+	).Scan(&commandInvariantMismatches); err != nil {
 		return ReconciliationReport{}, fmt.Errorf(
 			"reconcile shard %d commands: %w",
 			shardID,
 			err,
 		)
 	}
+	report.CommandMismatchCount += commandInvariantMismatches
+	var fundingCountMismatches uint64
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*)
 		  FROM trading.orders AS protection
@@ -316,13 +354,15 @@ func (store *EngineStore) ReconcileShard(
 		  FULL OUTER JOIN actual USING (input_id)
 		 WHERE expected.effect_count IS DISTINCT FROM actual.effect_count`,
 		int64(shardID),
-	).Scan(&report.FundingMismatchCount); err != nil {
+	).Scan(&fundingCountMismatches); err != nil {
 		return ReconciliationReport{}, fmt.Errorf(
 			"reconcile shard %d funding effects: %w",
 			shardID,
 			err,
 		)
 	}
+	report.FundingMismatchCount += fundingCountMismatches
+	var balanceFoldMismatches uint64
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*), min(stream_sequence), max(stream_sequence)
 		  FROM (
@@ -424,17 +464,36 @@ func (store *EngineStore) ReconcileShard(
 		)
 		SELECT count(*) FROM mismatches`,
 		int64(shardID),
-	).Scan(&report.LedgerMismatchCount); err != nil {
+	).Scan(&balanceFoldMismatches); err != nil {
 		return ReconciliationReport{}, fmt.Errorf(
 			"reconcile shard %d balance projection: %w",
 			shardID,
 			err,
 		)
 	}
+	report.LedgerMismatchCount += balanceFoldMismatches
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*)
-		  FROM messaging.outbox
-		 WHERE published_at IS NULL`,
+		  FROM messaging.outbox AS outbox
+		 WHERE outbox.published_at IS NULL
+		   AND (
+				EXISTS (
+					SELECT 1
+					  FROM trading.commands AS command
+					  JOIN engine.account_shards AS assignment
+					    ON assignment.account_id = command.account_id
+					 WHERE command.command_id = outbox.message_id
+					   AND assignment.shard_id = $1
+				)
+				OR EXISTS (
+					SELECT 1
+					  FROM engine.input_receipts AS receipt
+					 WHERE receipt.shard_id = $1
+					   AND receipt.input_id::text =
+					       outbox.payload ->> 'correlationId'
+				)
+		   )`,
+		int64(shardID),
 	).Scan(&report.PendingOutboxMessages); err != nil &&
 		!errors.Is(err, pgx.ErrNoRows) {
 		return ReconciliationReport{}, fmt.Errorf(
@@ -450,9 +509,12 @@ func (store *EngineStore) ReconcileShard(
 		report.PositionMismatchCount != 0 ||
 		report.CommandMismatchCount != 0 ||
 		report.ProtectionMismatchCount != 0 ||
-		report.FundingMismatchCount != 0 {
+		report.FundingMismatchCount != 0 ||
+		report.ConfigurationMismatchCount != 0 ||
+		report.MarketMismatchCount != 0 ||
+		report.MessagingMismatchCount != 0 {
 		mismatch := fmt.Errorf(
-			"%w: shard %d has delivery=%d ledger=%d balance=%d order_fill=%d position=%d command=%d protection=%d funding=%d mismatches",
+			"%w: shard %d has delivery=%d ledger=%d balance=%d order_fill=%d position=%d command=%d protection=%d funding=%d configuration=%d market=%d messaging=%d mismatches",
 			ErrReconciliationMismatch,
 			shardID,
 			report.DeliveryMismatchCount,
@@ -463,6 +525,9 @@ func (store *EngineStore) ReconcileShard(
 			report.CommandMismatchCount,
 			report.ProtectionMismatchCount,
 			report.FundingMismatchCount,
+			report.ConfigurationMismatchCount,
+			report.MarketMismatchCount,
+			report.MessagingMismatchCount,
 		)
 		if recovered.Ready() {
 			payload, payloadErr := engine.EncodeTradingAction(engine.TradingAction{})

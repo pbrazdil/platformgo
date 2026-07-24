@@ -410,6 +410,8 @@ CREATE TABLE messaging.outbox (
     subject text NOT NULL CHECK (subject <> ''),
     schema_version integer NOT NULL CHECK (schema_version > 0),
     payload jsonb NOT NULL,
+    producer_class text NOT NULL DEFAULT 'api'
+        CHECK (producer_class IN ('api', 'engine')),
     attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     claimed_at timestamptz,
@@ -454,7 +456,13 @@ GRANT UPDATE (
     response_body
 ) ON trading.idempotency_records TO platformgo_api;
 GRANT SELECT, INSERT ON trading.commands TO platformgo_api;
-GRANT SELECT, INSERT ON messaging.outbox TO platformgo_api;
+GRANT SELECT ON messaging.outbox TO platformgo_api;
+GRANT INSERT (
+    message_id,
+    subject,
+    schema_version,
+    payload
+) ON messaging.outbox TO platformgo_api;
 GRANT SELECT ON
     trading.instruments,
     trading.accounts,

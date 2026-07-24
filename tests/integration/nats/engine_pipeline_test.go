@@ -18,6 +18,7 @@ import (
 	platformnats "github.com/upcomers-org/platformgo/internal/adapters/nats"
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	"github.com/upcomers-org/platformgo/internal/engine"
+	"github.com/upcomers-org/platformgo/internal/testsupport/postgresfixture"
 )
 
 func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
@@ -1074,6 +1075,141 @@ func TestEngineProcessorFailsClosedAfterOwnershipSessionLoss(t *testing.T) {
 	assertNATSPipelineRowCount(t, ctx, pool, "trading.instruments", 1)
 }
 
+func TestReconciliationCannotWriteAroundActiveProcessor(t *testing.T) {
+	postgresDSN := os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN")
+	if postgresDSN == "" {
+		t.Skip("PostgreSQL integration URL is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, postgresDSN)
+	if err != nil {
+		t.Fatalf("open PostgreSQL pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	resetDurableSchemas(t, ctx, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	const shardID engine.ShardID = 30
+	store := platformpostgres.NewEngineStore(pool)
+	processor, err := platformnats.NewEngineProcessor(ctx, store, shardID)
+	if err != nil {
+		t.Fatalf("NewEngineProcessor: %v", err)
+	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = processor.Close(context.Background())
+		}
+	})
+	action := engine.TradingAction{
+		Kind: engine.TradingActionConfigureInstrument,
+		ConfigureInstrument: &engine.ConfigureInstrument{
+			InstrumentID:            "RECONCILE-PERP",
+			Revision:                1,
+			PriceScale:              2,
+			QuantityScale:           3,
+			SettlementCurrency:      "USDC",
+			SettlementCurrencyScale: 2,
+			InitialMarginRate:       "0.1",
+			MaintenanceMarginRate:   "0.05",
+			MaxLeverage:             "10",
+			MakerFeeRate:            "0",
+			TakerFeeRate:            "0",
+		},
+	}
+	payload, err := engine.EncodeTradingAction(action)
+	if err != nil {
+		t.Fatalf("EncodeTradingAction: %v", err)
+	}
+	inputID := engine.IDFromSequence(engine.ID{}, 301)
+	encoded, err := platformnats.EncodeEngineInputMessage(engine.InputEnvelope{
+		InputID:              inputID,
+		SchemaVersion:        engine.CurrentSchemaVersion,
+		ShardID:              shardID,
+		Kind:                 engine.InputKindConfiguration,
+		SourceID:             "configuration",
+		SourceSequence:       1,
+		LogicalTime:          engine.NewLogicalTime(time.Unix(1, 0).UTC()),
+		ConfigurationVersion: 1,
+		InstrumentVersion:    1,
+		Payload:              payload,
+	})
+	if err != nil {
+		t.Fatalf("EncodeEngineInputMessage: %v", err)
+	}
+	inbound := platformnats.InboundMessage{
+		MessageID:      inputID,
+		Subject:        "engine.input.30.config.v1",
+		Data:           encoded,
+		StreamSequence: 1,
+	}
+	healthDone := make(chan struct{})
+	healthStopped := make(chan struct{})
+	go func() {
+		defer close(healthStopped)
+		for {
+			select {
+			case <-healthDone:
+				return
+			default:
+				_ = processor.Ready()
+				_ = processor.State()
+			}
+		}
+	}()
+	if err := processor.Handle(ctx, inbound); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	close(healthDone)
+	<-healthStopped
+	if _, err := pool.Exec(ctx, `
+		UPDATE trading.instruments
+		   SET revision = revision + 1
+		 WHERE instrument_id = 'RECONCILE-PERP'`,
+	); err != nil {
+		t.Fatalf("corrupt instrument projection: %v", err)
+	}
+
+	if _, err := store.ReconcileShard(ctx, shardID); !errors.Is(
+		err,
+		platformpostgres.ErrWriterConflict,
+	) {
+		t.Fatalf("live-owner reconciliation error = %v, want ErrWriterConflict", err)
+	}
+	if !processor.Ready() {
+		t.Fatal("processor became unready even though reconciliation committed nothing")
+	}
+	assertNATSPipelineRowCount(t, ctx, pool, "engine.shard_faults", 0)
+	if err := processor.Close(ctx); err != nil {
+		t.Fatalf("close active processor: %v", err)
+	}
+	closed = true
+
+	report, err := store.ReconcileShard(ctx, shardID)
+	if !errors.Is(err, platformpostgres.ErrReconciliationMismatch) ||
+		report.Ready ||
+		report.ConfigurationMismatchCount == 0 {
+		t.Fatalf("offline reconciliation = %+v, error %v", report, err)
+	}
+	assertNATSPipelineRowCount(t, ctx, pool, "engine.shard_faults", 1)
+	restarted, err := platformnats.NewEngineProcessor(ctx, store, shardID)
+	if err != nil {
+		t.Fatalf("restart after reconciliation halt: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = restarted.Close(context.Background())
+	})
+	if restarted.Ready() {
+		t.Fatal("restarted processor became ready after reconciliation halt")
+	}
+}
+
 func TestAPIOutboxCannotPublishNonCommandEngineInput(t *testing.T) {
 	natsURL := os.Getenv("PLATFORMGO_TEST_NATS_URL")
 	postgresDSN := os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN")
@@ -1218,6 +1354,116 @@ func TestAPIOutboxCannotPublishNonCommandEngineInput(t *testing.T) {
 	assertNATSPipelineRowCount(t, ctx, pool, "engine.input_receipts", 0)
 	assertNATSPipelineRowCount(t, ctx, pool, "engine.shard_checkpoints", 0)
 	assertNATSPipelineRowCount(t, ctx, pool, "trading.instruments", 0)
+}
+
+func TestAPIOutboxCannotPublishDomainEvent(t *testing.T) {
+	natsURL := os.Getenv("PLATFORMGO_TEST_NATS_URL")
+	postgresDSN := os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN")
+	if natsURL == "" || postgresDSN == "" {
+		t.Skip("NATS and PostgreSQL integration URLs are required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, postgresDSN)
+	if err != nil {
+		t.Fatalf("open PostgreSQL pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	resetDurableSchemas(t, ctx, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	connection, err := gonats.Connect(natsURL)
+	if err != nil {
+		t.Fatalf("connect NATS: %v", err)
+	}
+	t.Cleanup(connection.Close)
+	js, err := jetstream.New(connection)
+	if err != nil {
+		t.Fatalf("create JetStream context: %v", err)
+	}
+	limits := platformnats.StreamLimits{
+		Replicas:        1,
+		MaxMessages:     100,
+		MaxBytes:        1 << 20,
+		MaxMessageBytes: 1 << 20,
+		MaxAge:          time.Hour,
+		DuplicateWindow: time.Minute,
+	}
+	if err := platformnats.EnsureStreams(ctx, js, limits); err != nil {
+		t.Fatalf("EnsureStreams: %v", err)
+	}
+	messageID := engine.IDFromSequence(engine.ID{}, 232)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin API transaction: %v", err)
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL ROLE platformgo_api"); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("set API role: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO messaging.outbox (
+			message_id, subject, schema_version, payload
+		) VALUES (
+			$1, 'domain.v1.order.filled', 1,
+			'{"messageId":"forged"}'::jsonb
+		)`,
+		messageID.String(),
+	); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("insert forged API domain event: %v", err)
+	}
+	if _, err := tx.Exec(ctx, "SAVEPOINT producer_class_probe"); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("create producer-class savepoint: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO messaging.outbox (
+			message_id, subject, schema_version, payload, producer_class
+		) VALUES (
+			$1, 'domain.v1.order.filled', 1,
+			'{"messageId":"forged"}'::jsonb, 'engine'
+		)`,
+		engine.IDFromSequence(engine.ID{}, 233).String(),
+	); err == nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal("API role set engine producer class")
+	}
+	if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT producer_class_probe"); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("rollback producer-class probe: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit forged API domain event: %v", err)
+	}
+
+	published, err := platformpostgres.NewMessagingStore(pool).PublishOutboxBatch(
+		ctx,
+		platformnats.NewPublisher(js),
+		time.Now().UTC().Add(time.Second),
+		1,
+		time.Minute,
+		time.Second,
+	)
+	if published != 0 ||
+		!errors.Is(err, platformnats.ErrUnauthorizedDomainEventPublication) {
+		t.Fatalf("forged domain publish = %d, error %v", published, err)
+	}
+	stream, err := js.Stream(ctx, platformnats.DomainEventsStream)
+	if err != nil {
+		t.Fatalf("open domain stream: %v", err)
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		t.Fatalf("inspect domain stream: %v", err)
+	}
+	if info.State.Msgs != 0 {
+		t.Fatalf("forged domain stream messages = %d, want 0", info.State.Msgs)
+	}
 }
 
 func TestMalformedTransportInputsRemainDurablyHaltedAfterRestart(t *testing.T) {
@@ -1398,10 +1644,7 @@ func TestMalformedTransportInputsRemainDurablyHaltedAfterRestart(t *testing.T) {
 func resetDurableSchemas(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 
-	if _, err := pool.Exec(
-		ctx,
-		`DROP SCHEMA IF EXISTS market, messaging, ledger, trading, engine CASCADE`,
-	); err != nil {
+	if err := postgresfixture.ResetDurableSchemas(ctx, pool); err != nil {
 		t.Fatalf("reset durable schemas: %v", err)
 	}
 	if _, err := pool.Exec(

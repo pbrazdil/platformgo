@@ -22,6 +22,14 @@ type OutboxMessage struct {
 	Payload             []byte
 	Attempts            uint32
 	orderedCommandClaim [sha256.Size]byte
+	engineEventClaim    [sha256.Size]byte
+}
+
+// HasEngineEventClaim reports whether PostgreSQL admitted this domain event
+// through the engine-only producer class.
+func (message OutboxMessage) HasEngineEventClaim() bool {
+	return message.engineEventClaim != [sha256.Size]byte{} &&
+		message.engineEventClaim == engineEventPublicationFingerprint(message)
 }
 
 // HasOrderedCommandClaim reports whether PostgreSQL admitted this command
@@ -32,8 +40,22 @@ func (message OutboxMessage) HasOrderedCommandClaim() bool {
 }
 
 func commandPublicationFingerprint(message OutboxMessage) [sha256.Size]byte {
+	return publicationFingerprint(
+		"platformgo.postgres.ordered-command-publication.v1",
+		message,
+	)
+}
+
+func engineEventPublicationFingerprint(message OutboxMessage) [sha256.Size]byte {
+	return publicationFingerprint(
+		"platformgo.postgres.engine-event-publication.v1",
+		message,
+	)
+}
+
+func publicationFingerprint(label string, message OutboxMessage) [sha256.Size]byte {
 	hasher := sha256.New()
-	_, _ = hasher.Write([]byte("platformgo.postgres.ordered-command-publication.v1"))
+	_, _ = hasher.Write([]byte(label))
 	_, _ = hasher.Write(message.MessageID[:])
 	var encoded [8]byte
 	binary.BigEndian.PutUint64(encoded[:], uint64(len(message.Subject)))
@@ -164,10 +186,11 @@ func (store *MessagingStore) RepublishOutbox(
 	var message OutboxMessage
 	var messageIDText string
 	var commandMessage bool
+	var producerClass string
 	if err := store.pool.QueryRow(ctx, `
 		SELECT outbox.message_id::text, outbox.subject,
 		       outbox.schema_version, outbox.payload, outbox.attempts,
-		       command.command_id IS NOT NULL
+		       command.command_id IS NOT NULL, outbox.producer_class
 		  FROM messaging.outbox AS outbox
 		  LEFT JOIN trading.commands AS command
 		    ON command.command_id = outbox.message_id
@@ -181,6 +204,7 @@ func (store *MessagingStore) RepublishOutbox(
 		&message.Payload,
 		&message.Attempts,
 		&commandMessage,
+		&producerClass,
 	); errors.Is(err, pgx.ErrNoRows) {
 		return 0, fmt.Errorf("republish outbox: published message %s not found", messageID)
 	} else if err != nil {
@@ -191,8 +215,11 @@ func (store *MessagingStore) RepublishOutbox(
 		return 0, fmt.Errorf("republish outbox: parse message ID: %w", err)
 	}
 	message.MessageID = parsedID
-	if commandMessage {
+	if commandMessage && producerClass == "api" {
 		message.orderedCommandClaim = commandPublicationFingerprint(message)
+	}
+	if producerClass == "engine" {
+		message.engineEventClaim = engineEventPublicationFingerprint(message)
 	}
 	sequence, err := publisher.Publish(ctx, message)
 	if err != nil {
@@ -221,7 +248,7 @@ func (store *MessagingStore) claimOutbox(
 	rows, err := tx.Query(ctx, `
 		SELECT outbox.message_id::text, outbox.subject,
 		       outbox.schema_version, outbox.payload, outbox.attempts,
-		       command.command_id IS NOT NULL
+		       command.command_id IS NOT NULL, outbox.producer_class
 		  FROM messaging.outbox AS outbox
 		  LEFT JOIN trading.commands AS command
 		    ON command.command_id = outbox.message_id
@@ -255,6 +282,7 @@ func (store *MessagingStore) claimOutbox(
 		var message OutboxMessage
 		var messageIDText string
 		var commandMessage bool
+		var producerClass string
 		if scanErr := rows.Scan(
 			&messageIDText,
 			&message.Subject,
@@ -262,6 +290,7 @@ func (store *MessagingStore) claimOutbox(
 			&message.Payload,
 			&message.Attempts,
 			&commandMessage,
+			&producerClass,
 		); scanErr != nil {
 			rows.Close()
 			return nil, fmt.Errorf("claim outbox: scan: %w", scanErr)
@@ -273,8 +302,11 @@ func (store *MessagingStore) claimOutbox(
 		}
 		message.MessageID = messageID
 		message.Attempts++
-		if commandMessage {
+		if commandMessage && producerClass == "api" {
 			message.orderedCommandClaim = commandPublicationFingerprint(message)
+		}
+		if producerClass == "engine" {
+			message.engineEventClaim = engineEventPublicationFingerprint(message)
 		}
 		messages = append(messages, message)
 	}

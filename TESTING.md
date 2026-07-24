@@ -373,3 +373,16 @@ review, production wiring, or implementation completion.
 - contract tests;
 - port-map validation;
 - vulnerability scan.
+## PostgreSQL integration safety
+
+PostgreSQL-backed integration tests drop the `engine`, `trading`, `ledger`,
+`messaging`, and `market` schemas. They run only when the live database name is
+`platformgo_test` or starts with `platformgo_test_`, and require both:
+
+```text
+PLATFORMGO_TEST_POSTGRES_DSN=postgres://.../platformgo_test
+PLATFORMGO_TEST_POSTGRES_RESET_AUTHORIZED=YES_I_UNDERSTAND_THIS_DROPS_SCHEMAS
+```
+
+Never set the reset authorization for a persistent, shared, staging, or
+production database.

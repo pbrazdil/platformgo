@@ -94,6 +94,11 @@ func (store *EngineStore) HaltTradingInput(
 	defer func() {
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
+	if !token.present {
+		if err := acquireOfflineShardOwnership(ctx, tx, state.ShardID()); err != nil {
+			return state, err
+		}
+	}
 	if err := acquireShardWriter(ctx, tx, state.ShardID()); err != nil {
 		return state, err
 	}
@@ -190,9 +195,9 @@ func (store *EngineStore) AcquireShardOwnership(
 	}, nil
 }
 
-// Check proves that the dedicated session still owns the shard advisory lock.
-// A lost session is a fatal single-writer conflict, even if PostgreSQL has
-// already admitted a replacement owner.
+// Check proves that the dedicated session still owns both the shard advisory
+// lock and the durable ownership epoch. Reconciliation can advance the epoch
+// to fence a live owner without depending on process-local notification.
 func (ownership *ShardOwnership) Check(ctx context.Context) error {
 	if ownership == nil {
 		return errors.New("check shard ownership: ownership is required")
@@ -207,19 +212,26 @@ func (ownership *ShardOwnership) Check(ctx context.Context) error {
 		)
 	}
 	var held bool
+	var currentEpoch uint64
 	if err := ownership.connection.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			  FROM pg_locks
-			 WHERE locktype = 'advisory'
-			   AND pid = pg_backend_pid()
-			   AND classid = $1::oid
-			   AND objid = $2::oid
-			   AND granted
-		)`,
+		SELECT
+			EXISTS (
+				SELECT 1
+				  FROM pg_locks
+				 WHERE locktype = 'advisory'
+				   AND pid = pg_backend_pid()
+				   AND classid = $1::oid
+				   AND objid = $2::oid
+				   AND granted
+			),
+			COALESCE((
+				SELECT epoch
+				  FROM engine.shard_ownership_epochs
+				 WHERE shard_id = $2
+			), 0)`,
 		engineOwnerLockNamespace,
 		uint32(ownership.shardID),
-	).Scan(&held); err != nil {
+	).Scan(&held, &currentEpoch); err != nil {
 		return fmt.Errorf(
 			"%w: check shard %d ownership session: %w",
 			ErrWriterConflict,
@@ -232,6 +244,15 @@ func (ownership *ShardOwnership) Check(ctx context.Context) error {
 			"%w: shard %d process ownership lock was lost",
 			ErrWriterConflict,
 			ownership.shardID,
+		)
+	}
+	if currentEpoch != ownership.epoch {
+		return fmt.Errorf(
+			"%w: shard %d ownership epoch changed from %d to %d",
+			ErrWriterConflict,
+			ownership.shardID,
+			ownership.epoch,
+			currentEpoch,
 		)
 	}
 	return nil
@@ -301,6 +322,15 @@ func (store *EngineStore) ApplyTrading(
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
 
+	if !token.present {
+		if ownershipErr := acquireOfflineShardOwnership(
+			ctx,
+			tx,
+			state.ShardID(),
+		); ownershipErr != nil {
+			return state, engine.Decision{}, false, ownershipErr
+		}
+	}
 	if lockErr := acquireShardWriter(ctx, tx, state.ShardID()); lockErr != nil {
 		return state, engine.Decision{}, false, lockErr
 	}
@@ -491,6 +521,30 @@ func acquireShardWriter(
 	}
 	if !acquired {
 		return fmt.Errorf("%w: shard %d", ErrWriterConflict, shardID)
+	}
+	return nil
+}
+
+// acquireOfflineShardOwnership lets test and maintenance callers without a
+// process-lifetime capability mutate a shard only while no live engine owner
+// exists. The transaction-scoped lock uses the same namespace as the lifetime
+// session lock, so it cannot write around an active processor.
+func acquireOfflineShardOwnership(
+	ctx context.Context,
+	tx pgx.Tx,
+	shardID engine.ShardID,
+) error {
+	var acquired bool
+	if err := tx.QueryRow(
+		ctx,
+		"SELECT pg_try_advisory_xact_lock($1, $2)",
+		engineOwnerLockNamespace,
+		int64(shardID),
+	).Scan(&acquired); err != nil {
+		return fmt.Errorf("acquire shard %d offline ownership: %w", shardID, err)
+	}
+	if !acquired {
+		return fmt.Errorf("%w: shard %d process ownership", ErrWriterConflict, shardID)
 	}
 	return nil
 }
@@ -1229,6 +1283,7 @@ func persistOrders(
 			)
 			ON CONFLICT (order_id) DO UPDATE SET
 				status = EXCLUDED.status,
+				quantity = EXCLUDED.quantity,
 				filled_quantity = EXCLUDED.filled_quantity,
 				average_fill_price = EXCLUDED.average_fill_price,
 				limit_price = EXCLUDED.limit_price,
@@ -1248,7 +1303,7 @@ func persistOrders(
 			string(change.Status),
 			change.Quantity,
 			change.FilledQuantity,
-			change.AverageFillPrice,
+			decimalOrZero(change.AverageFillPrice),
 			nullableText(change.Price),
 			nullableText(change.TriggerPrice),
 			change.Triggered,
@@ -1372,8 +1427,8 @@ func persistOutbox(
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO messaging.outbox (
-				message_id, subject, schema_version, payload
-			) VALUES ($1,$2,$3,$4)`,
+				message_id, subject, schema_version, payload, producer_class
+			) VALUES ($1,$2,$3,$4,'engine')`,
 			event.EventID.String(),
 			"domain.v1."+event.Kind,
 			engine.CurrentSchemaVersion,
@@ -1935,6 +1990,13 @@ func nullableID(id engine.ID) any {
 func nullableText(value string) any {
 	if value == "" {
 		return nil
+	}
+	return value
+}
+
+func decimalOrZero(value string) string {
+	if value == "" {
+		return "0"
 	}
 	return value
 }

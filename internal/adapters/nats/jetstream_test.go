@@ -13,7 +13,7 @@ import (
 
 func TestPublisherUsesStableOutboxMessageIDAndWaitsForAck(t *testing.T) {
 	api := &publishProbe{ack: &jetstream.PubAck{
-		Stream:    DomainEventsStream,
+		Stream:    OpsStream,
 		Sequence:  19,
 		Duplicate: true,
 	}}
@@ -23,7 +23,7 @@ func TestPublisherUsesStableOutboxMessageIDAndWaitsForAck(t *testing.T) {
 		context.Background(),
 		platformpostgres.OutboxMessage{
 			MessageID: messageID,
-			Subject:   "domain.v1.order.filled",
+			Subject:   "ops.v1.test",
 			Payload:   []byte(`{"orderId":"order-1"}`),
 		},
 	)
@@ -31,7 +31,7 @@ func TestPublisherUsesStableOutboxMessageIDAndWaitsForAck(t *testing.T) {
 		t.Fatalf("Publish: %v", err)
 	}
 	if sequence != 19 ||
-		api.subject != "domain.v1.order.filled" ||
+		api.subject != "ops.v1.test" ||
 		api.messageID != messageID.String() {
 		t.Fatalf(
 			"publish probe = sequence %d subject %q message ID %q",
@@ -39,6 +39,31 @@ func TestPublisherUsesStableOutboxMessageIDAndWaitsForAck(t *testing.T) {
 			api.subject,
 			api.messageID,
 		)
+	}
+}
+
+func TestPublisherRejectsDomainEventWithoutEngineAuthority(t *testing.T) {
+	api := &publishProbe{ack: &jetstream.PubAck{
+		Stream:   DomainEventsStream,
+		Sequence: 1,
+	}}
+	publisher := &Publisher{js: api}
+	_, err := publisher.Publish(
+		context.Background(),
+		platformpostgres.OutboxMessage{
+			MessageID: engine.IDFromSequence(engine.ID{}, 93),
+			Subject:   "domain.v1.order.filled",
+			Payload:   []byte(`{"orderId":"forged"}`),
+		},
+	)
+	if !errors.Is(err, ErrUnauthorizedDomainEventPublication) {
+		t.Fatalf(
+			"Publish error = %v, want ErrUnauthorizedDomainEventPublication",
+			err,
+		)
+	}
+	if api.subject != "" {
+		t.Fatalf("unauthorized domain event reached transport subject %q", api.subject)
 	}
 }
 

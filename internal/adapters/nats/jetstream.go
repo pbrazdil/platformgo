@@ -162,6 +162,12 @@ var ErrUnauthorizedEngineInputPublication = errors.New(
 	"engine input publication lacks authorized producer claim",
 )
 
+// ErrUnauthorizedDomainEventPublication rejects events that were not created
+// by the engine in the same transaction as their authoritative effects.
+var ErrUnauthorizedDomainEventPublication = errors.New(
+	"domain event publication lacks engine producer claim",
+)
+
 // NewPublisher constructs a PostgreSQL outbox-compatible JetStream publisher.
 func NewPublisher(js jetstream.JetStream) *Publisher {
 	return &Publisher{js: js}
@@ -181,6 +187,14 @@ func (publisher *Publisher) Publish(
 		return 0, fmt.Errorf(
 			"%w: %s",
 			ErrUnauthorizedEngineInputPublication,
+			message.MessageID,
+		)
+	}
+	if strings.HasPrefix(message.Subject, "domain.v1.") &&
+		!message.HasEngineEventClaim() {
+		return 0, fmt.Errorf(
+			"%w: %s",
+			ErrUnauthorizedDomainEventPublication,
 			message.MessageID,
 		)
 	}

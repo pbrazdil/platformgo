@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
@@ -97,6 +98,7 @@ func validateEngineInputSubject(
 // EngineProcessor is the single-owner bridge from one shard pull consumer into
 // the PostgreSQL transaction and deterministic core.
 type EngineProcessor struct {
+	mu             sync.Mutex
 	store          *platformpostgres.EngineStore
 	ownership      *platformpostgres.ShardOwnership
 	state          engine.State
@@ -143,6 +145,8 @@ func (processor *EngineProcessor) Handle(
 	if processor == nil || processor.store == nil {
 		return errors.New("process engine input: processor is not configured")
 	}
+	processor.mu.Lock()
+	defer processor.mu.Unlock()
 	if err := processor.ownership.Check(ctx); err != nil {
 		processor.transportReady = false
 		return fmt.Errorf("process engine input: %w", err)
@@ -202,6 +206,10 @@ func (processor *EngineProcessor) Handle(
 	)
 	processor.state = next
 	processor.transportReady = next.Ready()
+	if errors.Is(err, platformpostgres.ErrCheckpointMismatch) ||
+		errors.Is(err, platformpostgres.ErrWriterConflict) {
+		processor.transportReady = false
+	}
 	return err
 }
 
@@ -246,12 +254,19 @@ func (processor *EngineProcessor) State() engine.State {
 	if processor == nil {
 		return engine.State{}
 	}
+	processor.mu.Lock()
+	defer processor.mu.Unlock()
 	return processor.state
 }
 
 // Ready reports both durable engine readiness and transport-envelope readiness.
 func (processor *EngineProcessor) Ready() bool {
-	if processor == nil || !processor.transportReady || !processor.state.Ready() {
+	if processor == nil {
+		return false
+	}
+	processor.mu.Lock()
+	defer processor.mu.Unlock()
+	if !processor.transportReady || !processor.state.Ready() {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -268,5 +283,8 @@ func (processor *EngineProcessor) Close(ctx context.Context) error {
 	if processor == nil {
 		return nil
 	}
+	processor.mu.Lock()
+	defer processor.mu.Unlock()
+	processor.transportReady = false
 	return processor.ownership.Close(ctx)
 }
