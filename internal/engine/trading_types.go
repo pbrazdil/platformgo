@@ -17,6 +17,7 @@ const (
 	TradingActionLiquidateAccount    TradingActionKind = "liquidate_account"
 	TradingActionUpdateBook          TradingActionKind = "update_book"
 	TradingActionSubmitOrder         TradingActionKind = "submit_order"
+	TradingActionPlaceBracket        TradingActionKind = "place_bracket"
 	TradingActionAmendOrder          TradingActionKind = "amend_order"
 	TradingActionCancelOrder         TradingActionKind = "cancel_order"
 )
@@ -37,15 +38,18 @@ func (side Side) valid() bool {
 type OrderType string
 
 const (
-	OrderTypeMarket     OrderType = "MARKET"
-	OrderTypeLimit      OrderType = "LIMIT"
-	OrderTypeStopMarket OrderType = "STOP_MARKET"
-	OrderTypeStopLimit  OrderType = "STOP_LIMIT"
+	OrderTypeMarket           OrderType = "MARKET"
+	OrderTypeLimit            OrderType = "LIMIT"
+	OrderTypeStopMarket       OrderType = "STOP_MARKET"
+	OrderTypeStopLimit        OrderType = "STOP_LIMIT"
+	OrderTypeTakeProfitMarket OrderType = "TAKE_PROFIT_MARKET"
+	OrderTypeTakeProfitLimit  OrderType = "TAKE_PROFIT_LIMIT"
 )
 
 func (orderType OrderType) valid() bool {
 	switch orderType {
-	case OrderTypeMarket, OrderTypeLimit, OrderTypeStopMarket, OrderTypeStopLimit:
+	case OrderTypeMarket, OrderTypeLimit, OrderTypeStopMarket, OrderTypeStopLimit,
+		OrderTypeTakeProfitMarket, OrderTypeTakeProfitLimit:
 		return true
 	default:
 		return false
@@ -95,6 +99,14 @@ func (mode MarginMode) valid() bool {
 	return mode == MarginModeCross || mode == MarginModeIsolated
 }
 
+// LiquiditySide records whether a fill added or removed resting liquidity.
+type LiquiditySide string
+
+const (
+	LiquiditySideMaker LiquiditySide = "MAKER"
+	LiquiditySideTaker LiquiditySide = "TAKER"
+)
+
 // BalanceOperation controls an explicit account-balance adjustment.
 type BalanceOperation string
 
@@ -139,11 +151,22 @@ const (
 type OrderStatus string
 
 const (
+	OrderStatusHeld            OrderStatus = "held"
 	OrderStatusWorking         OrderStatus = "working"
 	OrderStatusPartiallyFilled OrderStatus = "partially_filled"
 	OrderStatusFilled          OrderStatus = "filled"
 	OrderStatusCancelled       OrderStatus = "cancelled"
 	OrderStatusRejected        OrderStatus = "rejected"
+)
+
+// BracketLeg identifies one order's role in an OTO/OCO bracket.
+type BracketLeg string
+
+const (
+	BracketLegNone       BracketLeg = ""
+	BracketLegEntry      BracketLeg = "entry"
+	BracketLegTakeProfit BracketLeg = "take_profit"
+	BracketLegStopLoss   BracketLeg = "stop_loss"
 )
 
 // CommandStatus is the terminal processing result for an engine input.
@@ -194,6 +217,7 @@ type TradingAction struct {
 	LiquidateAccount    *LiquidateAccount    `json:"liquidateAccount,omitempty"`
 	UpdateBook          *UpdateBook          `json:"updateBook,omitempty"`
 	SubmitOrder         *SubmitOrder         `json:"submitOrder,omitempty"`
+	PlaceBracket        *PlaceBracket        `json:"placeBracket,omitempty"`
 	AmendOrder          *AmendOrder          `json:"amendOrder,omitempty"`
 	CancelOrder         *CancelOrder         `json:"cancelOrder,omitempty"`
 }
@@ -209,6 +233,8 @@ type ConfigureInstrument struct {
 	InitialMarginRate       string `json:"initialMarginRate"`
 	MaintenanceMarginRate   string `json:"maintenanceMarginRate"`
 	MaxLeverage             string `json:"maxLeverage"`
+	MakerFeeRate            string `json:"makerFeeRate"`
+	TakerFeeRate            string `json:"takerFeeRate"`
 }
 
 // ConfigureAccount installs the account's explicit OMS position mode.
@@ -278,6 +304,30 @@ type SubmitOrder struct {
 	MaxSlippageBPS *uint32     `json:"maxSlippageBps,omitempty"`
 }
 
+// ProtectiveLeg defines one exact take-profit slice.
+type ProtectiveLeg struct {
+	OrderID  ID     `json:"orderId"`
+	Price    string `json:"price"`
+	Quantity string `json:"quantity"`
+}
+
+// PlaceBracket creates an entry and its held OTO/OCO protection atomically.
+// Every business identity is caller supplied so retries are deterministic.
+type PlaceBracket struct {
+	BracketID       ID              `json:"bracketId"`
+	EntryOrderID    ID              `json:"entryOrderId"`
+	AccountID       string          `json:"accountId"`
+	InstrumentID    string          `json:"instrumentId"`
+	Side            Side            `json:"side"`
+	EntryType       OrderType       `json:"entryType"`
+	TimeInForce     TimeInForce     `json:"timeInForce"`
+	Quantity        string          `json:"quantity"`
+	EntryPrice      string          `json:"entryPrice,omitempty"`
+	TakeProfits     []ProtectiveLeg `json:"takeProfits"`
+	StopLossOrderID ID              `json:"stopLossOrderId"`
+	StopLoss        string          `json:"stopLoss"`
+}
+
 // AmendOrder changes the exact price and quantity of a working order.
 type AmendOrder struct {
 	AccountID string `json:"accountId"`
@@ -312,6 +362,8 @@ type InstrumentSnapshot struct {
 	InitialMarginRate       string
 	MaintenanceMarginRate   string
 	MaxLeverage             string
+	MakerFeeRate            string
+	TakerFeeRate            string
 }
 
 // AccountSnapshot is the configured deterministic OMS mode for one account.
@@ -374,8 +426,14 @@ type OrderSnapshot struct {
 	AverageFillPrice  string
 	Price             string
 	TriggerPrice      string
+	Triggered         bool
+	TriggeredAt       LogicalTime
 	ReduceOnly        bool
 	PositionID        ID
+	BracketID         ID
+	BracketLeg        BracketLeg
+	BracketLegIndex   uint32
+	HasRested         bool
 	HasSlippageBand   bool
 	MaxSlippageBPS    uint32
 	SlippageReference string
@@ -396,6 +454,9 @@ type FillSnapshot struct {
 	PositionEffect     PositionEffect
 	RealizedPnL        string
 	SettlementCurrency string
+	LiquiditySide      LiquiditySide
+	Fee                string
+	FeeCurrency        string
 	LogicalTime        LogicalTime
 }
 

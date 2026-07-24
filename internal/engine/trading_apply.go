@@ -65,6 +65,8 @@ func applyTradingAction(
 		return updateTradingBook(state, input, *action.UpdateBook)
 	case TradingActionSubmitOrder:
 		return submitTradingOrder(state, input, *action.SubmitOrder)
+	case TradingActionPlaceBracket:
+		return placeTradingBracket(state, input, *action.PlaceBracket)
 	case TradingActionAmendOrder:
 		return amendTradingOrder(state, input, *action.AmendOrder)
 	case TradingActionCancelOrder:
@@ -85,6 +87,7 @@ func validTradingActionUnion(action TradingAction) bool {
 		action.LiquidateAccount != nil,
 		action.UpdateBook != nil,
 		action.SubmitOrder != nil,
+		action.PlaceBracket != nil,
 		action.AmendOrder != nil,
 		action.CancelOrder != nil,
 	} {
@@ -112,6 +115,8 @@ func validTradingActionUnion(action TradingAction) bool {
 		return action.UpdateBook != nil
 	case TradingActionSubmitOrder:
 		return action.SubmitOrder != nil
+	case TradingActionPlaceBracket:
+		return action.PlaceBracket != nil
 	case TradingActionAmendOrder:
 		return action.AmendOrder != nil
 	case TradingActionCancelOrder:
@@ -171,6 +176,14 @@ func configureTradingInstrument(
 	if err != nil || maxLeverage.Decimal().Sign() <= 0 {
 		return rejectedTradingDecision(state, RejectionInvalidInstrument)
 	}
+	makerFeeRate, err := domain.NewRate(configure.MakerFeeRate)
+	if err != nil || !validConfiguredFeeRate(makerFeeRate) {
+		return rejectedTradingDecision(state, RejectionInvalidInstrument)
+	}
+	takerFeeRate, err := domain.NewRate(configure.TakerFeeRate)
+	if err != nil || !validConfiguredFeeRate(takerFeeRate) {
+		return rejectedTradingDecision(state, RejectionInvalidInstrument)
+	}
 
 	state.trading = state.trading.clone()
 	state.trading.replaceInstrument(instrumentRecord{
@@ -179,6 +192,8 @@ func configureTradingInstrument(
 		initialMarginRate:     initialMarginRate,
 		maintenanceMarginRate: maintenanceMarginRate,
 		maxLeverage:           maxLeverage,
+		makerFeeRate:          makerFeeRate,
+		takerFeeRate:          takerFeeRate,
 	})
 	state, decision := acceptedTradingDecision(state)
 	decision.InstrumentChanges = []InstrumentSnapshot{{
@@ -191,8 +206,23 @@ func configureTradingInstrument(
 		InitialMarginRate:       initialMarginRate.Decimal().String(),
 		MaintenanceMarginRate:   maintenanceMarginRate.Decimal().String(),
 		MaxLeverage:             maxLeverage.Decimal().String(),
+		MakerFeeRate:            makerFeeRate.Decimal().String(),
+		TakerFeeRate:            takerFeeRate.Decimal().String(),
 	}}
 	return state, decision
+}
+
+func validConfiguredFeeRate(rate domain.Rate) bool {
+	one, err := domain.NewRate("1")
+	if err != nil {
+		return false
+	}
+	negativeOne, err := domain.NewRate("-1")
+	if err != nil {
+		return false
+	}
+	return rate.Decimal().Cmp(one.Decimal()) <= 0 &&
+		rate.Decimal().Cmp(negativeOne.Decimal()) >= 0
 }
 
 func configureTradingAccount(
@@ -344,7 +374,7 @@ func submitTradingOrder(
 	orderIndex := len(state.trading.orders) - 1
 
 	state, decision := acceptedTradingDecision(state)
-	if orderReadyToMatch(state.trading, state.trading.orders[orderIndex]) {
+	if ready, _ := activateOrderIfReady(&state.trading, orderIndex, input); ready {
 		if reason := executeOrder(&state.trading, input, orderIndex, &decision); reason != "" {
 			if reason == RejectionSlippageExceeded {
 				rejected := &state.trading.orders[orderIndex]
@@ -365,6 +395,9 @@ func submitTradingOrder(
 			}
 			return rejectedTradingDecision(removeLastTradingOrder(state), reason)
 		}
+	}
+	if orderCanRest(state.trading.orders[orderIndex]) {
+		state.trading.orders[orderIndex].hasRested = true
 	}
 	snapshot := state.trading.orders[orderIndex].snapshot()
 	decision.OrderChanges = append(decision.OrderChanges, snapshot)
@@ -387,6 +420,11 @@ func marketContextAvailable(
 	return len(book.bids) > 0
 }
 
+func orderCanRest(order orderRecord) bool {
+	return order.status == OrderStatusWorking ||
+		order.status == OrderStatusPartiallyFilled
+}
+
 func removeLastTradingOrder(state State) State {
 	state.trading.orders = state.trading.orders[:len(state.trading.orders)-1]
 	return state
@@ -405,18 +443,19 @@ func newOrderRecord(
 		return orderRecord{}, false
 	}
 	order := orderRecord{
-		orderID:        submit.OrderID,
-		accountID:      submit.AccountID,
-		instrument:     instrument,
-		side:           submit.Side,
-		orderType:      submit.Type,
-		timeInForce:    submit.TimeInForce,
-		status:         OrderStatusWorking,
-		quantity:       quantity,
-		filledQuantity: filled,
-		reduceOnly:     submit.ReduceOnly,
-		positionID:     submit.PositionID,
-		version:        1,
+		orderID:          submit.OrderID,
+		accountID:        submit.AccountID,
+		instrument:       instrument,
+		side:             submit.Side,
+		orderType:        submit.Type,
+		timeInForce:      submit.TimeInForce,
+		status:           OrderStatusWorking,
+		quantity:         quantity,
+		filledQuantity:   filled,
+		reduceOnly:       submit.ReduceOnly,
+		positionID:       submit.PositionID,
+		originalQuantity: quantity,
+		version:          1,
 	}
 	if submit.MaxSlippageBPS != nil {
 		order.hasSlippageBand = true
@@ -437,6 +476,15 @@ func newOrderRecord(
 			return orderRecord{}, false
 		}
 	case OrderTypeStopLimit:
+		if !setOrderPrice(&order, submit.Price) ||
+			!setOrderTrigger(&order, submit.TriggerPrice) {
+			return orderRecord{}, false
+		}
+	case OrderTypeTakeProfitMarket:
+		if submit.Price != "" || !setOrderTrigger(&order, submit.TriggerPrice) {
+			return orderRecord{}, false
+		}
+	case OrderTypeTakeProfitLimit:
 		if !setOrderPrice(&order, submit.Price) ||
 			!setOrderTrigger(&order, submit.TriggerPrice) {
 			return orderRecord{}, false
@@ -476,10 +524,37 @@ func orderReadyToMatch(state tradingState, order orderRecord) bool {
 	case OrderTypeMarket, OrderTypeLimit:
 		return true
 	case OrderTypeStopMarket, OrderTypeStopLimit:
-		return stopTriggered(*book, order)
+		return order.triggered || stopTriggered(*book, order)
+	case OrderTypeTakeProfitMarket, OrderTypeTakeProfitLimit:
+		return order.triggered || takeProfitTriggered(*book, order)
 	default:
 		return false
 	}
+}
+
+func activateOrderIfReady(
+	state *tradingState,
+	orderIndex int,
+	input InputEnvelope,
+) (bool, bool) {
+	order := &state.orders[orderIndex]
+	if order.triggered {
+		return true, false
+	}
+	if !orderReadyToMatch(*state, *order) {
+		return false, false
+	}
+	switch order.orderType {
+	case OrderTypeStopMarket, OrderTypeStopLimit,
+		OrderTypeTakeProfitMarket, OrderTypeTakeProfitLimit:
+		order.triggered = true
+		order.triggeredAt = input.LogicalTime
+		order.version++
+		return true, true
+	case OrderTypeMarket, OrderTypeLimit:
+		return true, false
+	}
+	return false, false
 }
 
 func stopTriggered(book bookRecord, order orderRecord) bool {
@@ -495,6 +570,19 @@ func stopTriggered(book bookRecord, order orderRecord) bool {
 	}
 }
 
+func takeProfitTriggered(book bookRecord, order orderRecord) bool {
+	switch order.side {
+	case SideBuy:
+		return len(book.asks) > 0 &&
+			book.asks[0].price.Decimal().Cmp(order.triggerPrice.Decimal()) <= 0
+	case SideSell:
+		return len(book.bids) > 0 &&
+			book.bids[0].price.Decimal().Cmp(order.triggerPrice.Decimal()) >= 0
+	default:
+		return false
+	}
+}
+
 func matchWorkingOrders(
 	state *tradingState,
 	input InputEnvelope,
@@ -505,8 +593,11 @@ func matchWorkingOrders(
 		order := state.orders[index]
 		if order.instrument.ID() != instrumentID ||
 			(order.status != OrderStatusWorking &&
-				order.status != OrderStatusPartiallyFilled) ||
-			!orderReadyToMatch(*state, order) {
+				order.status != OrderStatusPartiallyFilled) {
+			continue
+		}
+		ready, triggeredNow := activateOrderIfReady(state, index, input)
+		if !ready {
 			continue
 		}
 		beforeFills := len(decision.Fills)
@@ -526,7 +617,7 @@ func matchWorkingOrders(
 			}
 			continue
 		}
-		if len(decision.Fills) > beforeFills ||
+		if triggeredNow || len(decision.Fills) > beforeFills ||
 			state.orders[index].status == OrderStatusCancelled {
 			snapshot := state.orders[index].snapshot()
 			decision.OrderChanges = append(decision.OrderChanges, snapshot)
@@ -565,15 +656,19 @@ func amendTradingOrder(
 
 	state.trading = state.trading.clone()
 	order := &state.trading.orders[index]
+	order.hasRested = false
 	order.quantity = quantity
 	order.price = price
 	order.hasPrice = true
 	order.version++
 	state, decision := acceptedTradingDecision(state)
-	if orderReadyToMatch(state.trading, *order) {
+	if ready, _ := activateOrderIfReady(&state.trading, index, input); ready {
 		if reason := executeOrder(&state.trading, input, index, &decision); reason != "" {
 			return rejectedTradingDecision(originalState, reason)
 		}
+	}
+	if orderCanRest(state.trading.orders[index]) {
+		state.trading.orders[index].hasRested = true
 	}
 	snapshot := state.trading.orders[index].snapshot()
 	decision.OrderChanges = append(decision.OrderChanges, snapshot)
@@ -594,7 +689,8 @@ func cancelTradingOrder(
 	if current.accountID != cancel.AccountID {
 		return rejectedTradingDecision(state, RejectionOrderOwnership)
 	}
-	if current.status != OrderStatusWorking &&
+	if current.status != OrderStatusHeld &&
+		current.status != OrderStatusWorking &&
 		current.status != OrderStatusPartiallyFilled {
 		return rejectedTradingDecision(state, RejectionOrderTerminal)
 	}
@@ -604,8 +700,20 @@ func cancelTradingOrder(
 	state.trading.orders[index].version++
 	state, decision := acceptedTradingDecision(state)
 	snapshot := state.trading.orders[index].snapshot()
-	decision.OrderChanges = []OrderSnapshot{snapshot}
-	decision.Events = []DomainEvent{orderEvent(input, snapshot, 1)}
+	appendOrderTransition(&decision, input, snapshot)
+	if current.bracketLeg == BracketLegEntry {
+		if _, hasPosition := latestOrderPositionID(
+			state.trading,
+			current.orderID,
+		); !hasPosition {
+			cancelBracketProtection(
+				&state.trading,
+				current.bracketID,
+				input,
+				&decision,
+			)
+		}
+	}
 	return state, decision
 }
 

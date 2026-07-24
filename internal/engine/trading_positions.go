@@ -100,10 +100,20 @@ func applyFillsToPositions(
 			return err
 		}
 		position.version++
+		balanceChanged := false
 		if fill.hasRealizedPnL {
 			if err := state.applyBalanceDelta(position.accountID, fill.realizedPnL); err != nil {
 				return err
 			}
+			balanceChanged = fill.realizedPnL.Decimal().Sign() != 0
+		}
+		if fill.hasFee && fill.fee.Decimal().Sign() != 0 {
+			if err := state.applyBalanceDebit(position.accountID, fill.fee); err != nil {
+				return err
+			}
+			balanceChanged = true
+		}
+		if balanceChanged {
 			balance, ok := state.balanceSnapshot(
 				position.accountID,
 				position.settlementCurrency,

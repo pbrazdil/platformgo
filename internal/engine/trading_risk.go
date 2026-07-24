@@ -441,7 +441,8 @@ func (state tradingState) hasEconomicStateForInstrument(instrumentID string) boo
 	}
 	for _, order := range state.orders {
 		if order.instrument.ID() == instrumentID &&
-			(order.status == OrderStatusWorking ||
+			(order.status == OrderStatusHeld ||
+				order.status == OrderStatusWorking ||
 				order.status == OrderStatusPartiallyFilled) {
 			return true
 		}
@@ -531,6 +532,22 @@ func (state *tradingState) applyBalanceDelta(
 		return fmt.Errorf("account balance is missing")
 	}
 	total, err := state.balances[index].total.Add(delta)
+	if err != nil {
+		return err
+	}
+	state.balances[index].total = total
+	return nil
+}
+
+func (state *tradingState) applyBalanceDebit(
+	accountID string,
+	amount domain.Money,
+) error {
+	index, ok := state.balanceIndex(accountID, amount.Currency())
+	if !ok {
+		return fmt.Errorf("account balance is missing")
+	}
+	total, err := state.balances[index].total.Sub(amount)
 	if err != nil {
 		return err
 	}
@@ -718,13 +735,37 @@ func (state tradingState) orderMargin(
 		}
 	}
 	risk := state.risk(order.accountID, instrument)
-	return domain.PositionMargin(
+	margin, err := domain.PositionMargin(
 		price,
 		remaining,
 		instrument.initialMarginRate,
 		risk.leverage,
 		instrument.settlementCurrency,
 	)
+	if err != nil {
+		return domain.Money{}, err
+	}
+	feeRate := instrument.takerFeeRate
+	if instrument.makerFeeRate.Decimal().Cmp(feeRate.Decimal()) > 0 {
+		feeRate = instrument.makerFeeRate
+	}
+	if feeRate.Decimal().Sign() < 0 {
+		var rateErr error
+		feeRate, rateErr = domain.NewRate("0")
+		if rateErr != nil {
+			return domain.Money{}, rateErr
+		}
+	}
+	fee, err := domain.TradingFee(
+		price,
+		remaining,
+		feeRate,
+		instrument.settlementCurrency,
+	)
+	if err != nil {
+		return domain.Money{}, err
+	}
+	return margin.Add(fee)
 }
 
 func marginAdmissionReason(

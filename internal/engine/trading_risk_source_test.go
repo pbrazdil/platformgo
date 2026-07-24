@@ -253,6 +253,8 @@ func TestTradingStopOutLiquidatesLargestNotionalFirst(t *testing.T) {
 		InitialMarginRate:       "1",
 		MaintenanceMarginRate:   "0.05",
 		MaxLeverage:             "10",
+		MakerFeeRate:            "0",
+		TakerFeeRate:            "0",
 	})
 	fixture.updateInstrumentBook(t, "ETH-PERP", "40",
 		[]BookLevel{{Price: "40", Quantity: "10"}},
