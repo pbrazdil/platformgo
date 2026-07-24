@@ -25,6 +25,12 @@ Use `docs/AGENT_TASK_TEMPLATE.md` for assignments and `docs/AGENT_CRITICAL_REVIE
 
 Codex loads this file at the repository root. More specific `AGENTS.md` files apply inside subsystem directories and may add stricter constraints. When instructions conflict, the closer file wins unless it would weaken an economic invariant.
 
+## Project progress
+
+Maintain the root `README.md` as the concise, current source of truth for delivery progress. After any material change that advances, completes, blocks, or reopens a phase in `PROJECT_CHARTER.md`, update the README's current stage, completed work, remaining work, known blockers, validation state, and last-updated date.
+
+Base every status claim on live repository evidence. Do not describe deterministic fixtures or ported tests as production PostgreSQL, NATS, Centrifugo, Hyperliquid, API, or deployment integration. Mark a phase complete only when its charter deliverables exist and the required checks pass.
+
 Read only the documents needed for the task:
 
 | Work | Required documents |
