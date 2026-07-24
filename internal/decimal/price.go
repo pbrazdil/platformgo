@@ -17,7 +17,25 @@ var (
 // spreads, basis trades, and derivatives.
 type Price struct {
 	value Decimal
+	kind  priceKind
 }
+
+type priceKind uint8
+
+const (
+	priceNormal priceKind = iota
+	priceUndefined
+	priceError
+	priceRawError
+)
+
+// PriceValidationError classifies a stable price-construction failure.
+type PriceValidationError struct {
+	Kind    string
+	Message string
+}
+
+func (e *PriceValidationError) Error() string { return e.Message }
 
 // ParsePrice parses an exact price and infers precision from its decimal
 // representation, including trailing zeros.
@@ -87,7 +105,7 @@ func PriceFromMantissaExponent(mantissa int64, exponent int, precision uint8) (P
 	scaleExponent := exponent + int(precision)
 	if scaleExponent >= 0 {
 		if scaleExponent > 38 {
-			return Price{}, fmt.Errorf("PriceFromMantissaExponent: exponent %d exceeds integer range", exponent)
+			return Price{}, fmt.Errorf("Price::from_mantissa_exponent exceeds i128 range for exponent %d", exponent)
 		}
 		coefficient.Mul(coefficient, powerOfTen(uint32(scaleExponent)))
 	} else {
@@ -96,8 +114,21 @@ func PriceFromMantissaExponent(mantissa int64, exponent int, precision uint8) (P
 	return priceFromDecimal(newDecimal(coefficient, precision))
 }
 
+// MustPriceFromMantissaExponent is PriceFromMantissaExponent for statically
+// valid source-derived values.
+func MustPriceFromMantissaExponent(mantissa int64, exponent int, precision uint8) Price {
+	price, err := PriceFromMantissaExponent(mantissa, exponent, precision)
+	if err != nil {
+		panic(fmt.Errorf("Price::from_mantissa_exponent: %w", err))
+	}
+	return price
+}
+
 // Precision returns the number of fractional decimal digits.
 func (p Price) Precision() uint8 {
+	if p.kind == priceError {
+		return 255
+	}
 	return p.value.Scale()
 }
 
@@ -106,14 +137,27 @@ func (p Price) Decimal() Decimal {
 	return newDecimal(p.value.coefficientCopy(), p.value.scale)
 }
 
+// IsZero reports whether this is a normal zero price.
+func (p Price) IsZero() bool {
+	return p.kind == priceNormal && p.value.IsZero()
+}
+
+// IsUndefined reports whether this is the undefined-price sentinel.
+func (p Price) IsUndefined() bool {
+	return p.kind == priceUndefined
+}
+
 // IsPositive reports whether the price is greater than zero.
 func (p Price) IsPositive() bool {
-	return p.value.Sign() > 0
+	return p.kind == priceNormal && p.value.Sign() > 0
 }
 
 // RequirePositive returns a stable validation error for zero or negative
 // prices.
 func (p Price) RequirePositive(name string) error {
+	if p.IsUndefined() {
+		return fmt.Errorf("invalid `Price` for '%s', was PRICE_UNDEF", name)
+	}
 	if p.IsPositive() {
 		return nil
 	}
@@ -123,6 +167,9 @@ func (p Price) RequirePositive(name string) error {
 // Add returns the exact sum with the greater operand precision. The boolean is
 // false when the result is outside the representable range.
 func (p Price) Add(other Price) (Price, bool) {
+	if p.kind != priceNormal || other.kind != priceNormal {
+		return Price{}, false
+	}
 	result, err := priceFromDecimal(p.value.Add(other.value))
 	return result, err == nil
 }
@@ -130,12 +177,18 @@ func (p Price) Add(other Price) (Price, bool) {
 // Sub returns the exact difference with the greater operand precision. The
 // boolean is false when the result is outside the representable range.
 func (p Price) Sub(other Price) (Price, bool) {
+	if p.kind != priceNormal || other.kind != priceNormal {
+		return Price{}, false
+	}
 	result, err := priceFromDecimal(p.value.Sub(other.value))
 	return result, err == nil
 }
 
 // Neg returns the additive inverse.
 func (p Price) Neg() Price {
+	if p.kind != priceNormal {
+		return p
+	}
 	return Price{value: p.value.Neg()}
 }
 
@@ -147,6 +200,9 @@ func (p Price) Cmp(other Price) int {
 // Equal compares prices numerically. Precision is formatting metadata and does
 // not affect equality, matching the pinned model's raw-value semantics.
 func (p Price) Equal(other Price) bool {
+	if p.kind != priceNormal || other.kind != priceNormal {
+		return p.kind == other.kind
+	}
 	return p.value.Equal(other.value)
 }
 
@@ -171,6 +227,14 @@ func (p Price) QuoDecimal(other Decimal) (Decimal, error) {
 }
 
 func (p Price) String() string {
+	switch p.kind {
+	case priceUndefined:
+		return "PRICE_UNDEF"
+	case priceError:
+		return "ERROR_PRICE"
+	case priceRawError:
+		return "PRICE_ERROR"
+	}
 	return p.value.String()
 }
 
@@ -226,7 +290,59 @@ func priceFromDecimal(value Decimal) (Price, error) {
 		return Price{}, fmt.Errorf("price precision %d exceeds maximum %d", value.Scale(), MaxPrecision)
 	}
 	if value.Cmp(minPrice) < 0 || value.Cmp(maxPrice) > 0 {
-		return Price{}, fmt.Errorf("price %s outside valid range [%s, %s]", value, minPrice, maxPrice)
+		return Price{}, &PriceValidationError{
+			Kind:    "out_of_range",
+			Message: fmt.Sprintf("price %s outside valid range [%s, %s]", value, minPrice, maxPrice),
+		}
 	}
 	return Price{value: newDecimal(value.coefficientCopy(), value.scale)}, nil
+}
+
+// UndefinedPrice returns the sentinel used for a missing price.
+func UndefinedPrice() Price {
+	return Price{kind: priceUndefined}
+}
+
+// UndefinedPriceChecked constructs the undefined sentinel, whose precision
+// must be zero.
+func UndefinedPriceChecked(precision uint8) (Price, error) {
+	if precision != 0 {
+		return Price{}, errors.New("`precision` must be 0 when `raw` is PRICE_UNDEF")
+	}
+	return UndefinedPrice(), nil
+}
+
+// ErrorPrice returns the error sentinel with its distinct precision marker.
+func ErrorPrice() Price {
+	return Price{kind: priceError}
+}
+
+// RawErrorPrice returns the raw error sentinel.
+func RawErrorPrice() Price {
+	return Price{kind: priceRawError}
+}
+
+// Hash64 returns a stable hash consistent with Equal.
+func (p Price) Hash64() uint64 {
+	const (
+		offset = uint64(14695981039346656037)
+		prime  = uint64(1099511628211)
+	)
+	hash := offset
+	text := p.String()
+	if p.kind == priceNormal {
+		text = p.value.Normalize().String()
+	}
+	for index := 0; index < len(text); index++ {
+		hash ^= uint64(text[index])
+		hash *= prime
+	}
+	return hash
+}
+
+// DecodeRawPriceI64 converts a legacy 1e9-scaled raw price without using
+// floating point.
+func DecodeRawPriceI64(value int64, precision uint8) (Price, error) {
+	raw := newDecimal(big.NewInt(value), 9)
+	return priceFromDecimal(raw.Quantize(precision, RoundHalfEven))
 }
