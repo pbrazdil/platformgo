@@ -373,6 +373,7 @@ review, production wiring, or implementation completion.
 - contract tests;
 - port-map validation;
 - vulnerability scan.
+
 ## PostgreSQL integration safety
 
 PostgreSQL-backed integration tests drop the `engine`, `trading`, `ledger`,
