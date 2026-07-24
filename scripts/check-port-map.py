@@ -6,6 +6,7 @@ from collections import Counter
 import csv
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,11 +15,36 @@ SOURCE_REVISIONS = ROOT / "ports" / "SOURCE_REVISIONS.md"
 
 REQUIRED = [
     "source_repo", "source_revision", "source_file", "source_test",
-    "source_line", "go_file", "go_test", "category", "status", "owner", "notes",
+    "source_line", "go_file", "go_test", "category", "port_status",
+    "review_status", "wiring_status", "evidence", "milestone", "port_owner",
+    "implementation_owner", "notes",
 ]
-STATUSES = {
-    "discovered", "reserved", "in-progress", "ported-failing",
-    "ported-green", "conflict", "deferred-live", "not-applicable",
+PORT_STATUSES = {
+    "discovered", "reserved", "in-progress", "ported", "conflict", "excluded",
+}
+REVIEW_STATUSES = {
+    "unreviewed", "reviewed", "needs-decision",
+}
+WIRING_STATUSES = {
+    "placeholder", "red", "green",
+}
+EVIDENCE = {
+    "spec-fixture",
+    "unit-real",
+    "model-real",
+    "postgres-real",
+    "nats-real",
+    "http-real",
+    "grpc-real",
+    "realtime-real",
+    "adapter-real",
+}
+MILESTONES = {
+    "hyperliquid-core",
+    "durable-execution",
+    "platform-compatibility",
+    "future-market",
+    "future-nautilus-model",
 }
 CATEGORIES = {
     "unit",
@@ -32,10 +58,9 @@ CATEGORIES = {
     "live-canary",
     "not-applicable",
 }
-PORTED = {"ported-failing", "ported-green"}
-DECISION_REQUIRED = {"conflict", "not-applicable"}
+DECISION_REQUIRED = {"conflict", "excluded"}
 NON_TERMINAL = {
-    "discovered", "reserved", "in-progress", "ported-failing", "deferred-live",
+    "discovered", "reserved", "in-progress", "conflict",
 }
 
 
@@ -170,28 +195,100 @@ for line, row in enumerate(rows, start=2):
     if category not in CATEGORIES:
         errors.append(f"line {line}: invalid category {category!r}")
 
-    status = row["status"].strip()
-    if status not in STATUSES:
-        errors.append(f"line {line}: invalid status {status!r}")
-    elif args.complete and status in NON_TERMINAL:
-        errors.append(f"line {line}: non-terminal status {status!r} in complete inventory")
-    if (status == "not-applicable") != (category == "not-applicable"):
+    port_status = row["port_status"].strip()
+    if port_status not in PORT_STATUSES:
+        errors.append(f"line {line}: invalid port_status {port_status!r}")
+    elif args.complete and port_status in NON_TERMINAL:
         errors.append(
-            f"line {line}: not-applicable status and category must be used together"
+            f"line {line}: non-terminal port_status {port_status!r} in complete inventory"
         )
-    if status == "deferred-live" and category != "live-canary":
-        errors.append(f"line {line}: deferred-live requires category 'live-canary'")
+    if (port_status == "excluded") != (category == "not-applicable"):
+        errors.append(
+            f"line {line}: excluded port_status and not-applicable category must be used together"
+        )
 
-    owner = row["owner"].strip()
-    if status and status != "discovered" and not owner:
-        errors.append(f"line {line}: status {status!r} requires an owner")
+    review_status = row["review_status"].strip()
+    if review_status not in REVIEW_STATUSES:
+        errors.append(f"line {line}: invalid review_status {review_status!r}")
+    elif port_status == "conflict" and review_status != "needs-decision":
+        errors.append(
+            f"line {line}: conflict port_status requires review_status 'needs-decision'"
+        )
+    elif port_status == "excluded" and review_status != "reviewed":
+        errors.append(
+            f"line {line}: excluded port_status requires review_status 'reviewed'"
+        )
+    elif port_status not in {"conflict", "excluded"} and review_status == "needs-decision":
+        errors.append(
+            f"line {line}: review_status 'needs-decision' requires conflict port_status"
+        )
+    elif (
+        port_status in {"discovered", "reserved", "in-progress"}
+        and review_status != "unreviewed"
+    ):
+        errors.append(
+            f"line {line}: incomplete port_status requires review_status 'unreviewed'"
+        )
+
+    wiring_status = row["wiring_status"].strip()
+    if wiring_status not in WIRING_STATUSES:
+        errors.append(f"line {line}: invalid wiring_status {wiring_status!r}")
+
+    evidence = row["evidence"].strip()
+    if evidence and evidence not in EVIDENCE:
+        errors.append(f"line {line}: invalid evidence {evidence!r}")
+
+    milestone = row["milestone"].strip()
+    if milestone and milestone not in MILESTONES:
+        errors.append(f"line {line}: invalid milestone {milestone!r}")
+
+    port_owner = row["port_owner"].strip()
+    if port_status and port_status != "discovered" and not port_owner:
+        errors.append(
+            f"line {line}: port_status {port_status!r} requires a port_owner"
+        )
+    implementation_owner = row["implementation_owner"].strip()
+
+    if port_status == "ported":
+        if wiring_status == "placeholder" and evidence != "spec-fixture":
+            errors.append(
+                f"line {line}: placeholder wiring requires evidence 'spec-fixture'"
+            )
+        if wiring_status in {"red", "green"}:
+            if review_status != "reviewed":
+                errors.append(
+                    f"line {line}: real wiring requires review_status 'reviewed'"
+                )
+            if not evidence or evidence == "spec-fixture":
+                errors.append(
+                    f"line {line}: real wiring requires non-fixture evidence"
+                )
+            if not milestone:
+                errors.append(f"line {line}: real wiring requires a milestone")
+            if not implementation_owner:
+                errors.append(
+                    f"line {line}: real wiring requires an implementation_owner"
+                )
+    else:
+        if wiring_status and wiring_status != "placeholder":
+            errors.append(
+                f"line {line}: non-ported row must use placeholder wiring"
+            )
+        if evidence:
+            errors.append(f"line {line}: non-ported row must not claim evidence")
+        if milestone:
+            errors.append(f"line {line}: non-ported row must not claim a milestone")
+        if implementation_owner:
+            errors.append(
+                f"line {line}: non-ported row must not have an implementation_owner"
+            )
 
     notes = row["notes"].strip()
-    if status in DECISION_REQUIRED:
+    if port_status in DECISION_REQUIRED:
         references = re.findall(r"ports/decisions/[A-Za-z0-9._/-]+\.md", notes)
         if not references:
             errors.append(
-                f"line {line}: status {status!r} requires a ports/decisions/*.md reference"
+                f"line {line}: port_status {port_status!r} requires a ports/decisions/*.md reference"
             )
         for reference in references:
             relative_reference = Path(reference)
@@ -199,10 +296,8 @@ for line, row in enumerate(rows, start=2):
                 errors.append(f"line {line}: invalid decision record path {reference}")
             elif not (ROOT / relative_reference).is_file():
                 errors.append(f"line {line}: missing decision record {reference}")
-    elif status == "deferred-live" and not notes:
-        errors.append(f"line {line}: deferred-live requires a reason in notes")
 
-    if status in PORTED:
+    if port_status == "ported":
         go_file = row["go_file"].strip()
         go_test = row["go_test"].strip()
         if not go_file or not go_test:
@@ -224,40 +319,10 @@ for line, row in enumerate(rows, start=2):
         if not target.is_file():
             errors.append(f"line {line}: missing Go file {go_file}")
             continue
-        text = target.read_text(encoding="utf-8")
-        repository_reference = None
-        if policy is not None:
-            provenance_patterns = [
-                rf"{re.escape(str(policy['repository']))}@{re.escape(revision)}\b"
-            ]
-            legacy_label = {
-                "platform": "platform",
-                "nautilus": "NautilusTrader",
-            }.get(source_repo)
-            if legacy_label is not None:
-                provenance_patterns.append(
-                    rf"{re.escape(legacy_label)}:\s*{re.escape(revision)}\b"
-                )
-            repository_reference = re.compile("|".join(provenance_patterns))
-        source_reference = re.compile(
-            rf"source:\s*{re.escape(source_file)}:{re.escape(source_line)}\b"
+    elif row["go_file"].strip() or row["go_test"].strip():
+        errors.append(
+            f"line {line}: only ported rows may name go_file and go_test"
         )
-        test_reference = re.compile(
-            rf"test:\s*{re.escape(row['source_test'].strip())}\b"
-        )
-        if (
-            repository_reference is None
-            or not repository_reference.search(text)
-            or not source_reference.search(text)
-            or not test_reference.search(text)
-        ):
-            errors.append(f"line {line}: Go file lacks exact source provenance")
-        go_declaration = re.compile(
-            rf"\bfunc\s+{re.escape(go_test)}\s*\(\s*"
-            rf"(?:[A-Za-z_][A-Za-z0-9_]*\s+)?\*testing\.T\s*\)"
-        )
-        if not go_declaration.search(text):
-            errors.append(f"line {line}: Go file lacks test function {go_test}")
 
 if args.complete:
     counts = Counter(row["source_repo"].strip() for row in rows)
@@ -268,6 +333,32 @@ if args.complete:
             errors.append(
                 f"{source_repo}: inventory has {actual} rows; expected {expected}"
             )
+
+if not errors:
+    provenance = subprocess.run(
+        [
+            "go",
+            "run",
+            "./scripts/check-test-provenance.go",
+            "-root",
+            str(ROOT),
+            "-ledger",
+            str(PATH.relative_to(ROOT)),
+            "-source-policy",
+            str(SOURCE_REVISIONS.relative_to(ROOT)),
+        ],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if provenance.returncode != 0:
+        errors.extend(
+            line
+            for line in provenance.stderr.splitlines()
+            if line.strip()
+        )
 
 if errors:
     print("test-port-map validation failed:", file=sys.stderr)

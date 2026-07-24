@@ -255,7 +255,9 @@ func TestAggregationPriceToOrderIDComprehensiveCollisionCheck(t *testing.T) {
 		}
 	}
 
-	if collisionRate := float64(collisions) / totalTests; collisionRate >= 0.001 {
-		t.Fatalf("high collision rate: %.6f%% (%d/%d)", collisionRate*100, collisions, totalTests)
+	// Compare the exact ratio against 1/1000 without introducing floating point
+	// into the deterministic matching package.
+	if collisions*1000 >= totalTests {
+		t.Fatalf("high collision rate: %d/%d (must be less than 1/1000)", collisions, totalTests)
 	}
 }

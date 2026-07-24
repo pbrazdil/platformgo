@@ -18,6 +18,14 @@ Expected foundational modules:
 
 The authoritative allowlist is `policy/allowed-direct-modules.txt` and is checked in CI.
 
+Pinned CI-only Go tools are invoked directly from the `Makefile` so local and
+hosted validation use the same versions:
+
+- `github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2`
+- `golang.org/x/vuln/cmd/govulncheck@v1.6.0`
+
+They are build-time tools, not runtime module dependencies.
+
 ## 3. Default to standard library
 
 Prefer:

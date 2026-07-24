@@ -18,8 +18,11 @@ The project pins the exact flagship model slug `gpt-5.6-sol` for primary agents 
 
 1. Copy the complete pack, including hidden `.codex/` and `.github/` directories, to the repository root.
 2. Mark the project trusted so project-scoped Codex configuration is loaded.
-3. Create and pin `go.mod` with exact `go` and `toolchain` directives.
-4. Replace `.github/CODEOWNERS.example` with actual owners.
+3. Keep the `go.mod` `go` directive pinned to the reviewed exact patch release
+   and keep the module tidy. Add a separate `toolchain` directive only when it
+   intentionally differs from that minimum; Go removes a redundant identical
+   directive during `go mod tidy`.
+4. Keep `.github/CODEOWNERS` populated with actual owners.
 5. Confirm the pinned source revisions, inventory roots, and expected test counts in `ports/SOURCE_REVISIONS.md`.
 6. Enable branch protection requiring all CI jobs.
 7. Protect `main` from direct pushes.

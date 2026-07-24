@@ -2,7 +2,7 @@
 
 ## 1. Test philosophy
 
-Accepted tests are the maintained executable product specification, subject to `INVARIANTS.md` and reviewed decisions. Production code exists to satisfy deterministic tests and invariants, not the reverse.
+Accepted tests are the maintained executable product specification, subject to `INVARIANTS.md` and reviewed decisions. A port becomes semantically accepted only when its ledger row has `review_status=reviewed`; a passing placeholder fixture is not accepted merely because it compiles or passes. Production code exists to satisfy accepted deterministic tests and invariants, not the reverse.
 
 The old Rust platform and Nautilus runtime are not run. Agents read tests at the pinned revisions and port their observable claims into native Go tests. Detailed per-agent instructions are in `docs/TEST_PORTING_PLAYBOOK.md`.
 
@@ -23,10 +23,10 @@ Every ported test must identify:
 //   - ...
 ```
 
-Every source function has one row in `ports/test-port-map.csv`, including its pinned source line and current owner:
+Every source function has one row in `ports/test-port-map.csv`, including its pinned source line, porting state, semantic review state, implementation wiring state, evidence level, and owners:
 
 ```csv
-source_repo,source_revision,source_file,source_test,source_line,go_file,go_test,category,status,owner,notes
+source_repo,source_revision,source_file,source_test,source_line,go_file,go_test,category,port_status,review_status,wiring_status,evidence,milestone,port_owner,implementation_owner,notes
 ```
 
 `source_repo` is the pinned alias `platform` or `nautilus`; its revision and allowed source roots must match `ports/SOURCE_REVISIONS.md`. Allowed category values are:
@@ -264,28 +264,101 @@ After each integration test there must be no leaked:
 
 Use `t.Cleanup` and verify cleanup where possible.
 
-## 12. Statuses in the port map
+## 12. Port, review, and implementation state
 
-Allowed values:
+The lifecycle dimensions are intentionally independent.
+
+`port_status` records only whether the source test has a native representation:
 
 ```text
 discovered
 reserved
 in-progress
-ported-failing
-ported-green
+ported
 conflict
-deferred-live
-not-applicable
+excluded
 ```
 
-`not-applicable` requires a reviewed `ports/decisions/` note proving that the source test asserts only a Rust/Nautilus implementation detail with no required observable consequence.
+`review_status` records independent semantic acceptance:
 
-Every status except `discovered` requires a non-empty owner. A row may move to `ported-failing` or `ported-green` only when it names one unique native Go test with exact revision, source path, line, and function provenance.
+```text
+unreviewed
+reviewed
+needs-decision
+```
 
-The `not-applicable` category and status must be used together. `deferred-live` is valid only for the `live-canary` category.
+`wiring_status` records whether the test still uses a placeholder, has been
+rewired to real production code and is red for the intended missing behavior,
+or passes against that production code:
 
-`discovered`, `reserved`, `in-progress`, `ported-failing`, and `deferred-live` are non-terminal. A full port is complete only when every row is `ported-green`, `conflict` with a reviewed decision, or `not-applicable` with a reviewed decision, and `make port-map-complete` passes.
+```text
+placeholder
+red
+green
+```
+
+Allowed evidence levels are:
+
+```text
+spec-fixture
+unit-real
+model-real
+postgres-real
+nats-real
+http-real
+grpc-real
+realtime-real
+adapter-real
+```
+
+Allowed implementation milestones are:
+
+```text
+hyperliquid-core
+durable-execution
+platform-compatibility
+future-market
+future-nautilus-model
+```
+
+Every `port_status` except `discovered` requires `port_owner`. A row may move
+to `ported` only when it names one unique native Go test whose attached
+function documentation contains the exact revision, source path, line, and
+source function.
+
+`excluded` requires the `not-applicable` category, `review_status=reviewed`,
+and a reviewed `ports/decisions/` record proving that the source test asserts
+only an implementation detail with no required observable consequence.
+`conflict` requires `review_status=needs-decision`, a decision record, and an
+owner decision before the port can complete.
+
+A newly translated applicable row starts as:
+
+```text
+port_status=ported
+review_status=unreviewed
+wiring_status=placeholder
+evidence=spec-fixture
+implementation_owner=
+```
+
+For an implementation cohort:
+
+1. Independently reread and review the source tests.
+2. Correct mistranslations and mark the rows `reviewed`.
+3. Replace placeholder fixtures with calls to real production code.
+4. Record the relevant milestone, implementation owner, real evidence level,
+   and `wiring_status=red`.
+5. Implement the smallest deterministic behavior and move the row to `green`.
+
+Real `red` or `green` wiring requires semantic review, a non-fixture evidence
+level, a milestone, and an implementation owner. A green row is the only state
+that proves the reviewed requirement is satisfied by production code at the
+named evidence boundary.
+
+`make port-map-complete` proves only that the full pinned source inventory is
+represented by `ported` or reviewed `excluded` rows. It does not claim semantic
+review, production wiring, or implementation completion.
 
 ## 13. Required CI gates
 

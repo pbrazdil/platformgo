@@ -6,8 +6,12 @@ These rules apply under `ports/` and to tasks that port pinned Rust or Nautilus 
 - Do not execute the Rust platform, Nautilus, their tests, containers, or services.
 - Explicit source-test assertions are normative subject to `INVARIANTS.md` and recorded owner decisions.
 - Port tests into native deterministic Go; do not reproduce Rust/Nautilus internals without an observable requirement.
-- Reserve and update one owned `ports/test-port-map.csv` row per source test.
+- Reserve `port_owner` and update one `ports/test-port-map.csv` row per source
+  test. Mechanical ports remain `review_status=unreviewed`,
+  `wiring_status=placeholder`, and `evidence=spec-fixture`.
 - Preserve exact source revision, path, line, function, assertions, and documented adaptations.
 - Replace live economic feeds, sleeps, random IDs, wall time, and global state with deterministic fixtures.
-- Do not resolve conflicting source tests silently. Mark `conflict`, record a decision note, and stop for an owner decision.
+- Do not resolve conflicting source tests silently. Mark
+  `port_status=conflict`, `review_status=needs-decision`, record a decision
+  note, and stop for an owner decision.
 - Do not weaken assertions or hide missing behavior with skips, build tags, tolerances, or TODOs.

@@ -1,9 +1,7 @@
 package order
 
 import (
-	"os"
-	"path/filepath"
-	"runtime"
+	_ "embed"
 	"strings"
 	"testing"
 
@@ -12,6 +10,9 @@ import (
 	"github.com/upcomers-org/platformgo/internal/ids"
 	"github.com/upcomers-org/platformgo/internal/money"
 )
+
+//go:embed testdata/pinned-execution-order-denied-reasons.md
+var pinnedExecutionDocument string
 
 // Ported from:
 //
@@ -247,9 +248,7 @@ func TestOrderDeniedReasonMessagePrefixMatchesCode(t *testing.T) {
 //	source: crates/model/src/events/order/denied_reason.rs:662
 //	test: generated_table_is_in_sync
 func TestOrderDeniedReasonGeneratedTableIsInSync(t *testing.T) {
-	document := readPinnedExecutionDocument(t)
-
-	if !OrderDeniedReasonsDocumentInSync(document) {
+	if !OrderDeniedReasonsDocumentInSync(pinnedExecutionDocument) {
 		t.Fatal("the order-denied-reasons table in docs/concepts/execution.md is stale")
 	}
 }
@@ -260,36 +259,11 @@ func TestOrderDeniedReasonGeneratedTableIsInSync(t *testing.T) {
 //	source: crates/model/src/events/order/denied_reason.rs:673
 //	test: regenerate_order_denied_reasons_doc
 func TestOrderDeniedReasonRegenerateOrderDeniedReasonsDoc(t *testing.T) {
-	document := readPinnedExecutionDocument(t)
-
-	updated, err := RegenerateOrderDeniedReasonsDocument(document)
+	updated, err := RegenerateOrderDeniedReasonsDocument(pinnedExecutionDocument)
 	if err != nil {
 		t.Fatalf("RegenerateOrderDeniedReasonsDocument() error = %v", err)
 	}
-	if updated != document || !OrderDeniedReasonsDocumentInSync(updated) {
+	if updated != pinnedExecutionDocument || !OrderDeniedReasonsDocumentInSync(updated) {
 		t.Fatal("pure regeneration changed an already-current document")
 	}
-}
-
-func readPinnedExecutionDocument(t *testing.T) string {
-	t.Helper()
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller() failed")
-	}
-	path := filepath.Join(
-		filepath.Dir(filename),
-		"..",
-		"..",
-		".sources",
-		"nautilus_trader",
-		"docs",
-		"concepts",
-		"execution.md",
-	)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("os.ReadFile(%s) error = %v", path, err)
-	}
-	return string(data)
 }

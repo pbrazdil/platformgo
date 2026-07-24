@@ -17,18 +17,15 @@ import (
 	"strings"
 )
 
-const (
-	platformRevision = "50141367492be46ebf5623f6191a14b94af2f2bd"
-	nautilusRevision = "116c9b5159ebeb6b578b737d72298cac8d723723"
-)
-
 var functionPattern = regexp.MustCompile(`^(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)`)
+var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 type source struct {
-	repo     string
-	revision string
-	root     string
-	scopes   []string
+	repo          string
+	revision      string
+	root          string
+	scopes        []string
+	expectedCount int
 }
 
 type test struct {
@@ -49,34 +46,36 @@ func main() {
 	var platformRoot string
 	var nautilusRoot string
 	var output string
+	var sourcePolicyPath string
 
 	flag.StringVar(&platformRoot, "platform", "", "path to the pinned platform checkout")
 	flag.StringVar(&nautilusRoot, "nautilus", "", "path to the pinned NautilusTrader checkout")
 	flag.StringVar(&output, "out", "", "path to test-port-map.csv")
+	flag.StringVar(
+		&sourcePolicyPath,
+		"source-policy",
+		"ports/SOURCE_REVISIONS.md",
+		"path to the canonical source-revision policy",
+	)
 	flag.Parse()
 
 	if platformRoot == "" || nautilusRoot == "" || output == "" {
 		fail(errors.New("-platform, -nautilus, and -out are required"))
 	}
 
-	sources := []source{
-		{
-			repo:     "platform",
-			revision: platformRevision,
-			root:     platformRoot,
-			scopes: []string{
-				"apps/nautilus/tests",
-				"apps/app/tests",
-			},
-		},
-		{
-			repo:     "nautilus",
-			revision: nautilusRevision,
-			root:     nautilusRoot,
-			scopes: []string{
-				"crates/model/src",
-			},
-		},
+	sources, err := loadSourcePolicy(sourcePolicyPath)
+	if err != nil {
+		fail(err)
+	}
+	for index := range sources {
+		switch sources[index].repo {
+		case "platform":
+			sources[index].root = platformRoot
+		case "nautilus":
+			sources[index].root = nautilusRoot
+		default:
+			fail(fmt.Errorf("unsupported source alias %q", sources[index].repo))
+		}
 	}
 
 	var tests []test
@@ -87,6 +86,15 @@ func main() {
 		found, err := discover(src)
 		if err != nil {
 			fail(err)
+		}
+		if len(found) != src.expectedCount {
+			fail(fmt.Errorf(
+				"%s inventory has %d tests, want %d from %s",
+				src.repo,
+				len(found),
+				src.expectedCount,
+				sourcePolicyPath,
+			))
 		}
 		tests = append(tests, found...)
 	}
@@ -112,6 +120,71 @@ func main() {
 	}
 
 	fmt.Printf("wrote %d source tests to %s\n", len(tests), output)
+}
+
+func loadSourcePolicy(path string) ([]source, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read source policy: %w", err)
+	}
+	values := make(map[string]string)
+	for line := range strings.Lines(string(data)) {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok || key == "" || value == "" {
+			continue
+		}
+		if matched, _ := regexp.MatchString(`^[A-Z][A-Z0-9_]*$`, key); matched {
+			values[key] = value
+		}
+	}
+
+	definitions := []struct {
+		alias       string
+		prefix      string
+		revisionKey string
+	}{
+		{alias: "platform", prefix: "PLATFORM", revisionKey: "PLATFORM_SOURCE_COMMIT"},
+		{alias: "nautilus", prefix: "NAUTILUS", revisionKey: "NAUTILUS_SOURCE_REVISION"},
+	}
+	sources := make([]source, 0, len(definitions))
+	for _, definition := range definitions {
+		repositoryKey := definition.prefix + "_SOURCE_REPOSITORY"
+		rootsKey := definition.prefix + "_SOURCE_ROOTS"
+		countKey := definition.prefix + "_SOURCE_TEST_COUNT"
+		for _, key := range []string{
+			repositoryKey,
+			definition.revisionKey,
+			rootsKey,
+			countKey,
+		} {
+			if values[key] == "" {
+				return nil, fmt.Errorf("%s is missing %s", path, key)
+			}
+		}
+		revision := values[definition.revisionKey]
+		if !commitPattern.MatchString(revision) {
+			return nil, fmt.Errorf("%s must contain a 40-character Git commit", definition.revisionKey)
+		}
+		scopes := strings.Split(values[rootsKey], ",")
+		for _, scope := range scopes {
+			relative := filepath.Clean(filepath.FromSlash(scope))
+			if scope == "" || filepath.IsAbs(relative) ||
+				relative == ".." || strings.HasPrefix(filepath.ToSlash(relative), "../") {
+				return nil, fmt.Errorf("%s contains invalid source root %q", rootsKey, scope)
+			}
+		}
+		expectedCount, parseErr := strconv.Atoi(values[countKey])
+		if parseErr != nil || expectedCount <= 0 {
+			return nil, fmt.Errorf("%s must be a positive integer", countKey)
+		}
+		sources = append(sources, source{
+			repo:          definition.alias,
+			revision:      revision,
+			scopes:        scopes,
+			expectedCount: expectedCount,
+		})
+	}
+	return sources, nil
 }
 
 func verifyRevision(src source) error {
@@ -146,9 +219,9 @@ func readGitHead(root string) (string, error) {
 
 	gitDir := gitPath
 	if !info.IsDir() {
-		data, err := os.ReadFile(gitPath)
-		if err != nil {
-			return "", err
+		data, readErr := os.ReadFile(gitPath)
+		if readErr != nil {
+			return "", readErr
 		}
 		const prefix = "gitdir: "
 		line := strings.TrimSpace(string(data))
@@ -180,7 +253,9 @@ func readGitHead(root string) (string, error) {
 	if packedErr != nil {
 		return "", err
 	}
-	defer packed.Close()
+	defer func() {
+		_ = packed.Close()
+	}()
 
 	scanner := bufio.NewScanner(packed)
 	for scanner.Scan() {
@@ -240,7 +315,9 @@ func testsInFile(path string) ([]sourceTest, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	var tests []sourceTest
 	var attributes []string
@@ -315,7 +392,9 @@ func ensureSafeToWrite(path string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	reader := csv.NewReader(file)
 	rows, err := reader.ReadAll()
@@ -325,23 +404,23 @@ func ensureSafeToWrite(path string) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	statusColumn := slices.Index(rows[0], "status")
+	statusColumn := slices.Index(rows[0], "port_status")
 	if statusColumn < 0 {
-		return fmt.Errorf("%s has no status column", path)
+		return fmt.Errorf("%s has no port_status column", path)
 	}
 	for _, row := range rows[1:] {
 		if len(row) <= statusColumn {
 			return fmt.Errorf("%s contains a malformed row", path)
 		}
 		if row[statusColumn] != "discovered" {
-			return fmt.Errorf("%s contains status %q; refusing to overwrite porting work", path, row[statusColumn])
+			return fmt.Errorf("%s contains port_status %q; refusing to overwrite porting work", path, row[statusColumn])
 		}
 	}
 	return nil
 }
 
 func writeCSV(path string, tests []test) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
 	file, err := os.Create(path)
@@ -366,7 +445,13 @@ func writeCSV(path string, tests []test) error {
 		"go_file",
 		"go_test",
 		"category",
-		"status",
+		"port_status",
+		"review_status",
+		"wiring_status",
+		"evidence",
+		"milestone",
+		"port_owner",
+		"implementation_owner",
 		"notes",
 	}); err != nil {
 		_ = file.Close()
@@ -383,6 +468,12 @@ func writeCSV(path string, tests []test) error {
 			"",
 			test.category,
 			"discovered",
+			"unreviewed",
+			"placeholder",
+			"",
+			"",
+			"",
+			"",
 			"",
 		}); err != nil {
 			_ = file.Close()

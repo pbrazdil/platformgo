@@ -4,7 +4,7 @@
 
 Port every test in the pinned source scope from `upcomers-org/platform` and NautilusTrader into native Go tests for a clean-room Go rewrite. The exact repositories, revisions, source roots, and expected inventory counts are fixed in `ports/SOURCE_REVISIONS.md`.
 
-Accepted Go tests become the maintained executable specification, subject to `INVARIANTS.md` and reviewed decisions. The old Rust platform and Nautilus runtime must not be executed, embedded, queried, or used as a differential oracle during development or CI.
+Semantically reviewed Go tests become the maintained executable specification, subject to `INVARIANTS.md` and reviewed decisions. A mechanically ported test is not accepted until its ledger row is independently reviewed. The old Rust platform and Nautilus runtime must not be executed, embedded, queried, or used as a differential oracle during development or CI.
 
 Before work starts, pin the exact source revisions:
 
@@ -17,7 +17,7 @@ Never port from a moving branch such as `main`.
 
 ### Final goal
 
-The port is complete when the ledger matches the expected inventory counts, every in-scope source test has exactly one row, every applicable behavior is represented by an accepted deterministic native Go test, and every exclusion or source conflict has a reviewed decision record. No row remains `discovered`, `reserved`, `in-progress`, `ported-failing`, or `deferred-live`; the required Go verification passes without executing or depending on the old runtime.
+The source port is complete when the ledger matches the expected inventory counts, every in-scope source test has exactly one row, every applicable behavior has a native Go representation, and every exclusion has a reviewed decision record. No row remains `discovered`, `reserved`, `in-progress`, or `conflict`; `make port-map-complete` passes without executing or depending on the old runtime. This source-port milestone does not claim semantic review, production wiring, or implementation completion.
 
 ---
 
@@ -255,26 +255,25 @@ Do not merge a port when even one source assertion is missing.
 Add one row per Rust test function:
 
 ```csv
-source_repo,source_revision,source_file,source_test,source_line,go_file,go_test,category,status,owner,notes
-platform,<commit>,apps/nautilus/tests/live/trading/e2e_modify_order.rs,resting_limit_can_be_modified,48,internal/order/modify_order_test.go,TestModifyOrder_RestingLimit,model,ported-green,test_porter,"live feed replaced with fixed book"
+source_repo,source_revision,source_file,source_test,source_line,go_file,go_test,category,port_status,review_status,wiring_status,evidence,milestone,port_owner,implementation_owner,notes
+platform,<commit>,apps/nautilus/tests/live/trading/e2e_modify_order.rs,resting_limit_can_be_modified,48,internal/order/modify_order_test.go,TestModifyOrder_RestingLimit,model,ported,unreviewed,placeholder,spec-fixture,,test_porter,,"live feed replaced with fixed book"
 ```
 
-Allowed statuses:
+The canonical lifecycle values and transition rules are in `TESTING.md`.
+A newly translated applicable row uses:
 
 ```text
-discovered
-reserved
-in-progress
-ported-failing
-ported-green
-conflict
-deferred-live
-not-applicable
+port_status=ported
+review_status=unreviewed
+wiring_status=placeholder
+evidence=spec-fixture
+implementation_owner=
 ```
 
-The `not-applicable` category and status must be used together. `deferred-live` is valid only for the `live-canary` category.
-
-`discovered`, `reserved`, `in-progress`, `ported-failing`, and `deferred-live` are non-terminal. The only terminal statuses are `ported-green`, `conflict` with a reviewed `ports/decisions/` record, and `not-applicable` with a reviewed `ports/decisions/` record. Run `make port-map-complete` only when claiming the full pinned inventory is complete.
+Do not mark semantic review or real wiring during mechanical porting. Those
+transitions belong to the independently reviewed implementation cohort. Run
+`make port-map-complete` only when claiming the full pinned source inventory is
+represented; it does not prove production implementation.
 
 ---
 
@@ -614,8 +613,10 @@ ports/test-port-map.csv
 A porting task is complete only when:
 
 1. Every assigned source test has exactly one `ports/test-port-map.csv` row with its pinned source line.
-2. The row is reserved to an owner before implementation starts.
-3. Every `ported-failing` or `ported-green` row names one unique native Go test.
+2. The row is reserved to a `port_owner` before translation starts.
+3. Every `ported` row names one unique native Go test and starts as
+   `review_status=unreviewed`, `wiring_status=placeholder`, and
+   `evidence=spec-fixture`.
 4. Every Go test contains the pinned revision, exact source path and line, and source test name.
 5. Every explicit source assertion is preserved or strengthened.
 6. Live venue dependencies are removed from deterministic economic tests.

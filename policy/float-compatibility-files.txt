@@ -1,0 +1,20 @@
+# Pinned Nautilus fixed-point float conversion compatibility.
+internal/decimal/fixed.go
+internal/decimal/fixed_port_test.go
+
+# Future-market analytics and legacy model/protocol compatibility.
+internal/defi/pool_analysis.go
+internal/defi/tickmap/tick_math_test.go
+internal/instrument/betting.go
+internal/instrument/betting_test.go
+internal/instrument/model.go
+internal/instrument/model_test.go
+internal/instrument/tick_scheme.go
+internal/instrument/tick_scheme_test.go
+internal/market/black_scholes.go
+internal/market/black_scholes_test.go
+internal/market/data.go
+internal/market/greeks.go
+internal/market/greeks_test.go
+internal/market/option_chain.go
+internal/market/option_chain_test.go

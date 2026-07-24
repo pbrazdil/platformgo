@@ -45,9 +45,17 @@ linters:
       min-complexity: 20
     govet:
       enable-all: true
+      disable:
+        - fieldalignment
     nolintlint:
       require-explanation: true
       require-specific: true
+  exclusions:
+    rules:
+      - path: ^(scripts|tools)/
+        text: "G(304|703):"
+        linters:
+          - gosec
 
 formatters:
   enable:

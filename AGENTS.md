@@ -50,7 +50,9 @@ Read only the documents needed for the task:
 Use this order when deciding behavior:
 
 1. Economic and safety invariants in `INVARIANTS.md`.
-2. Accepted native Go tests.
+2. Semantically accepted native Go tests (`review_status=reviewed` in the port
+   ledger; wiring and evidence state still determine what implementation
+   boundary they prove).
 3. Explicit assertions in tests at the pinned source revisions.
 4. Frozen external contract artifacts and contract tests.
 5. Accepted ADRs.
@@ -123,7 +125,8 @@ For each vertical slice:
 
 1. Read the complete source-test context and relevant invariants.
 2. Port or write a native Go test that expresses the observable requirement.
-3. Add source provenance and update `ports/test-port-map.csv` when porting.
+3. Add source provenance and update the independent port, review, wiring,
+   evidence, milestone, and ownership fields in `ports/test-port-map.csv`.
 4. Confirm the test fails for the missing behavior rather than missing test plumbing.
 5. Implement the smallest deterministic behavior.
 6. Add integration or contract tests only at crossed boundaries.

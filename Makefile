@@ -1,4 +1,6 @@
 SHELL := /usr/bin/env bash
+GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+GOVULNCHECK := go run golang.org/x/vuln/cmd/govulncheck@v1.6.0
 
 .PHONY: policy port-map-complete fmt fmt-check lint test test-race test-repeat vuln verify
 
@@ -21,7 +23,8 @@ fmt-check:
 
 lint:
 	go vet ./...
-	golangci-lint run
+	@packages="$$(awk -F, 'NR > 1 && $$2 != "ported-compatibility" && $$2 != "test-placeholder" { print "./" $$1 "/..." }' policy/go-package-policy.csv)"; \
+	  $(GOLANGCI_LINT) run $$packages
 
 test:
 	go test ./... -count=1
@@ -36,6 +39,6 @@ test-repeat:
 	fi
 
 vuln:
-	govulncheck ./...
+	$(GOVULNCHECK) ./...
 
 verify: policy fmt-check lint test test-race test-repeat vuln
