@@ -146,7 +146,7 @@ func (journal *CommandJournal) Begin(
 				lockErr,
 			)
 		}
-		var lastSequence int64
+		var lastSequence uint64
 		if sequenceErr := tx.QueryRow(ctx, `
 			SELECT COALESCE(max(account_sequence), 0)
 			  FROM trading.commands
@@ -159,7 +159,7 @@ func (journal *CommandJournal) Begin(
 				sequenceErr,
 			)
 		}
-		expectedSequence := uint64(lastSequence) + 1
+		expectedSequence := lastSequence + 1
 		if request.AccountSequence != expectedSequence {
 			return BeginCommandResult{}, fmt.Errorf(
 				"%w: account %q got %d, want %d",
@@ -373,14 +373,14 @@ func (journal *CommandJournal) Complete(
 
 	var commandState string
 	var currentResult []byte
-	if err := tx.QueryRow(ctx, `
+	if commandErr := tx.QueryRow(ctx, `
 		SELECT status, result
 		  FROM trading.commands
 		 WHERE command_id = $1
 		 FOR UPDATE`,
 		request.CommandID.String(),
-	).Scan(&commandState, &currentResult); err != nil {
-		return fmt.Errorf("load durable command completion: %w", err)
+	).Scan(&commandState, &currentResult); commandErr != nil {
+		return fmt.Errorf("load durable command completion: %w", commandErr)
 	}
 	switch commandState {
 	case "pending":
