@@ -2076,7 +2076,7 @@ nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/reports/posit
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/reports/position.rs,test_serialization_roundtrip,329,internal/report/position_test.go,TestPositionStatusReportSerializationRoundtrip,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/reports/position.rs,test_signed_decimal_qty_calculation,339,internal/report/position_test.go,TestPositionStatusReportSignedDecimalQtyCalculation,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/reports/position.rs,test_with_avg_px_open,392,internal/report/position_test.go,TestPositionStatusReportWithAvgPxOpen,unit,ported-green,
-nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/stubs.rs,test_uuid_is_valid_v4_rfc4122,239,internal/ids/deterministic_uuid_test.go,TestDeterministicUUIDIsValidV4RFC4122,unit,ported-failing,
+nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/stubs.rs,test_uuid_is_valid_v4_rfc4122,239,internal/ids/deterministic_uuid_test.go,TestDeterministicUUIDIsValidV4RFC4122,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/balance.rs,test_account_balance_debug,336,internal/account/balance_test.go,TestAccountBalanceDebug,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/balance.rs,test_account_balance_display,344,internal/account/balance_test.go,TestAccountBalanceDisplay,unit,ported-green,
 nautilus,116c9b5159ebeb6b578b737d72298cac8d723723,crates/model/src/types/balance.rs,test_account_balance_equality,329,internal/account/balance_test.go,TestAccountBalanceEquality,unit,ported-green,
