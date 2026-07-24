@@ -6,7 +6,7 @@ Clean-room Go replacement for `upcomers-org/platform`, using pinned source tests
 
 Last updated: 2026-07-24
 
-Current delivery stage: **Phase 1 — matching and fills implementation in progress**.
+Current delivery stage: **Phase 1 — positions and OMS implementation in progress**.
 
 The pinned source inventory is complete: all 2,748 tests are recorded in
 `ports/test-port-map.csv`. Five numeric tests are independently reviewed and
@@ -35,6 +35,12 @@ admission-bound mark-price slippage limits, typed slippage rejection, and
 partial IOC execution at the slippage boundary. Its five source rows remain
 unreviewed until the separate evidence promotion is accepted.
 
+The stacked positions/OMS candidate adds exact settlement-currency realized
+PnL, netting fill taxonomy, account-isolated positions, hedging legs, targeted
+leg closure, execution-time reduce-only clamping, and immutable position
+decisions. Its source rows also remain unreviewed until matching lands and the
+positions evidence is independently promoted.
+
 This repository is not yet a production-capable replacement. It has no executable `cmd` services, production PostgreSQL schema or adapter, NATS/JetStream adapter, Centrifugo adapter, or production Hyperliquid adapter. Current integration tests use deterministic in-memory fixtures and do not prove those runtime boundaries.
 
 ## Delivery progress
@@ -42,7 +48,7 @@ This repository is not yet a production-capable replacement. It has no executabl
 | Phase | Status | Evidence and remaining work |
 |---|---|---|
 | 0 — Policy and test harness | Complete | Machine-readable package scope, AST policy checks, split port/review/wiring evidence, exact function provenance, canonical source authorities, pinned Go 1.26.5, CODEOWNERS, immutable CI actions, complete-port and tidy gates, and the initial agent-evaluation corpus exist. `main` is protected and all seven required checks are enforced. The numeric foundation provides the sole `apd/v3`-backed production decimal, strict canonical parsing, explicit one-boundary rounding, immutable unit-bearing values, parser/arithmetic fuzzing, and five reviewed green source rows. The deterministic kernel adds explicit logical time and IDs, strict input sequencing, idempotent duplicate receipts, fail-closed typed errors, canonical decision/state hashes, replay properties, and the minimal synchronous engine fixture. |
-| 1 — Pure engine | Order lifecycle green; matching/fills candidate in progress | The production engine has reviewed `model-real` evidence for market/limit/stop admission, GTC/IOC/FOK behavior, exact cumulative fills, amend, cancel, typed business rejection, immutable decisions, and deterministic replay. Six pinned source rows are green at that boundary, reinforced by policy-native invariant/fuzz coverage. The matching candidate covers depth/VWAP, bid/ask pricing, slippage bands, and partial IOC behavior locally; its evidence is not yet promoted. Positions and OMS modes, margin/funding/liquidation, and brackets/triggers remain. |
+| 1 — Pure engine | Order lifecycle green; matching and positions candidates in progress | The production engine has reviewed `model-real` evidence for market/limit/stop admission, GTC/IOC/FOK behavior, exact cumulative fills, amend, cancel, typed business rejection, immutable decisions, and deterministic replay. Six pinned source rows are green at that boundary, reinforced by policy-native invariant/fuzz coverage. The matching candidate covers depth/VWAP, bid/ask pricing, slippage bands, and partial IOC behavior locally. The stacked positions candidate covers netting, hedging, fill taxonomy, exact realized PnL, targeted closure, and reduce-only clamping locally. Neither candidate's evidence is promoted yet. Margin/funding/liquidation and brackets/triggers remain. |
 | 2 — Durable execution | Not started | PostgreSQL migrations and persistence, idempotency journal, transactional ledger/state, NATS/JetStream transport, outbox/inbox, and durable recovery are not implemented. |
 | 3 — Compatibility edges | Not started | Production REST, gRPC, authentication, realtime/Centrifugo, health, CLI, and deployment-compatible services are not implemented. |
 | 4 — Hyperliquid production integration | Not started | No production adapter, reconnect/resynchronization path, controlled live canary, soak test, or incident drill exists. |
@@ -74,8 +80,9 @@ Verified on 2026-07-24:
 
 ## Next milestone
 
-Promote the matching/fills candidate only after local and hosted validation,
-then implement positions and OMS modes. PostgreSQL and NATS remain Phase 2
-work.
+Promote matching/fills only after local and hosted validation, then rebase and
+promote the positions/OMS candidate. Margin, funding, liquidation, brackets,
+and triggers remain before Phase 1 is complete. PostgreSQL and NATS remain
+Phase 2 work.
 
 The authoritative scope, phase definitions, and completion criteria are in `PROJECT_CHARTER.md`. Repository-wide execution rules are in `AGENTS.md`.

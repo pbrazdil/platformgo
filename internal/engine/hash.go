@@ -43,6 +43,13 @@ func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
 			writeUint64(hasher, instrument.Revision)
 			writeUint8(hasher, instrument.PriceScale)
 			writeUint8(hasher, instrument.QuantityScale)
+			writeString(hasher, instrument.SettlementCurrency)
+			writeUint8(hasher, instrument.SettlementCurrencyScale)
+		}
+		writeUint64(hasher, uint64(len(decision.AccountChanges)))
+		for _, account := range decision.AccountChanges {
+			writeString(hasher, account.AccountID)
+			writeString(hasher, string(account.OmsMode))
 		}
 		writeUint64(hasher, uint64(len(decision.BookChanges)))
 		for _, book := range decision.BookChanges {
@@ -66,6 +73,7 @@ func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
 			writeString(hasher, order.Price)
 			writeString(hasher, order.TriggerPrice)
 			writeUint8(hasher, boolByte(order.ReduceOnly))
+			writeBytes(hasher, order.PositionID[:])
 			writeUint8(hasher, boolByte(order.HasSlippageBand))
 			writeUint32(hasher, order.MaxSlippageBPS)
 			writeString(hasher, order.SlippageReference)
@@ -81,7 +89,24 @@ func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
 			writeString(hasher, string(fill.Side))
 			writeString(hasher, fill.Price)
 			writeString(hasher, fill.Quantity)
+			writeBytes(hasher, fill.PositionID[:])
+			writeString(hasher, string(fill.PositionEffect))
+			writeString(hasher, fill.RealizedPnL)
+			writeString(hasher, fill.SettlementCurrency)
 			writeInt64(hasher, fill.LogicalTime.UnixNano())
+		}
+		writeUint64(hasher, uint64(len(decision.PositionChanges)))
+		for _, position := range decision.PositionChanges {
+			writeBytes(hasher, position.PositionID[:])
+			writeString(hasher, position.AccountID)
+			writeString(hasher, position.InstrumentID)
+			writeString(hasher, string(position.Side))
+			writeString(hasher, string(position.Status))
+			writeString(hasher, position.SignedQuantity)
+			writeString(hasher, position.AverageOpenPrice)
+			writeString(hasher, position.RealizedPnL)
+			writeString(hasher, position.SettlementCurrency)
+			writeUint64(hasher, position.Version)
 		}
 		writeUint64(hasher, uint64(len(decision.Events)))
 		for _, event := range decision.Events {

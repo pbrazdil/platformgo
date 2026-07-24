@@ -166,8 +166,10 @@ type Decision struct {
 	NextStateHash        Hash
 	CommandResult        CommandResult
 	InstrumentChanges    []InstrumentSnapshot
+	AccountChanges       []AccountSnapshot
 	BookChanges          []BookSnapshot
 	OrderChanges         []OrderSnapshot
 	Fills                []FillSnapshot
+	PositionChanges      []PositionSnapshot
 	Events               []DomainEvent
 }

@@ -194,9 +194,11 @@ func halt(state State, inputHash Hash, engineError *Error) (State, Decision, err
 
 func cloneDecision(decision Decision) Decision {
 	decision.InstrumentChanges = append([]InstrumentSnapshot(nil), decision.InstrumentChanges...)
+	decision.AccountChanges = append([]AccountSnapshot(nil), decision.AccountChanges...)
 	decision.BookChanges = cloneBookSnapshots(decision.BookChanges)
 	decision.OrderChanges = append([]OrderSnapshot(nil), decision.OrderChanges...)
 	decision.Fills = append([]FillSnapshot(nil), decision.Fills...)
+	decision.PositionChanges = append([]PositionSnapshot(nil), decision.PositionChanges...)
 	decision.Events = append([]DomainEvent(nil), decision.Events...)
 	return decision
 }

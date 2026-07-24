@@ -51,6 +51,8 @@ func applyTradingAction(
 	switch action.Kind {
 	case TradingActionConfigureInstrument:
 		return configureTradingInstrument(state, *action.ConfigureInstrument)
+	case TradingActionConfigureAccount:
+		return configureTradingAccount(state, *action.ConfigureAccount)
 	case TradingActionUpdateBook:
 		return updateTradingBook(state, input, *action.UpdateBook)
 	case TradingActionSubmitOrder:
@@ -68,6 +70,7 @@ func validTradingActionUnion(action TradingAction) bool {
 	present := 0
 	for _, memberPresent := range []bool{
 		action.ConfigureInstrument != nil,
+		action.ConfigureAccount != nil,
 		action.UpdateBook != nil,
 		action.SubmitOrder != nil,
 		action.AmendOrder != nil,
@@ -83,6 +86,8 @@ func validTradingActionUnion(action TradingAction) bool {
 	switch action.Kind {
 	case TradingActionConfigureInstrument:
 		return action.ConfigureInstrument != nil
+	case TradingActionConfigureAccount:
+		return action.ConfigureAccount != nil
 	case TradingActionUpdateBook:
 		return action.UpdateBook != nil
 	case TradingActionSubmitOrder:
@@ -124,15 +129,51 @@ func configureTradingInstrument(
 	if err != nil {
 		return rejectedTradingDecision(state, RejectionInvalidInstrument)
 	}
+	settlementCurrency, err := domain.NewCurrency(
+		configure.SettlementCurrency,
+		configure.SettlementCurrencyScale,
+	)
+	if err != nil {
+		return rejectedTradingDecision(state, RejectionInvalidInstrument)
+	}
 
 	state.trading = state.trading.clone()
-	state.trading.replaceInstrument(revision)
+	state.trading.replaceInstrument(instrumentRecord{
+		revision:           revision,
+		settlementCurrency: settlementCurrency,
+	})
 	state, decision := acceptedTradingDecision(state)
 	decision.InstrumentChanges = []InstrumentSnapshot{{
-		InstrumentID:  revision.ID(),
-		Revision:      revision.Revision(),
-		PriceScale:    revision.PriceScale(),
-		QuantityScale: revision.QuantityScale(),
+		InstrumentID:            revision.ID(),
+		Revision:                revision.Revision(),
+		PriceScale:              revision.PriceScale(),
+		QuantityScale:           revision.QuantityScale(),
+		SettlementCurrency:      settlementCurrency.Code(),
+		SettlementCurrencyScale: settlementCurrency.Scale(),
+	}}
+	return state, decision
+}
+
+func configureTradingAccount(
+	state State,
+	configure ConfigureAccount,
+) (State, Decision) {
+	if configure.AccountID == "" || !configure.OmsMode.valid() {
+		return rejectedTradingDecision(state, RejectionInvalidAction)
+	}
+	if state.trading.hasOpenPositions(configure.AccountID) ||
+		state.trading.hasActiveOrders(configure.AccountID) {
+		return rejectedTradingDecision(state, RejectionInvalidAction)
+	}
+	state.trading = state.trading.clone()
+	state.trading.replaceAccount(accountRecord{
+		accountID: configure.AccountID,
+		omsMode:   configure.OmsMode,
+	})
+	state, decision := acceptedTradingDecision(state)
+	decision.AccountChanges = []AccountSnapshot{{
+		AccountID: configure.AccountID,
+		OmsMode:   configure.OmsMode,
 	}}
 	return state, decision
 }
@@ -251,6 +292,9 @@ func submitTradingOrder(
 		}
 		order.slippageReference = book.markPrice
 	}
+	if reason := clampReduceOnlyOrder(state.trading, &order); reason != "" {
+		return rejectedTradingDecision(state, reason)
+	}
 	state.trading = state.trading.clone()
 	state.trading.orders = append(state.trading.orders, order)
 	orderIndex := len(state.trading.orders) - 1
@@ -327,6 +371,7 @@ func newOrderRecord(
 		quantity:       quantity,
 		filledQuantity: filled,
 		reduceOnly:     submit.ReduceOnly,
+		positionID:     submit.PositionID,
 		version:        1,
 	}
 	if submit.MaxSlippageBPS != nil {

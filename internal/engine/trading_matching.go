@@ -10,6 +10,14 @@ func executeOrder(
 ) RejectionReason {
 	candidate := state.clone()
 	order := &candidate.orders[orderIndex]
+	if order.reduceOnly {
+		if reason := clampReduceOnlyOrder(candidate, order); reason != "" {
+			order.status = OrderStatusCancelled
+			order.version++
+			*state = candidate
+			return ""
+		}
+	}
 	book, ok := candidate.book(order.instrument.ID())
 	if !ok {
 		if order.orderType == OrderTypeMarket {
@@ -51,6 +59,15 @@ func executeOrder(
 		}
 		order.averagePrice = average
 		order.hasAverage = true
+		if err := applyFillsToPositions(
+			&candidate,
+			*order,
+			startFillCount,
+			input,
+			decision,
+		); err != nil {
+			return RejectionInvalidOrder
+		}
 	}
 
 	switch {
