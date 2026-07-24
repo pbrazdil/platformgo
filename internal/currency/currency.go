@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-
-	"github.com/upcomers-org/platformgo/internal/decimal"
 )
+
+const maxCurrencyPrecision uint8 = 18
 
 // Type identifies the broad category of a currency.
 type Type uint8
@@ -55,10 +55,10 @@ func New(code string, precision uint8, iso4217 uint16, name string, currencyType
 	if name == "" {
 		return Currency{}, errors.New("name must not be empty")
 	}
-	if precision > decimal.MaxPrecision {
+	if precision > maxCurrencyPrecision {
 		return Currency{}, fmt.Errorf(
 			"precision exceeded maximum FIXED_PRECISION (%d), was %d",
-			decimal.MaxPrecision,
+			maxCurrencyPrecision,
 			precision,
 		)
 	}
