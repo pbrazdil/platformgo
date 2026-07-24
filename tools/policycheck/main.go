@@ -364,7 +364,7 @@ func (c *checker) inspectFile(
 			c.add(relative, fileSet.Position(imported.Pos()).Line, "unsafe import is forbidden")
 		}
 		if importPath == "github.com/cockroachdb/apd/v3" &&
-			!strings.HasPrefix(relative, "internal/decimal/economic/") {
+			filepath.Dir(relative) != "internal/decimal/economic" {
 			c.add(
 				relative,
 				fileSet.Position(imported.Pos()).Line,

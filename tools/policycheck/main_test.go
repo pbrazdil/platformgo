@@ -155,6 +155,7 @@ func TestCheckRestrictsAPDToEconomicDecimalPackage(t *testing.T) {
 		"internal/domain/value.go",
 		"internal/decimal/value.go",
 		"internal/decimal/other/value.go",
+		"internal/decimal/economic/other/value.go",
 	} {
 		t.Run(sourcePath, func(t *testing.T) {
 			root := policyFixture(t)
