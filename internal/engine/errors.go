@@ -6,18 +6,19 @@ import "fmt"
 type ErrorKind string
 
 const (
-	ErrInvalidEnvelope    ErrorKind = "invalid_envelope"
-	ErrUnknownSchema      ErrorKind = "unknown_schema"
-	ErrUnknownInputKind   ErrorKind = "unknown_input_kind"
-	ErrShardMismatch      ErrorKind = "shard_mismatch"
-	ErrPayloadMismatch    ErrorKind = "payload_mismatch"
-	ErrSequenceGap        ErrorKind = "sequence_gap"
-	ErrSequenceRegression ErrorKind = "sequence_regression"
-	ErrSequenceExhausted  ErrorKind = "sequence_exhausted"
-	ErrInputConflict      ErrorKind = "input_conflict"
-	ErrUnknownHashVersion ErrorKind = "unknown_hash_version"
-	ErrInvalidEffect      ErrorKind = "invalid_economic_effect"
-	ErrShardNotReady      ErrorKind = "shard_not_ready"
+	ErrInvalidEnvelope      ErrorKind = "invalid_envelope"
+	ErrUnknownSchema        ErrorKind = "unknown_schema"
+	ErrUnknownInputKind     ErrorKind = "unknown_input_kind"
+	ErrShardMismatch        ErrorKind = "shard_mismatch"
+	ErrPayloadMismatch      ErrorKind = "payload_mismatch"
+	ErrSequenceGap          ErrorKind = "sequence_gap"
+	ErrSequenceRegression   ErrorKind = "sequence_regression"
+	ErrSequenceExhausted    ErrorKind = "sequence_exhausted"
+	ErrInputConflict        ErrorKind = "input_conflict"
+	ErrDurableInputConflict ErrorKind = "durable_input_conflict"
+	ErrUnknownHashVersion   ErrorKind = "unknown_hash_version"
+	ErrInvalidEffect        ErrorKind = "invalid_economic_effect"
+	ErrShardNotReady        ErrorKind = "shard_not_ready"
 )
 
 func (kind ErrorKind) Error() string {

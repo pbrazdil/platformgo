@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,11 +16,37 @@ import (
 
 // OutboxMessage is one claimed immutable publication.
 type OutboxMessage struct {
-	MessageID     engine.ID
-	Subject       string
-	SchemaVersion uint32
-	Payload       []byte
-	Attempts      uint32
+	MessageID           engine.ID
+	Subject             string
+	SchemaVersion       uint32
+	Payload             []byte
+	Attempts            uint32
+	orderedCommandClaim [sha256.Size]byte
+}
+
+// HasOrderedCommandClaim reports whether PostgreSQL admitted this command
+// through the account-ordered outbox claim boundary.
+func (message OutboxMessage) HasOrderedCommandClaim() bool {
+	return message.orderedCommandClaim != [sha256.Size]byte{} &&
+		message.orderedCommandClaim == commandPublicationFingerprint(message)
+}
+
+func commandPublicationFingerprint(message OutboxMessage) [sha256.Size]byte {
+	hasher := sha256.New()
+	_, _ = hasher.Write([]byte("platformgo.postgres.ordered-command-publication.v1"))
+	_, _ = hasher.Write(message.MessageID[:])
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], uint64(len(message.Subject)))
+	_, _ = hasher.Write(encoded[:])
+	_, _ = hasher.Write([]byte(message.Subject))
+	binary.BigEndian.PutUint32(encoded[:4], message.SchemaVersion)
+	_, _ = hasher.Write(encoded[:4])
+	binary.BigEndian.PutUint64(encoded[:], uint64(len(message.Payload)))
+	_, _ = hasher.Write(encoded[:])
+	_, _ = hasher.Write(message.Payload)
+	var result [sha256.Size]byte
+	copy(result[:], hasher.Sum(nil))
+	return result
 }
 
 // DurablePublisher waits for a transport durability acknowledgment and returns
@@ -116,6 +144,66 @@ func (store *MessagingStore) PublishOutboxBatch(
 	return published, firstErr
 }
 
+// RepublishOutbox retries an already acknowledged immutable outbox message.
+// A command can reach this path only after its first account-ordered publish
+// established its JetStream position.
+func (store *MessagingStore) RepublishOutbox(
+	ctx context.Context,
+	publisher DurablePublisher,
+	messageID engine.ID,
+) (uint64, error) {
+	if store == nil || store.pool == nil {
+		return 0, errors.New("republish outbox: PostgreSQL pool is required")
+	}
+	if publisher == nil {
+		return 0, errors.New("republish outbox: durable publisher is required")
+	}
+	if messageID.IsZero() {
+		return 0, errors.New("republish outbox: message ID is required")
+	}
+	var message OutboxMessage
+	var messageIDText string
+	var commandMessage bool
+	if err := store.pool.QueryRow(ctx, `
+		SELECT outbox.message_id::text, outbox.subject,
+		       outbox.schema_version, outbox.payload, outbox.attempts,
+		       command.command_id IS NOT NULL
+		  FROM messaging.outbox AS outbox
+		  LEFT JOIN trading.commands AS command
+		    ON command.command_id = outbox.message_id
+		 WHERE outbox.message_id = $1
+		   AND outbox.published_at IS NOT NULL`,
+		messageID.String(),
+	).Scan(
+		&messageIDText,
+		&message.Subject,
+		&message.SchemaVersion,
+		&message.Payload,
+		&message.Attempts,
+		&commandMessage,
+	); errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("republish outbox: published message %s not found", messageID)
+	} else if err != nil {
+		return 0, fmt.Errorf("republish outbox %s: %w", messageID, err)
+	}
+	parsedID, err := engine.ParseID(messageIDText)
+	if err != nil {
+		return 0, fmt.Errorf("republish outbox: parse message ID: %w", err)
+	}
+	message.MessageID = parsedID
+	if commandMessage {
+		message.orderedCommandClaim = commandPublicationFingerprint(message)
+	}
+	sequence, err := publisher.Publish(ctx, message)
+	if err != nil {
+		return 0, fmt.Errorf("republish outbox %s: %w", messageID, err)
+	}
+	if sequence == 0 {
+		return 0, errors.New("republish outbox: transport returned zero stream sequence")
+	}
+	return sequence, nil
+}
+
 func (store *MessagingStore) claimOutbox(
 	ctx context.Context,
 	now time.Time,
@@ -132,7 +220,8 @@ func (store *MessagingStore) claimOutbox(
 
 	rows, err := tx.Query(ctx, `
 		SELECT outbox.message_id::text, outbox.subject,
-		       outbox.schema_version, outbox.payload, outbox.attempts
+		       outbox.schema_version, outbox.payload, outbox.attempts,
+		       command.command_id IS NOT NULL
 		  FROM messaging.outbox AS outbox
 		  LEFT JOIN trading.commands AS command
 		    ON command.command_id = outbox.message_id
@@ -165,12 +254,14 @@ func (store *MessagingStore) claimOutbox(
 	for rows.Next() {
 		var message OutboxMessage
 		var messageIDText string
+		var commandMessage bool
 		if scanErr := rows.Scan(
 			&messageIDText,
 			&message.Subject,
 			&message.SchemaVersion,
 			&message.Payload,
 			&message.Attempts,
+			&commandMessage,
 		); scanErr != nil {
 			rows.Close()
 			return nil, fmt.Errorf("claim outbox: scan: %w", scanErr)
@@ -182,6 +273,9 @@ func (store *MessagingStore) claimOutbox(
 		}
 		message.MessageID = messageID
 		message.Attempts++
+		if commandMessage {
+			message.orderedCommandClaim = commandPublicationFingerprint(message)
+		}
 		messages = append(messages, message)
 	}
 	if rowsErr := rows.Err(); rowsErr != nil {

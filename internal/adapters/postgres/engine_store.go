@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,6 +23,9 @@ var (
 	// ErrCommandInputConflict means the delivered engine input does not match
 	// the pending durable command with the same identity.
 	ErrCommandInputConflict = errors.New("engine input conflicts with durable command")
+	// ErrCommandPredecessorPending means a later account command reached the
+	// engine before every lower account sequence was terminal.
+	ErrCommandPredecessorPending = errors.New("command predecessor is pending")
 )
 
 const (
@@ -56,6 +60,61 @@ type ShardOwnership struct {
 // NewEngineStore binds the durable coordinator to PostgreSQL.
 func NewEngineStore(pool *pgxpool.Pool) *EngineStore {
 	return &EngineStore{pool: pool}
+}
+
+// HaltTradingInput durably records a deterministic transport or authority
+// conflict without applying any decision effects.
+func (store *EngineStore) HaltTradingInput(
+	ctx context.Context,
+	state engine.State,
+	input engine.InputEnvelope,
+	action engine.TradingAction,
+	conflict error,
+) (engine.State, error) {
+	if store == nil || store.pool == nil {
+		return state, errors.New("halt trading input: PostgreSQL pool is required")
+	}
+	if conflict == nil {
+		return state, errors.New("halt trading input: conflict is required")
+	}
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.Serializable,
+	})
+	if err != nil {
+		return state, fmt.Errorf("halt trading input: begin transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+	}()
+	if err := acquireShardWriter(ctx, tx, state.ShardID()); err != nil {
+		return state, err
+	}
+	if err := verifyCheckpoint(ctx, tx, state); err != nil {
+		return state, err
+	}
+	halted, haltErr := engine.FailClosed(
+		state,
+		input,
+		engine.ErrDurableInputConflict,
+		conflict.Error(),
+	)
+	if err := persistEngineFault(
+		ctx,
+		tx,
+		input,
+		action,
+		halted,
+		haltErr,
+	); err != nil {
+		return state, err
+	}
+	if err := persistCheckpoint(ctx, tx, halted); err != nil {
+		return state, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return state, fmt.Errorf("halt trading input: commit: %w", err)
+	}
+	return halted, nil
 }
 
 // AcquireShardOwnership fails immediately when another process owns the shard.
@@ -252,6 +311,34 @@ func (store *EngineStore) ApplyTrading(
 	}
 
 	if err := persistDecision(ctx, tx, input, decision); err != nil {
+		if isDeterministicDurableInputConflict(err) {
+			halted, haltErr := engine.FailClosed(
+				state,
+				input,
+				engine.ErrDurableInputConflict,
+				err.Error(),
+			)
+			if faultErr := persistEngineFault(
+				ctx,
+				tx,
+				input,
+				action,
+				halted,
+				haltErr,
+			); faultErr != nil {
+				return state, engine.Decision{}, false, faultErr
+			}
+			if checkpointErr := persistCheckpoint(ctx, tx, halted); checkpointErr != nil {
+				return state, engine.Decision{}, false, checkpointErr
+			}
+			if commitErr := tx.Commit(ctx); commitErr != nil {
+				return state, engine.Decision{}, false, fmt.Errorf(
+					"commit durable input conflict: %w",
+					commitErr,
+				)
+			}
+			return halted, engine.Decision{}, false, errors.Join(err, haltErr)
+		}
 		return state, engine.Decision{}, false, err
 	}
 	if err := persistReceipt(ctx, tx, input, decision); err != nil {
@@ -271,6 +358,13 @@ func (store *EngineStore) ApplyTrading(
 		)
 	}
 	return next, decision, false, nil
+}
+
+func isDeterministicDurableInputConflict(err error) bool {
+	return errors.Is(err, ErrCommandInputConflict) ||
+		errors.Is(err, ErrCommandPredecessorPending) ||
+		errors.Is(err, ErrCommandNotFound) ||
+		errors.Is(err, ErrCommandCompletionConflict)
 }
 
 func acquireShardWriter(
@@ -609,23 +703,60 @@ func persistCommandResult(
 	result engine.CommandResult,
 ) error {
 	if input.Kind != engine.InputKindCommand {
+		var commandExists bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				  FROM trading.commands
+				 WHERE command_id = $1
+			)`,
+			input.InputID.String(),
+		).Scan(&commandExists); err != nil {
+			return fmt.Errorf(
+				"check non-command input %s durable identity: %w",
+				input.InputID,
+				err,
+			)
+		}
+		if commandExists {
+			return fmt.Errorf(
+				"%w: command %s delivered as non-command input",
+				ErrCommandInputConflict,
+				input.InputID,
+			)
+		}
 		return nil
 	}
 	var commandStatus string
+	var commandType string
 	var schemaVersion uint32
+	var accountID string
 	var accountSequence uint64
 	var storedPayload []byte
+	var commandLogicalTime time.Time
+	var outboxSubject string
+	var outboxSchemaVersion uint32
+	var outboxPayload []byte
 	if err := tx.QueryRow(ctx, `
-		SELECT status, schema_version, account_sequence, canonical_payload
-		  FROM trading.commands
-		 WHERE command_id = $1
-		 FOR UPDATE`,
+		SELECT c.status, c.command_type, c.schema_version, c.account_id,
+		       c.account_sequence, c.canonical_payload, c.logical_time,
+		       o.subject, o.schema_version, o.payload
+		  FROM trading.commands AS c
+		  JOIN messaging.outbox AS o ON o.message_id = c.command_id
+		 WHERE c.command_id = $1
+		 FOR UPDATE OF c`,
 		input.InputID.String(),
 	).Scan(
 		&commandStatus,
+		&commandType,
 		&schemaVersion,
+		&accountID,
 		&accountSequence,
 		&storedPayload,
+		&commandLogicalTime,
+		&outboxSubject,
+		&outboxSchemaVersion,
+		&outboxPayload,
 	); errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: %s", ErrCommandNotFound, input.InputID)
 	} else if err != nil {
@@ -639,6 +770,15 @@ func persistCommandResult(
 			commandStatus,
 		)
 	}
+	storedInput, storedAction, err := engine.DecodeInputMessage(outboxPayload)
+	if err != nil {
+		return fmt.Errorf(
+			"%w: decode command %s outbox envelope: %w",
+			ErrCommandInputConflict,
+			input.InputID,
+			err,
+		)
+	}
 	canonicalStored, err := canonicalJSON(storedPayload)
 	if err != nil {
 		return fmt.Errorf("decode command %s canonical payload: %w", input.InputID, err)
@@ -647,10 +787,58 @@ func persistCommandResult(
 	if err != nil {
 		return fmt.Errorf("decode command %s input payload: %w", input.InputID, err)
 	}
-	if schemaVersion != input.SchemaVersion ||
+	expectedSubject := fmt.Sprintf(
+		"engine.input.%d.command.v%d",
+		storedInput.ShardID,
+		storedInput.SchemaVersion,
+	)
+	if storedInput.Kind != engine.InputKindCommand ||
+		outboxSubject != expectedSubject ||
+		outboxSchemaVersion != storedInput.SchemaVersion ||
+		engine.BusinessInputHash(storedInput) != engine.BusinessInputHash(input) ||
+		schemaVersion != input.SchemaVersion ||
+		commandType != string(storedAction.Kind) ||
 		accountSequence != input.SourceSequence ||
+		commandLogicalTime.UnixNano() != input.LogicalTime.UnixNano() ||
 		!bytes.Equal(canonicalStored, canonicalInput) {
 		return fmt.Errorf("%w: command %s", ErrCommandInputConflict, input.InputID)
+	}
+	if actionAccountID, scoped := engine.TradingActionAccountID(storedAction); scoped &&
+		actionAccountID != accountID {
+		return fmt.Errorf(
+			"%w: command %s account lane %q differs from payload account %q",
+			ErrCommandInputConflict,
+			input.InputID,
+			accountID,
+			actionAccountID,
+		)
+	}
+	var predecessorPending bool
+	if predecessorErr := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM trading.commands
+			 WHERE account_id = $1
+			   AND account_sequence < $2
+			   AND status = 'pending'
+		)`,
+		accountID,
+		accountSequence,
+	).Scan(&predecessorPending); predecessorErr != nil {
+		return fmt.Errorf(
+			"check command %s account predecessors: %w",
+			input.InputID,
+			predecessorErr,
+		)
+	}
+	if predecessorPending {
+		return fmt.Errorf(
+			"%w: command %s account %q sequence %d",
+			ErrCommandPredecessorPending,
+			input.InputID,
+			accountID,
+			accountSequence,
+		)
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
@@ -1362,7 +1550,8 @@ func (store *EngineStore) replayCommittedFaults(
 	receipts *engine.MemoryReceiptIndex,
 ) (engine.State, error) {
 	rows, err := store.pool.Query(ctx, `
-		SELECT envelope, supplied_action, error_kind, resulting_state_hash
+		SELECT envelope, supplied_action, error_kind, error_detail,
+		       resulting_state_hash
 		  FROM engine.shard_faults
 		 WHERE shard_id = $1
 		 ORDER BY committed_at, resulting_state_hash`,
@@ -1380,11 +1569,13 @@ func (store *EngineStore) replayCommittedFaults(
 		var envelopeJSON []byte
 		var suppliedAction []byte
 		var errorKind string
+		var errorDetail string
 		var storedStateHash []byte
 		if err := rows.Scan(
 			&envelopeJSON,
 			&suppliedAction,
 			&errorKind,
+			&errorDetail,
 			&storedStateHash,
 		); err != nil {
 			return engine.State{}, fmt.Errorf(
@@ -1405,12 +1596,23 @@ func (store *EngineStore) replayCommittedFaults(
 				err,
 			)
 		}
-		next, _, applyErr := engine.ApplyTradingWithReceipts(
-			state,
-			input,
-			action,
-			receipts,
-		)
+		var next engine.State
+		var applyErr error
+		if engine.ErrorKind(errorKind) == engine.ErrDurableInputConflict {
+			next, applyErr = engine.FailClosed(
+				state,
+				input,
+				engine.ErrDurableInputConflict,
+				errorDetail,
+			)
+		} else {
+			next, _, applyErr = engine.ApplyTradingWithReceipts(
+				state,
+				input,
+				action,
+				receipts,
+			)
+		}
 		if applyErr == nil || !errors.Is(applyErr, engine.ErrorKind(errorKind)) {
 			return engine.State{}, fmt.Errorf(
 				"%w: shard %d fault replay returned %w, want %s",

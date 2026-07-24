@@ -1,6 +1,7 @@
 package nats
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -53,5 +54,55 @@ func TestEngineInputCodecAssignsDurableShardConsumerSequence(t *testing.T) {
 		decodedAction.ConfigureAccount == nil ||
 		decodedAction.ConfigureAccount.AccountID != "account-1" {
 		t.Fatalf("decoded input/action = %+v / %+v", decoded, decodedAction)
+	}
+}
+
+func TestEngineInputCodecRejectsSubjectEnvelopeMismatch(t *testing.T) {
+	action := engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "account-1",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	}
+	payload, err := engine.EncodeTradingAction(action)
+	if err != nil {
+		t.Fatalf("EncodeTradingAction: %v", err)
+	}
+	inputID := engine.IDFromSequence(engine.ID{}, 112)
+	input := engine.InputEnvelope{
+		InputID:              inputID,
+		SchemaVersion:        engine.CurrentSchemaVersion,
+		ShardID:              7,
+		Kind:                 engine.InputKindCommand,
+		SourceID:             "command-journal",
+		SourceSequence:       1,
+		LogicalTime:          engine.NewLogicalTime(time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)),
+		ConfigurationVersion: 1,
+		InstrumentVersion:    1,
+		Payload:              payload,
+	}
+	encoded, err := EncodeEngineInputMessage(input)
+	if err != nil {
+		t.Fatalf("EncodeEngineInputMessage: %v", err)
+	}
+
+	for _, subject := range []string{
+		"engine.input.8.command.v1",
+		"engine.input.7.market.hyperliquid.v1",
+		"engine.input.7.command.v2",
+		"engine.input.7.command.v1.extra",
+	} {
+		t.Run(strings.ReplaceAll(subject, ".", "_"), func(t *testing.T) {
+			_, _, err := decodeEngineInputMessage(InboundMessage{
+				MessageID:      inputID,
+				Subject:        subject,
+				Data:           encoded,
+				StreamSequence: 1,
+			})
+			if err == nil {
+				t.Fatalf("decodeEngineInputMessage subject %q succeeded", subject)
+			}
+		})
 	}
 }

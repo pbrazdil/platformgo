@@ -284,22 +284,33 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	); err != nil {
 		t.Fatalf("Begin duplicate probe command: %v", err)
 	}
-	duplicateMessage := platformpostgres.OutboxMessage{
-		MessageID: duplicateInputID,
-		Subject:   "engine.input.10.command.v1",
-		Payload:   duplicateTransport,
-	}
-	firstDuplicateSequence, err := platformnats.NewPublisher(js).Publish(
+	duplicatePublisher := platformnats.NewPublisher(js)
+	duplicateMessagingStore := platformpostgres.NewMessagingStore(pool)
+	published, err = duplicateMessagingStore.PublishOutboxBatch(
 		ctx,
-		duplicateMessage,
+		duplicatePublisher,
+		now.Add(2*time.Second),
+		10,
+		time.Minute,
+		time.Second,
 	)
-	if err != nil {
-		t.Fatalf("publish duplicate probe first copy: %v", err)
+	if err != nil || published != 1 {
+		t.Fatalf("publish duplicate probe first copy = %d, error %v", published, err)
+	}
+	var firstDuplicateSequence uint64
+	if err := pool.QueryRow(ctx, `
+		SELECT publish_sequence
+		  FROM messaging.outbox
+		 WHERE message_id = $1`,
+		duplicateInputID.String(),
+	).Scan(&firstDuplicateSequence); err != nil {
+		t.Fatalf("read duplicate probe first sequence: %v", err)
 	}
 	time.Sleep(150 * time.Millisecond)
-	secondDuplicateSequence, err := platformnats.NewPublisher(js).Publish(
+	secondDuplicateSequence, err := duplicateMessagingStore.RepublishOutbox(
 		ctx,
-		duplicateMessage,
+		duplicatePublisher,
+		duplicateInputID,
 	)
 	if err != nil {
 		t.Fatalf("publish duplicate probe beyond window: %v", err)
@@ -372,13 +383,11 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 		t.Fatalf("EnsureEngineShardStream poison probe: %v", err)
 	}
 	poisonID := engine.IDFromSequence(engine.ID{}, 123)
-	if _, err := platformnats.NewPublisher(js).Publish(
+	if _, err := js.Publish(
 		ctx,
-		platformpostgres.OutboxMessage{
-			MessageID: poisonID,
-			Subject:   "engine.input.11.command.v1",
-			Payload:   []byte(`{"unknown":"transport-envelope"}`),
-		},
+		"engine.input.11.command.v1",
+		[]byte(`{"unknown":"transport-envelope"}`),
+		jetstream.WithMsgID(poisonID.String()),
 	); err != nil {
 		t.Fatalf("publish poison probe: %v", err)
 	}
@@ -417,4 +426,394 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	if poisonReceipts != 0 {
 		t.Fatalf("poison envelope produced %d business receipts", poisonReceipts)
 	}
+
+	if err := platformnats.EnsureEngineShardStream(ctx, js, 15, limits); err != nil {
+		t.Fatalf("EnsureEngineShardStream subject mismatch: %v", err)
+	}
+	subjectMismatchAction := engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "subject-mismatch-account",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	}
+	subjectMismatchPayload, err := engine.EncodeTradingAction(subjectMismatchAction)
+	if err != nil {
+		t.Fatalf("EncodeTradingAction subject mismatch: %v", err)
+	}
+	subjectMismatchID := engine.IDFromSequence(engine.ID{}, 124)
+	subjectMismatchInput := engine.InputEnvelope{
+		InputID:              subjectMismatchID,
+		SchemaVersion:        engine.CurrentSchemaVersion,
+		ShardID:              15,
+		Kind:                 engine.InputKindCommand,
+		SourceID:             "command-journal",
+		SourceSequence:       1,
+		LogicalTime:          engine.NewLogicalTime(logicalTime),
+		ConfigurationVersion: 1,
+		InstrumentVersion:    1,
+		Payload:              subjectMismatchPayload,
+	}
+	subjectMismatchTransport, err := platformnats.EncodeEngineInputMessage(
+		subjectMismatchInput,
+	)
+	if err != nil {
+		t.Fatalf("EncodeEngineInputMessage subject mismatch: %v", err)
+	}
+	if _, err := platformpostgres.NewCommandJournal(pool).Begin(
+		ctx,
+		platformpostgres.BeginCommandRequest{
+			Scope:            "account:subject-mismatch-account",
+			IdempotencyKey:   "subject-mismatch",
+			RequestHash:      sha256.Sum256(subjectMismatchTransport),
+			CommandID:        subjectMismatchID,
+			AccountID:        "subject-mismatch-account",
+			AccountSequence:  1,
+			CommandType:      string(subjectMismatchAction.Kind),
+			SchemaVersion:    engine.CurrentSchemaVersion,
+			CanonicalPayload: subjectMismatchPayload.Bytes(),
+			OutboxSubject:    "engine.input.15.command.v1",
+			OutboxPayload:    subjectMismatchTransport,
+			LogicalTime:      logicalTime,
+			ExpiresAt:        now.Add(24 * time.Hour),
+		},
+	); err != nil {
+		t.Fatalf("Begin subject mismatch command: %v", err)
+	}
+	if _, err := js.Publish(
+		ctx,
+		"engine.input.15.market.command-journal.v1",
+		subjectMismatchTransport,
+		jetstream.WithMsgID(subjectMismatchID.String()),
+	); err != nil {
+		t.Fatalf("publish subject mismatch: %v", err)
+	}
+	subjectMismatchProcessor, err := platformnats.NewEngineProcessor(
+		ctx,
+		engineStore,
+		15,
+	)
+	if err != nil {
+		t.Fatalf("NewEngineProcessor subject mismatch: %v", err)
+	}
+	subjectMismatchConsumer, err := platformnats.NewEnginePullConsumer(
+		ctx,
+		js,
+		15,
+		"engine-shard-15-subject-mismatch",
+		time.Second,
+	)
+	if err != nil {
+		t.Fatalf("NewEnginePullConsumer subject mismatch: %v", err)
+	}
+	processed, err = subjectMismatchConsumer.ProcessOne(
+		ctx,
+		subjectMismatchProcessor.Handle,
+	)
+	if !processed || err == nil || subjectMismatchProcessor.Ready() {
+		t.Fatalf(
+			"subject mismatch = processed %t ready %t error %v",
+			processed,
+			subjectMismatchProcessor.Ready(),
+			err,
+		)
+	}
+	if err := subjectMismatchProcessor.Close(ctx); err != nil {
+		t.Fatalf("close subject mismatch processor: %v", err)
+	}
+	restartedSubjectMismatch, err := platformnats.NewEngineProcessor(
+		ctx,
+		engineStore,
+		15,
+	)
+	if err != nil {
+		t.Fatalf("restart subject mismatch processor: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = restartedSubjectMismatch.Close(context.Background())
+	})
+	if restartedSubjectMismatch.Ready() {
+		t.Fatal("subject mismatch processor became ready after restart")
+	}
+	var mismatchAccounts int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM trading.accounts
+		 WHERE account_id = 'subject-mismatch-account'`,
+	).Scan(&mismatchAccounts); err != nil {
+		t.Fatalf("count subject mismatch accounts: %v", err)
+	}
+	if mismatchAccounts != 0 {
+		t.Fatalf("subject mismatch configured %d accounts", mismatchAccounts)
+	}
+}
+
+func TestLaterAccountCommandCannotBypassOrderedPublication(t *testing.T) {
+	natsURL := os.Getenv("PLATFORMGO_TEST_NATS_URL")
+	postgresDSN := os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN")
+	if natsURL == "" || postgresDSN == "" {
+		t.Skip("NATS and PostgreSQL integration URLs are required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, postgresDSN)
+	if err != nil {
+		t.Fatalf("open PostgreSQL pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(
+		ctx,
+		`DROP SCHEMA IF EXISTS market, messaging, ledger, trading, engine CASCADE`,
+	); err != nil {
+		t.Fatalf("reset durable schemas: %v", err)
+	}
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	connection, err := gonats.Connect(natsURL)
+	if err != nil {
+		t.Fatalf("connect NATS: %v", err)
+	}
+	t.Cleanup(connection.Close)
+	js, err := jetstream.New(connection)
+	if err != nil {
+		t.Fatalf("create JetStream context: %v", err)
+	}
+	limits := platformnats.StreamLimits{
+		Replicas:        1,
+		MaxMessages:     100,
+		MaxBytes:        8 << 20,
+		MaxMessageBytes: 1 << 20,
+		MaxAge:          time.Hour,
+		DuplicateWindow: time.Minute,
+	}
+	if err := platformnats.EnsureEngineShardStream(ctx, js, 14, limits); err != nil {
+		t.Fatalf("EnsureEngineShardStream: %v", err)
+	}
+
+	logicalTime := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	commandIDs := []engine.ID{
+		engine.IDFromSequence(engine.ID{}, 701),
+		engine.IDFromSequence(engine.ID{}, 702),
+	}
+	actions := []engine.TradingAction{
+		{
+			Kind: engine.TradingActionConfigureAccount,
+			ConfigureAccount: &engine.ConfigureAccount{
+				AccountID: "account-ordered",
+				OmsMode:   engine.OmsModeNetting,
+			},
+		},
+		{
+			Kind: engine.TradingActionConfigureAccount,
+			ConfigureAccount: &engine.ConfigureAccount{
+				AccountID: "account-ordered",
+				OmsMode:   engine.OmsModeHedging,
+			},
+		},
+	}
+	transports := make([][]byte, len(actions))
+	journal := platformpostgres.NewCommandJournal(pool)
+	for index, action := range actions {
+		payload, err := engine.EncodeTradingAction(action)
+		if err != nil {
+			t.Fatalf("EncodeTradingAction %d: %v", index+1, err)
+		}
+		input := engine.InputEnvelope{
+			InputID:              commandIDs[index],
+			SchemaVersion:        engine.CurrentSchemaVersion,
+			ShardID:              14,
+			Kind:                 engine.InputKindCommand,
+			SourceID:             "command-journal",
+			SourceSequence:       uint64(index + 1),
+			MarketSequence:       uint64(index + 1),
+			LogicalTime:          engine.NewLogicalTime(logicalTime.Add(time.Duration(index) * time.Second)),
+			ConfigurationVersion: 1,
+			InstrumentVersion:    1,
+			Payload:              payload,
+		}
+		transports[index], err = platformnats.EncodeEngineInputMessage(input)
+		if err != nil {
+			t.Fatalf("EncodeEngineInputMessage %d: %v", index+1, err)
+		}
+		if _, err := journal.Begin(ctx, platformpostgres.BeginCommandRequest{
+			Scope:            "account:account-ordered",
+			IdempotencyKey:   commandIDs[index].String(),
+			RequestHash:      sha256.Sum256(transports[index]),
+			CommandID:        commandIDs[index],
+			AccountID:        "account-ordered",
+			AccountSequence:  uint64(index + 1),
+			CommandType:      string(action.Kind),
+			SchemaVersion:    engine.CurrentSchemaVersion,
+			CanonicalPayload: payload.Bytes(),
+			OutboxSubject:    "engine.input.14.command.v1",
+			OutboxPayload:    transports[index],
+			LogicalTime:      logicalTime.Add(time.Duration(index) * time.Second),
+			ExpiresAt:        logicalTime.Add(24 * time.Hour),
+		}); err != nil {
+			t.Fatalf("Begin command %d: %v", index+1, err)
+		}
+	}
+
+	publisher := platformnats.NewPublisher(js)
+	messagingStore := platformpostgres.NewMessagingStore(pool)
+	mutating := &mutatingCommandPublisher{
+		delegate: publisher,
+		replacement: platformpostgres.OutboxMessage{
+			MessageID:     commandIDs[1],
+			Subject:       "engine.input.14.command.v1",
+			SchemaVersion: engine.CurrentSchemaVersion,
+			Payload:       transports[1],
+		},
+	}
+	published, err := messagingStore.PublishOutboxBatch(
+		ctx,
+		mutating,
+		time.Now().UTC(),
+		10,
+		time.Minute,
+		time.Second,
+	)
+	if !errors.Is(err, platformnats.ErrUnorderedCommandPublication) ||
+		published != 0 {
+		t.Fatalf(
+			"mutated ordered publish = %d, error %v, want rejected",
+			published,
+			err,
+		)
+	}
+	var publishedRows int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM messaging.outbox
+		 WHERE published_at IS NOT NULL`,
+	).Scan(&publishedRows); err != nil {
+		t.Fatalf("count published outbox rows: %v", err)
+	}
+	if publishedRows != 0 {
+		t.Fatalf("mutated claim published %d outbox rows", publishedRows)
+	}
+	if _, err := publisher.Publish(ctx, platformpostgres.OutboxMessage{
+		MessageID: commandIDs[1],
+		Subject:   "engine.input.14.command.v1",
+		Payload:   transports[1],
+	}); !errors.Is(err, platformnats.ErrUnorderedCommandPublication) {
+		t.Fatalf(
+			"direct sequence 2 publish error = %v, want ErrUnorderedCommandPublication",
+			err,
+		)
+	}
+
+	for sequence := 1; sequence <= 2; sequence++ {
+		published, err := messagingStore.PublishOutboxBatch(
+			ctx,
+			publisher,
+			time.Now().UTC().Add(time.Duration(sequence+2)*time.Second),
+			10,
+			time.Minute,
+			time.Second,
+		)
+		if err != nil || published != 1 {
+			t.Fatalf(
+				"ordered publish %d = %d, error %v",
+				sequence,
+				published,
+				err,
+			)
+		}
+		var streamSequence uint64
+		if err := pool.QueryRow(ctx, `
+			SELECT publish_sequence
+			  FROM messaging.outbox
+			 WHERE message_id = $1`,
+			commandIDs[sequence-1].String(),
+		).Scan(&streamSequence); err != nil {
+			t.Fatalf("read command %d publish sequence: %v", sequence, err)
+		}
+		if streamSequence != uint64(sequence) {
+			t.Fatalf(
+				"command %d stream sequence = %d, want %d",
+				sequence,
+				streamSequence,
+				sequence,
+			)
+		}
+	}
+
+	engineStore := platformpostgres.NewEngineStore(pool)
+	processor, err := platformnats.NewEngineProcessor(ctx, engineStore, 14)
+	if err != nil {
+		t.Fatalf("NewEngineProcessor: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = processor.Close(context.Background())
+	})
+	consumer, err := platformnats.NewEnginePullConsumer(
+		ctx,
+		js,
+		14,
+		"engine-shard-14-ordered-command",
+		time.Second,
+	)
+	if err != nil {
+		t.Fatalf("NewEnginePullConsumer: %v", err)
+	}
+	for sequence := 1; sequence <= 2; sequence++ {
+		processed, err := consumer.ProcessOne(ctx, processor.Handle)
+		if err != nil || !processed {
+			t.Fatalf(
+				"ProcessOne command %d = %t, error %v",
+				sequence,
+				processed,
+				err,
+			)
+		}
+	}
+	var terminalCommands int
+	var receipts int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM trading.commands
+		 WHERE status IN ('accepted', 'rejected')`,
+	).Scan(&terminalCommands); err != nil {
+		t.Fatalf("count terminal commands: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM engine.input_receipts
+		 WHERE shard_id = 14`,
+	).Scan(&receipts); err != nil {
+		t.Fatalf("count receipts: %v", err)
+	}
+	if terminalCommands != 2 ||
+		receipts != 2 ||
+		processor.State().NextStreamSequence() != 3 {
+		t.Fatalf(
+			"ordered result = commands %d receipts %d next %d",
+			terminalCommands,
+			receipts,
+			processor.State().NextStreamSequence(),
+		)
+	}
+}
+
+type mutatingCommandPublisher struct {
+	delegate    *platformnats.Publisher
+	replacement platformpostgres.OutboxMessage
+}
+
+func (publisher *mutatingCommandPublisher) Publish(
+	ctx context.Context,
+	message platformpostgres.OutboxMessage,
+) (uint64, error) {
+	message.MessageID = publisher.replacement.MessageID
+	message.Subject = publisher.replacement.Subject
+	message.SchemaVersion = publisher.replacement.SchemaVersion
+	message.Payload = append([]byte(nil), publisher.replacement.Payload...)
+	return publisher.delegate.Publish(ctx, message)
 }

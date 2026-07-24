@@ -402,6 +402,22 @@ func halt(state State, inputHash Hash, engineError *Error) (State, Decision, err
 	return state, Decision{}, engineError
 }
 
+// FailClosed records a deterministic external-authority conflict in the same
+// canonical halted state chain as envelope and ordering faults.
+func FailClosed(
+	state State,
+	input InputEnvelope,
+	kind ErrorKind,
+	detail string,
+) (State, error) {
+	next, _, err := halt(state, hashInput(input), &Error{
+		Kind:     kind,
+		Sequence: input.StreamSequence,
+		Detail:   detail,
+	})
+	return next, err
+}
+
 func cloneDecision(decision Decision) Decision {
 	decision.InstrumentChanges = append([]InstrumentSnapshot(nil), decision.InstrumentChanges...)
 	decision.AccountChanges = append([]AccountSnapshot(nil), decision.AccountChanges...)

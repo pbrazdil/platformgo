@@ -49,7 +49,7 @@ func TestJetStreamDuplicatePublishAndCommittedRedelivery(t *testing.T) {
 	messageID := engine.IDFromSequence(engine.ID{}, 101)
 	message := platformpostgres.OutboxMessage{
 		MessageID: messageID,
-		Subject:   "engine.input.7.command.v1",
+		Subject:   "engine.input.7.control.v1",
 		Payload:   []byte(`{"kind":"probe"}`),
 	}
 	firstSequence, err := publisher.Publish(ctx, message)
@@ -159,7 +159,7 @@ func TestEngineInputStreamRejectsNewMessagesAtCapacity(t *testing.T) {
 	publisher := platformnats.NewPublisher(js)
 	first := platformpostgres.OutboxMessage{
 		MessageID: engine.IDFromSequence(engine.ID{}, 131),
-		Subject:   "engine.input.13.command.v1",
+		Subject:   "engine.input.13.control.v1",
 		Payload:   []byte(`{"kind":"first"}`),
 	}
 	if _, err := publisher.Publish(ctx, first); err != nil {

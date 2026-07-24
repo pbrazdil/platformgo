@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,25 +26,18 @@ func TestCommandJournalRejectsConflictsAndReplaysCompletedResponse(t *testing.T)
 
 	journal := platformpostgres.NewCommandJournal(pool)
 	commandID := engine.IDFromSequence(engine.ID{}, 1)
-	request := platformpostgres.BeginCommandRequest{
-		Scope:           "account:account-1",
-		IdempotencyKey:  "deposit-1",
-		RequestHash:     sha256.Sum256([]byte("canonical deposit request")),
-		CommandID:       commandID,
-		AccountID:       "account-1",
-		AccountSequence: 1,
-		CommandType:     "deposit",
-		SchemaVersion:   1,
-		CanonicalPayload: []byte(
-			`{"accountId":"account-1","amount":"10","currency":"USDC"}`,
-		),
-		OutboxSubject: "engine.input.7.command.v1",
-		OutboxPayload: []byte(
-			`{"messageId":"019f0000-0000-4000-8000-000000000001"}`,
-		),
-		LogicalTime: time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC),
-		ExpiresAt:   time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC),
-	}
+	logicalTime := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	request := validCommandRequest(
+		t,
+		commandID,
+		"account-1",
+		1,
+		7,
+		logicalTime,
+	)
+	request.Scope = "account:account-1"
+	request.IdempotencyKey = "deposit-1"
+	request.RequestHash = sha256.Sum256([]byte("canonical deposit request"))
 	first, err := journal.Begin(context.Background(), request)
 	if err != nil {
 		t.Fatalf("first Begin: %v", err)
@@ -151,21 +145,17 @@ func TestCommandJournalRejectsOutOfOrderAndPrematureCompletion(t *testing.T) {
 
 	journal := platformpostgres.NewCommandJournal(pool)
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
-	request := platformpostgres.BeginCommandRequest{
-		Scope:            "account:account-1",
-		IdempotencyKey:   "sequence-1",
-		RequestHash:      sha256.Sum256([]byte("sequence-1")),
-		CommandID:        engine.IDFromSequence(engine.ID{}, 101),
-		AccountID:        "account-1",
-		AccountSequence:  2,
-		CommandType:      "deposit",
-		SchemaVersion:    1,
-		CanonicalPayload: []byte(`{"amount":"10"}`),
-		OutboxSubject:    "engine.input.7.command.v1",
-		OutboxPayload:    []byte(`{"messageId":"019f0000-0000-4000-8000-000000000101"}`),
-		LogicalTime:      now,
-		ExpiresAt:        now.Add(24 * time.Hour),
-	}
+	request := validCommandRequest(
+		t,
+		engine.IDFromSequence(engine.ID{}, 101),
+		"account-1",
+		2,
+		7,
+		now,
+	)
+	request.Scope = "account:account-1"
+	request.IdempotencyKey = "sequence-1"
+	request.RequestHash = sha256.Sum256([]byte("sequence-1"))
 	if _, err := journal.Begin(
 		context.Background(),
 		request,
@@ -173,7 +163,17 @@ func TestCommandJournalRejectsOutOfOrderAndPrematureCompletion(t *testing.T) {
 		t.Fatalf("sequence 2 first Begin error = %v, want ErrCommandSequenceGap", err)
 	}
 
-	request.AccountSequence = 1
+	request = validCommandRequest(
+		t,
+		request.CommandID,
+		"account-1",
+		1,
+		7,
+		now,
+	)
+	request.Scope = "account:account-1"
+	request.IdempotencyKey = "sequence-1"
+	request.RequestHash = sha256.Sum256([]byte("sequence-1"))
 	if _, err := journal.Begin(context.Background(), request); err != nil {
 		t.Fatalf("sequence 1 Begin: %v", err)
 	}
@@ -211,5 +211,133 @@ func TestCommandJournalRejectsOutOfOrderAndPrematureCompletion(t *testing.T) {
 			commandStatus,
 			idempotencyState,
 		)
+	}
+}
+
+func TestCommandJournalRejectsRedundantMetadataMismatch(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		mutate func(*platformpostgres.BeginCommandRequest)
+	}{
+		{
+			name: "command type",
+			mutate: func(request *platformpostgres.BeginCommandRequest) {
+				request.CommandType = string(engine.TradingActionSubmitOrder)
+			},
+		},
+		{
+			name: "logical time",
+			mutate: func(request *platformpostgres.BeginCommandRequest) {
+				request.LogicalTime = request.LogicalTime.Add(time.Second)
+			},
+		},
+		{
+			name: "schema version",
+			mutate: func(request *platformpostgres.BeginCommandRequest) {
+				request.SchemaVersion++
+			},
+		},
+		{
+			name: "account lane",
+			mutate: func(request *platformpostgres.BeginCommandRequest) {
+				request.AccountID = "account-2"
+			},
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := validCommandRequest(
+				t,
+				engine.IDFromSequence(engine.ID{}, uint64(151+index)),
+				"account-1",
+				1,
+				7,
+				now,
+			)
+			test.mutate(&request)
+			if _, err := platformpostgres.NewCommandJournal(pool).Begin(
+				context.Background(),
+				request,
+			); !errors.Is(err, platformpostgres.ErrCommandInputConflict) {
+				t.Fatalf("Begin error = %v, want ErrCommandInputConflict", err)
+			}
+		})
+	}
+	assertRowCount(t, pool, "trading.accounts", 0)
+	var commands int
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT count(*) FROM trading.commands",
+	).Scan(&commands); err != nil {
+		t.Fatalf("count commands: %v", err)
+	}
+	if commands != 0 {
+		t.Fatalf("commands = %d, want 0", commands)
+	}
+}
+
+func validCommandRequest(
+	t *testing.T,
+	commandID engine.ID,
+	accountID string,
+	accountSequence uint64,
+	shardID engine.ShardID,
+	logicalTime time.Time,
+) platformpostgres.BeginCommandRequest {
+	t.Helper()
+	action := engine.TradingAction{
+		Kind: engine.TradingActionAdjustBalance,
+		AdjustBalance: &engine.AdjustBalance{
+			AccountID:     accountID,
+			Currency:      "USDC",
+			CurrencyScale: 2,
+			Operation:     engine.BalanceOperationDeposit,
+			Amount:        "10",
+		},
+	}
+	payload, err := engine.EncodeTradingAction(action)
+	if err != nil {
+		t.Fatalf("EncodeTradingAction: %v", err)
+	}
+	input := engine.InputEnvelope{
+		InputID:              commandID,
+		SchemaVersion:        engine.CurrentSchemaVersion,
+		ShardID:              shardID,
+		Kind:                 engine.InputKindCommand,
+		SourceID:             "command-journal",
+		SourceSequence:       accountSequence,
+		LogicalTime:          engine.NewLogicalTime(logicalTime),
+		ConfigurationVersion: 1,
+		InstrumentVersion:    1,
+		Payload:              payload,
+	}
+	outboxPayload, err := engine.EncodeInputMessage(input)
+	if err != nil {
+		t.Fatalf("EncodeInputMessage: %v", err)
+	}
+	return platformpostgres.BeginCommandRequest{
+		Scope:            "account:" + accountID,
+		IdempotencyKey:   commandID.String(),
+		RequestHash:      sha256.Sum256(outboxPayload),
+		CommandID:        commandID,
+		AccountID:        accountID,
+		AccountSequence:  accountSequence,
+		CommandType:      string(action.Kind),
+		SchemaVersion:    input.SchemaVersion,
+		CanonicalPayload: payload.Bytes(),
+		OutboxSubject:    "engine.input." + fmt.Sprint(shardID) + ".command.v1",
+		OutboxPayload:    outboxPayload,
+		LogicalTime:      logicalTime,
+		ExpiresAt:        logicalTime.Add(24 * time.Hour),
 	}
 }

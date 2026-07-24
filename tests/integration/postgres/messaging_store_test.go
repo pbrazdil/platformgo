@@ -104,21 +104,15 @@ func TestOutboxDoesNotPublishLaterAccountCommandBeforeEarlierCommand(t *testing.
 	}
 	for index, commandID := range commandIDs {
 		sequence := uint64(index + 1)
-		request := platformpostgres.BeginCommandRequest{
-			Scope:            "account:account-1",
-			IdempotencyKey:   commandID.String(),
-			RequestHash:      [32]byte{byte(sequence)},
-			CommandID:        commandID,
-			AccountID:        "account-1",
-			AccountSequence:  sequence,
-			CommandType:      "command",
-			SchemaVersion:    1,
-			CanonicalPayload: []byte(`{"kind":"command"}`),
-			OutboxSubject:    "engine.input.7.command.v1",
-			OutboxPayload:    []byte(`{"kind":"command"}`),
-			LogicalTime:      now,
-			ExpiresAt:        now.Add(24 * time.Hour),
-		}
+		request := validCommandRequest(
+			t,
+			commandID,
+			"account-1",
+			sequence,
+			7,
+			now,
+		)
+		request.RequestHash = [32]byte{byte(sequence)}
 		if _, err := journal.Begin(context.Background(), request); err != nil {
 			t.Fatalf("Begin sequence %d: %v", sequence, err)
 		}

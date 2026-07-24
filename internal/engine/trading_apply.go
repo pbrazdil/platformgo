@@ -49,9 +49,68 @@ func ApplyTradingWithReceipts(
 			Detail:   "typed trading action does not match canonical envelope payload",
 		})
 	}
+	if !TradingActionAllowedForInputKind(input.Kind, action.Kind) {
+		if !state.ready {
+			return ApplyWithReceipts(state, input, receipts)
+		}
+		inputHash := hashInput(input)
+		if engineError := validateEnvelope(state, input, CurrentSchemaVersion); engineError != nil {
+			return halt(state, inputHash, engineError)
+		}
+		return halt(state, inputHash, &Error{
+			Kind:     ErrInvalidEnvelope,
+			Sequence: input.StreamSequence,
+			Detail: fmt.Sprintf(
+				"input kind %d cannot carry trading action %q",
+				input.Kind,
+				action.Kind,
+			),
+		})
+	}
 	return applyWithReceipts(state, input, receipts, func(state State) (State, Decision) {
 		return applyTradingAction(state, input, action)
 	})
+}
+
+// TradingActionAllowedForInputKind enforces producer authority at the
+// deterministic action-family boundary.
+func TradingActionAllowedForInputKind(
+	inputKind InputKind,
+	actionKind TradingActionKind,
+) bool {
+	switch inputKind {
+	case InputKindCommand:
+		switch actionKind {
+		case TradingActionConfigureInstrument,
+			TradingActionConfigureAccount,
+			TradingActionConfigureRisk,
+			TradingActionAdjustBalance,
+			TradingActionSubmitOrder,
+			TradingActionPlaceBracket,
+			TradingActionAmendOrder,
+			TradingActionCancelOrder:
+			return true
+		case TradingActionSettleFunding,
+			TradingActionLiquidateAccount,
+			TradingActionUpdateBook:
+			return false
+		default:
+			return false
+		}
+	case InputKindMarket:
+		return actionKind == TradingActionUpdateBook
+	case InputKindTimer:
+		return actionKind == TradingActionSettleFunding ||
+			actionKind == TradingActionLiquidateAccount
+	case InputKindConfiguration:
+		return actionKind == TradingActionConfigureInstrument ||
+			actionKind == TradingActionConfigureAccount ||
+			actionKind == TradingActionConfigureRisk
+	case InputKindControl:
+		return actionKind == TradingActionLiquidateAccount
+	default:
+		return false
+	}
 }
 
 func applyTradingAction(

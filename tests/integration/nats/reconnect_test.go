@@ -60,7 +60,7 @@ func TestJetStreamReconnectPreservesShardStream(t *testing.T) {
 	publisher := platformnats.NewPublisher(js)
 	firstSequence, err := publisher.Publish(ctx, platformpostgres.OutboxMessage{
 		MessageID: engine.IDFromSequence(engine.ID{}, 141),
-		Subject:   "engine.input.12.command.v1",
+		Subject:   "engine.input.12.control.v1",
 		Payload:   []byte(`{"probe":"before-restart"}`),
 	})
 	if err != nil || firstSequence != 1 {
@@ -73,7 +73,7 @@ func TestJetStreamReconnectPreservesShardStream(t *testing.T) {
 
 	secondSequence, err := publisher.Publish(ctx, platformpostgres.OutboxMessage{
 		MessageID: engine.IDFromSequence(engine.ID{}, 142),
-		Subject:   "engine.input.12.command.v1",
+		Subject:   "engine.input.12.control.v1",
 		Payload:   []byte(`{"probe":"after-restart"}`),
 	})
 	if err != nil || secondSequence != 2 {

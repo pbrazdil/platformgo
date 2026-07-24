@@ -2,6 +2,7 @@ package nats
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	gonats "github.com/nats-io/nats.go"
@@ -38,6 +39,28 @@ func TestPublisherUsesStableOutboxMessageIDAndWaitsForAck(t *testing.T) {
 			api.subject,
 			api.messageID,
 		)
+	}
+}
+
+func TestPublisherRejectsUnclaimedEngineCommand(t *testing.T) {
+	api := &publishProbe{ack: &jetstream.PubAck{
+		Stream:   EngineInputsStream + "_7",
+		Sequence: 1,
+	}}
+	publisher := &Publisher{js: api}
+	_, err := publisher.Publish(
+		context.Background(),
+		platformpostgres.OutboxMessage{
+			MessageID: engine.IDFromSequence(engine.ID{}, 92),
+			Subject:   "engine.input.7.command.v1",
+			Payload:   []byte(`{"kind":"command"}`),
+		},
+	)
+	if !errors.Is(err, ErrUnorderedCommandPublication) {
+		t.Fatalf("Publish error = %v, want ErrUnorderedCommandPublication", err)
+	}
+	if api.subject != "" {
+		t.Fatalf("unordered command reached transport subject %q", api.subject)
 	}
 }
 

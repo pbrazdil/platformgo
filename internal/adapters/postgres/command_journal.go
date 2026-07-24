@@ -247,9 +247,50 @@ func validateBeginCommand(request BeginCommandRequest) error {
 		return errors.New("begin command: outbox payload is not JSON")
 	case request.ExpiresAt.IsZero():
 		return errors.New("begin command: expiration is required")
-	default:
-		return nil
 	}
+	input, action, err := engine.DecodeInputMessage(request.OutboxPayload)
+	if err != nil {
+		return fmt.Errorf("begin command: decode outbox envelope: %w", err)
+	}
+	expectedSubject := fmt.Sprintf(
+		"engine.input.%d.command.v%d",
+		input.ShardID,
+		input.SchemaVersion,
+	)
+	canonicalCommand, err := canonicalJSON(request.CanonicalPayload)
+	if err != nil {
+		return fmt.Errorf("begin command: canonicalize command payload: %w", err)
+	}
+	canonicalInput, err := canonicalJSON(input.Payload.Bytes())
+	if err != nil {
+		return fmt.Errorf("begin command: canonicalize outbox payload: %w", err)
+	}
+	if input.InputID != request.CommandID ||
+		input.Kind != engine.InputKindCommand ||
+		!engine.TradingActionAllowedForInputKind(input.Kind, action.Kind) ||
+		input.SchemaVersion != request.SchemaVersion ||
+		input.SourceSequence != request.AccountSequence ||
+		input.LogicalTime.UnixNano() != request.LogicalTime.UnixNano() ||
+		request.OutboxSubject != expectedSubject ||
+		string(action.Kind) != request.CommandType ||
+		!bytes.Equal(canonicalCommand, canonicalInput) {
+		return fmt.Errorf(
+			"%w: begin command %s redundant metadata differs from outbox",
+			ErrCommandInputConflict,
+			request.CommandID,
+		)
+	}
+	if actionAccountID, scoped := engine.TradingActionAccountID(action); scoped &&
+		actionAccountID != request.AccountID {
+		return fmt.Errorf(
+			"%w: begin command %s account lane %q differs from payload account %q",
+			ErrCommandInputConflict,
+			request.CommandID,
+			request.AccountID,
+			actionAccountID,
+		)
+	}
+	return nil
 }
 
 func loadIdempotencyForUpdate(

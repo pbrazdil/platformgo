@@ -224,6 +224,50 @@ type TradingAction struct {
 	CancelOrder         *CancelOrder         `json:"cancelOrder,omitempty"`
 }
 
+// TradingActionAccountID returns the single account lane owned by an
+// account-scoped action. System-wide actions return false.
+func TradingActionAccountID(action TradingAction) (string, bool) {
+	switch action.Kind {
+	case TradingActionConfigureAccount:
+		if action.ConfigureAccount != nil {
+			return action.ConfigureAccount.AccountID, true
+		}
+	case TradingActionConfigureRisk:
+		if action.ConfigureRisk != nil {
+			return action.ConfigureRisk.AccountID, true
+		}
+	case TradingActionAdjustBalance:
+		if action.AdjustBalance != nil {
+			return action.AdjustBalance.AccountID, true
+		}
+	case TradingActionLiquidateAccount:
+		if action.LiquidateAccount != nil {
+			return action.LiquidateAccount.AccountID, true
+		}
+	case TradingActionSubmitOrder:
+		if action.SubmitOrder != nil {
+			return action.SubmitOrder.AccountID, true
+		}
+	case TradingActionPlaceBracket:
+		if action.PlaceBracket != nil {
+			return action.PlaceBracket.AccountID, true
+		}
+	case TradingActionAmendOrder:
+		if action.AmendOrder != nil {
+			return action.AmendOrder.AccountID, true
+		}
+	case TradingActionCancelOrder:
+		if action.CancelOrder != nil {
+			return action.CancelOrder.AccountID, true
+		}
+	case TradingActionConfigureInstrument,
+		TradingActionSettleFunding,
+		TradingActionUpdateBook:
+		return "", false
+	}
+	return "", false
+}
+
 // ConfigureInstrument installs one immutable instrument revision.
 type ConfigureInstrument struct {
 	InstrumentID            string `json:"instrumentId"`

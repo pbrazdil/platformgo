@@ -1,13 +1,11 @@
 package nats
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"time"
+	"strconv"
+	"strings"
 
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	"github.com/upcomers-org/platformgo/internal/engine"
@@ -15,152 +13,80 @@ import (
 
 // EngineInputMessage is the durable transport representation published before
 // JetStream assigns the shard consumer sequence.
-type EngineInputMessage struct {
-	MessageID              string `json:"messageId"`
-	SchemaVersion          uint32 `json:"schemaVersion"`
-	ShardID                uint32 `json:"shardId"`
-	Kind                   string `json:"kind"`
-	SourceID               string `json:"sourceId"`
-	SourceSequence         uint64 `json:"sourceSequence"`
-	MarketSequence         uint64 `json:"marketSequence"`
-	LogicalTime            string `json:"logicalTime"`
-	ConfigurationVersion   uint64 `json:"configurationVersion"`
-	InstrumentVersion      uint64 `json:"instrumentVersion"`
-	CanonicalActionPayload []byte `json:"canonicalActionPayload"`
-}
+type EngineInputMessage = engine.InputMessage
 
 // EncodeEngineInputMessage produces the transport envelope stored in the
 // command or producer outbox. StreamSequence is intentionally not encoded.
 func EncodeEngineInputMessage(input engine.InputEnvelope) ([]byte, error) {
-	kind, err := encodeInputKind(input.Kind)
-	if err != nil {
-		return nil, err
-	}
-	if input.InputID.IsZero() {
-		return nil, errors.New("encode engine input: input ID is required")
-	}
-	message := EngineInputMessage{
-		MessageID:              input.InputID.String(),
-		SchemaVersion:          input.SchemaVersion,
-		ShardID:                uint32(input.ShardID),
-		Kind:                   kind,
-		SourceID:               input.SourceID,
-		SourceSequence:         input.SourceSequence,
-		MarketSequence:         input.MarketSequence,
-		LogicalTime:            input.LogicalTime.String(),
-		ConfigurationVersion:   input.ConfigurationVersion,
-		InstrumentVersion:      input.InstrumentVersion,
-		CanonicalActionPayload: input.Payload.Bytes(),
-	}
-	encoded, err := json.Marshal(message)
-	if err != nil {
-		return nil, fmt.Errorf("encode engine input message: %w", err)
-	}
-	return encoded, nil
+	return engine.EncodeInputMessage(input)
 }
 
 func decodeEngineInputMessage(
 	inbound InboundMessage,
 ) (engine.InputEnvelope, engine.TradingAction, error) {
-	decoder := json.NewDecoder(bytes.NewReader(inbound.Data))
-	decoder.DisallowUnknownFields()
-	var message EngineInputMessage
-	if err := decoder.Decode(&message); err != nil {
-		return engine.InputEnvelope{}, engine.TradingAction{}, fmt.Errorf(
-			"decode engine input message: %w",
-			err,
-		)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return engine.InputEnvelope{}, engine.TradingAction{}, errors.New(
-				"decode engine input message: multiple JSON values",
-			)
-		}
-		return engine.InputEnvelope{}, engine.TradingAction{}, fmt.Errorf(
-			"decode engine input message trailing data: %w",
-			err,
-		)
-	}
-	messageID, err := engine.ParseID(message.MessageID)
+	input, action, err := engine.DecodeInputMessage(inbound.Data)
 	if err != nil {
-		return engine.InputEnvelope{}, engine.TradingAction{}, fmt.Errorf(
-			"decode engine input message ID: %w",
-			err,
-		)
+		return engine.InputEnvelope{}, engine.TradingAction{}, err
 	}
-	if messageID != inbound.MessageID {
+	input.StreamSequence = inbound.StreamSequence
+	if input.InputID != inbound.MessageID {
 		return engine.InputEnvelope{}, engine.TradingAction{}, errors.New(
 			"decode engine input message: header and envelope IDs differ",
 		)
 	}
-	kind, err := decodeInputKind(message.Kind)
-	if err != nil {
-		return engine.InputEnvelope{}, engine.TradingAction{}, err
-	}
-	logicalTime, err := time.Parse(time.RFC3339Nano, message.LogicalTime)
-	if err != nil {
-		return engine.InputEnvelope{}, engine.TradingAction{}, fmt.Errorf(
-			"decode engine input logical time: %w",
-			err,
-		)
-	}
-	action, payload, err := engine.DecodeTradingActionPayload(
-		message.CanonicalActionPayload,
-	)
-	if err != nil {
-		return engine.InputEnvelope{}, engine.TradingAction{}, err
-	}
-	input := engine.InputEnvelope{
-		InputID:              messageID,
-		SchemaVersion:        message.SchemaVersion,
-		ShardID:              engine.ShardID(message.ShardID),
-		Kind:                 kind,
-		SourceID:             message.SourceID,
-		SourceSequence:       message.SourceSequence,
-		StreamSequence:       inbound.StreamSequence,
-		MarketSequence:       message.MarketSequence,
-		LogicalTime:          engine.NewLogicalTime(logicalTime),
-		ConfigurationVersion: message.ConfigurationVersion,
-		InstrumentVersion:    message.InstrumentVersion,
-		Payload:              payload,
+	if err := validateEngineInputSubject(inbound.Subject, input); err != nil {
+		return input, action, err
 	}
 	return input, action, nil
 }
 
-func encodeInputKind(kind engine.InputKind) (string, error) {
-	switch kind {
+func validateEngineInputSubject(
+	subject string,
+	input engine.InputEnvelope,
+) error {
+	parts := strings.Split(subject, ".")
+	if len(parts) < 5 ||
+		parts[0] != "engine" ||
+		parts[1] != "input" ||
+		parts[2] != strconv.FormatUint(uint64(input.ShardID), 10) {
+		return fmt.Errorf(
+			"decode engine input message: subject %q does not match shard %d",
+			subject,
+			input.ShardID,
+		)
+	}
+	version := "v" + strconv.FormatUint(uint64(input.SchemaVersion), 10)
+	switch input.Kind {
 	case engine.InputKindCommand:
-		return "command", nil
+		if len(parts) == 5 && parts[3] == "command" && parts[4] == version {
+			return nil
+		}
 	case engine.InputKindMarket:
-		return "market", nil
+		if len(parts) == 6 &&
+			parts[3] == "market" &&
+			parts[4] == input.SourceID &&
+			parts[5] == version {
+			return nil
+		}
 	case engine.InputKindTimer:
-		return "timer", nil
+		if len(parts) == 5 && parts[3] == "timer" && parts[4] == version {
+			return nil
+		}
 	case engine.InputKindConfiguration:
-		return "configuration", nil
+		if len(parts) == 5 && parts[3] == "config" && parts[4] == version {
+			return nil
+		}
 	case engine.InputKindControl:
-		return "control", nil
-	default:
-		return "", fmt.Errorf("encode engine input: unknown kind %d", kind)
+		if len(parts) == 5 && parts[3] == "control" && parts[4] == version {
+			return nil
+		}
 	}
-}
-
-func decodeInputKind(kind string) (engine.InputKind, error) {
-	switch kind {
-	case "command":
-		return engine.InputKindCommand, nil
-	case "market":
-		return engine.InputKindMarket, nil
-	case "timer":
-		return engine.InputKindTimer, nil
-	case "configuration":
-		return engine.InputKindConfiguration, nil
-	case "control":
-		return engine.InputKindControl, nil
-	default:
-		return 0, fmt.Errorf("decode engine input: unknown kind %q", kind)
-	}
+	kind, _ := engine.EncodeInputKind(input.Kind)
+	return fmt.Errorf(
+		"decode engine input message: subject %q does not match %s input",
+		subject,
+		kind,
+	)
 }
 
 // EngineProcessor is the single-owner bridge from one shard pull consumer into
@@ -221,6 +147,21 @@ func (processor *EngineProcessor) Handle(
 	}
 	input, action, err := decodeEngineInputMessage(inbound)
 	if err != nil {
+		if !input.InputID.IsZero() &&
+			input.ShardID == processor.state.ShardID() {
+			halted, haltErr := processor.store.HaltTradingInput(
+				ctx,
+				processor.state,
+				input,
+				action,
+				err,
+			)
+			if haltErr == nil {
+				processor.state = halted
+			}
+			processor.transportReady = false
+			return errors.Join(err, haltErr)
+		}
 		processor.transportReady = false
 		return err
 	}

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	gonats "github.com/nats-io/nats.go"
@@ -155,6 +156,12 @@ type Publisher struct {
 	js publishAPI
 }
 
+// ErrUnorderedCommandPublication rejects engine commands that bypassed the
+// PostgreSQL account-ordered outbox claim.
+var ErrUnorderedCommandPublication = errors.New(
+	"engine command publication lacks ordered outbox claim",
+)
+
 // NewPublisher constructs a PostgreSQL outbox-compatible JetStream publisher.
 func NewPublisher(js jetstream.JetStream) *Publisher {
 	return &Publisher{js: js}
@@ -167,6 +174,14 @@ func (publisher *Publisher) Publish(
 ) (uint64, error) {
 	if publisher == nil || publisher.js == nil {
 		return 0, errors.New("publish JetStream message: publisher is not configured")
+	}
+	if isEngineCommandSubject(message.Subject) &&
+		!message.HasOrderedCommandClaim() {
+		return 0, fmt.Errorf(
+			"%w: %s",
+			ErrUnorderedCommandPublication,
+			message.MessageID,
+		)
 	}
 	natsMessage := gonats.NewMsg(message.Subject)
 	natsMessage.Data = append([]byte(nil), message.Payload...)
@@ -189,6 +204,15 @@ func (publisher *Publisher) Publish(
 		)
 	}
 	return ack.Sequence, nil
+}
+
+func isEngineCommandSubject(subject string) bool {
+	parts := strings.Split(subject, ".")
+	return len(parts) == 5 &&
+		parts[0] == "engine" &&
+		parts[1] == "input" &&
+		parts[3] == "command" &&
+		strings.HasPrefix(parts[4], "v")
 }
 
 // InboundMessage is the bounded transport metadata supplied to a committed
