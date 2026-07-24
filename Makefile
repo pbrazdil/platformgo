@@ -32,10 +32,10 @@ lint:
 	  $(GOLANGCI_LINT) run $$packages
 
 test:
-	go test ./... -count=1
+	go test ./...
 
 test-race:
-	go test -race ./... -count=1
+	go test -race ./...
 
 test-repeat:
 	@if [ -d internal ] || [ -d testkit ]; then \
