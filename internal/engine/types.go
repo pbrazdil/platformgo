@@ -164,4 +164,10 @@ type Decision struct {
 	InputHash            Hash
 	DecisionHash         Hash
 	NextStateHash        Hash
+	CommandResult        CommandResult
+	InstrumentChanges    []InstrumentSnapshot
+	BookChanges          []BookSnapshot
+	OrderChanges         []OrderSnapshot
+	Fills                []FillSnapshot
+	Events               []DomainEvent
 }

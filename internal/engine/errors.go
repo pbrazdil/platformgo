@@ -10,6 +10,7 @@ const (
 	ErrUnknownSchema      ErrorKind = "unknown_schema"
 	ErrUnknownInputKind   ErrorKind = "unknown_input_kind"
 	ErrShardMismatch      ErrorKind = "shard_mismatch"
+	ErrPayloadMismatch    ErrorKind = "payload_mismatch"
 	ErrSequenceGap        ErrorKind = "sequence_gap"
 	ErrSequenceRegression ErrorKind = "sequence_regression"
 	ErrSequenceExhausted  ErrorKind = "sequence_exhausted"
