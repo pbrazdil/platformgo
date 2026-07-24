@@ -6,7 +6,7 @@ Clean-room Go replacement for `upcomers-org/platform`, using pinned source tests
 
 Last updated: 2026-07-24
 
-Current delivery stage: **Phase 2 — durable execution complete**.
+Current delivery stage: **Phase 2 — durable execution release hardening**.
 
 The pinned source inventory is complete: all 2,748 tests are recorded in
 `ports/test-port-map.csv`. Forty-one source tests are independently reviewed
@@ -50,13 +50,17 @@ is enforced, and the shared deterministic testkit now provides shard-scoped
 IDs, manual time, receipt-aware engine execution, semantic failpoints, and
 canonical hash extraction.
 
-Forward-only checksum-verified PostgreSQL migrations now create exact durable
+Forward-only checksum-verified PostgreSQL migrations create exact durable
 engine, trading, ledger, market, messaging, command, idempotency, outbox, inbox,
 and runtime-role boundaries. One engine transaction commits normalized state,
 balanced core-authored ledger effects, command result, immutable receipt,
 checkpoint, and versioned domain-event outbox. Recovery replays canonical
 inputs and terminal faults, verifies every hash, and reconciliation detects
 projection corruption without repair.
+
+Phase 2 is not yet complete. Release review identified migration-history and
+populated-upgrade blockers that require an owner-approved forward repair,
+and durable account-to-shard ownership is still missing.
 
 JetStream uses bounded file-backed streams with `DiscardNew`, one physical
 input stream and lifetime PostgreSQL ownership lock per shard, stable
@@ -78,7 +82,7 @@ integration proof; deployment packaging and later phase contracts remain.
 |---|---|---|
 | 0 — Policy and test harness | Complete | Machine-readable package scope, AST policy checks, split port/review/wiring evidence, exact function provenance, canonical source authorities, pinned Go 1.26.5, CODEOWNERS, immutable CI actions, complete-port and tidy gates, and the initial agent-evaluation corpus exist. `main` is protected and all seven required checks are enforced. The numeric foundation provides the sole `apd/v3`-backed production decimal, strict canonical parsing, explicit one-boundary rounding, immutable unit-bearing values, parser/arithmetic fuzzing, and five reviewed green source rows. The deterministic kernel adds explicit logical time and IDs, strict input sequencing, idempotent duplicate receipts, fail-closed typed errors, canonical decision/state hashes, replay properties, and the minimal synchronous engine fixture. |
 | 1 — Pure engine | Complete | Thirty-six pinned source rows are reviewed and green against the production `model-real` engine boundary. Coverage includes deterministic order lifecycle, depth/VWAP and slippage, netting and hedging positions, exact PnL, margin and reservation, idempotent funding, cross/isolated liquidation, stop/touch triggers, brackets and ladders, protection cleanup, and exact maker/taker fees. Policy-native invariant, fuzz, duplicate, replay, repeated, and race-enabled tests reinforce the source-test evidence. |
-| 2 — Durable execution | Complete | Eight immutable forward migrations, checksum/drift enforcement, exact normalized projections, API/engine/worker grants, command/idempotency journal, atomic engine/ledger/checkpoint/outbox transactions, transactional inbox dedupe, per-shard JetStream ordering and ownership, unknown-outcome retry, beyond-window duplicate delivery receipts, poison/capacity fail-closed behavior, replayed restart/fault recovery, and reconciliation are implemented. Live PostgreSQL and JetStream tests cover clean and prior-foundation migration, rollback before commit, commit/retry, order/fill/position/event persistence, command-to-engine flow, reconnect, stream capacity, singleton ownership, redelivery, and projection-corruption detection. |
+| 2 — Durable execution | In progress | Durable execution, command-envelope binding, account command sequencing, durable fail-closed recovery, reconciliation, live PostgreSQL/JetStream proof, and hosted PostgreSQL 17/NATS CI execution are implemented. Remaining release blockers are an owner-approved immutable migration repair with populated-upgrade fixtures, durable account-to-shard ownership, and final independent review. |
 | 3 — Compatibility edges | Not started | Production REST, gRPC, authentication, realtime/Centrifugo, health, CLI, and deployment-compatible services are not implemented. |
 | 4 — Hyperliquid production integration | Not started | No production adapter, reconnect/resynchronization path, controlled live canary, soak test, or incident drill exists. |
 | 5 — Replacement rehearsal | Not started | Data import, cutover, rollback, reconciliation, and audited go-live rehearsal remain. |
@@ -122,9 +126,9 @@ Verified on 2026-07-24:
 
 ## Next milestone
 
-Begin Phase 3 with the smallest compatibility edge: production health/readiness
-and command submission over HTTP, preserving the frozen authentication,
-idempotency-response, and JSON contracts while using the completed command
-journal and durable execution pipeline.
+Complete Phase 2 release hardening: resolve the migration-history decision,
+prove populated PostgreSQL 17 upgrades, add durable account-to-shard ownership,
+and obtain final independent release approval. Phase 3 then begins with
+production health/readiness and idempotent command submission over HTTP.
 
 The authoritative scope, phase definitions, and completion criteria are in `PROJECT_CHARTER.md`. Repository-wide execution rules are in `AGENTS.md`.
