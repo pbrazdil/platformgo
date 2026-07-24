@@ -38,3 +38,18 @@ func ParseDexType(name string) (DexType, bool) {
 }
 
 func (d DexType) String() string { return string(d) }
+
+type Dex struct {
+	Chain   Chain
+	Name    DexType
+	Factory string
+}
+
+func NewDex(chain Chain, name DexType, factory string) (Dex, error) {
+	if err := ValidateAddress(factory); err != nil {
+		return Dex{}, err
+	}
+	return Dex{Chain: chain, Name: name, Factory: factory}, nil
+}
+
+func (d Dex) ID() string { return string(d.Chain.Name) + ":" + d.Name.String() }
