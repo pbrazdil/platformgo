@@ -126,6 +126,38 @@ func MustFromRaw(raw *big.Int, denomination currency.Currency) Money {
 	return value
 }
 
+// FromWei constructs non-negative money from an unsigned 128-bit wei amount.
+// The denomination must use the native 18-decimal wei scale.
+func FromWei(raw *big.Int, denomination currency.Currency) (Money, error) {
+	if denomination.Precision != 18 {
+		return Money{}, PredicateViolationError{Message: fmt.Sprintf(
+			"`from_wei` requires a currency with precision 18, was %d for %s",
+			denomination.Precision,
+			denomination.Code,
+		)}
+	}
+	if raw == nil {
+		raw = new(big.Int)
+	}
+	if raw.Sign() < 0 || raw.BitLen() > 128 {
+		return Money{}, PredicateViolationError{Message: "raw wei value exceeds 128-bit range"}
+	}
+	maxSigned128 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 127), big.NewInt(1))
+	if raw.Cmp(maxSigned128) > 0 {
+		return Money{}, PredicateViolationError{Message: "raw wei value exceeds signed 128-bit range"}
+	}
+	return Money{raw: new(big.Int).Set(raw), currency: denomination}, nil
+}
+
+// MustFromWei is FromWei for source-derived values and fixtures.
+func MustFromWei(raw *big.Int, denomination currency.Currency) Money {
+	value, err := FromWei(raw, denomination)
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
 // FromMantissaExponent constructs mantissa*10^exponent exactly.
 func FromMantissaExponent(mantissa int64, exponent int, denomination currency.Currency) Money {
 	if mantissa == 0 {
@@ -189,6 +221,21 @@ func (m Money) Currency() currency.Currency {
 	return m.currency
 }
 
+// Wei returns the unsigned raw wei amount. It panics for non-wei currencies or
+// negative money because neither has a valid unsigned wei representation.
+func (m Money) Wei() *big.Int {
+	if m.currency.Precision != 18 {
+		panic(fmt.Sprintf(
+			"Failed to convert money with precision %d to wei (requires precision 18)",
+			m.currency.Precision,
+		))
+	}
+	if m.Raw().Sign() < 0 {
+		panic("Failed to convert negative money to wei")
+	}
+	return m.Raw()
+}
+
 // Decimal returns the amount at the currency's display precision.
 func (m Money) Decimal() decimal.Decimal {
 	scale := m.currency.Precision
@@ -238,6 +285,9 @@ func (m Money) Sub(other Money) Money {
 // CheckedAdd returns false when the result is outside Money bounds.
 func (m Money) CheckedAdd(other Money) (Money, bool) {
 	requireSameCurrency(m, other, "add")
+	if m.currency.Precision != other.currency.Precision {
+		return Money{}, false
+	}
 	raw := new(big.Int).Add(m.Raw(), other.Raw())
 	if raw.Cmp(MaxRaw()) > 0 || raw.Cmp(MinRaw()) < 0 {
 		return Money{}, false
@@ -248,6 +298,9 @@ func (m Money) CheckedAdd(other Money) (Money, bool) {
 // CheckedSub returns false when the result is outside Money bounds.
 func (m Money) CheckedSub(other Money) (Money, bool) {
 	requireSameCurrency(m, other, "subtract")
+	if m.currency.Precision != other.currency.Precision {
+		return Money{}, false
+	}
 	raw := new(big.Int).Sub(m.Raw(), other.Raw())
 	if raw.Cmp(MaxRaw()) > 0 || raw.Cmp(MinRaw()) < 0 {
 		return Money{}, false
