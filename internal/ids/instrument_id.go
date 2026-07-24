@@ -154,6 +154,11 @@ func validateBlockchainAddress(address string) error {
 	return nil
 }
 
+// ValidateBlockchainAddress validates an EIP-55 checksummed Ethereum address.
+func ValidateBlockchainAddress(address string) error {
+	return validateBlockchainAddress(address)
+}
+
 func validEthereumChecksum(address string) bool {
 	lower := strings.ToLower(address)
 	hash := legacyKeccak256([]byte(lower))
