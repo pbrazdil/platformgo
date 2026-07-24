@@ -1,6 +1,10 @@
 package engine
 
-import "github.com/upcomers-org/platformgo/internal/domain"
+import (
+	"fmt"
+
+	"github.com/upcomers-org/platformgo/internal/domain"
+)
 
 func executeOrder(
 	state *tradingState,
@@ -10,6 +14,15 @@ func executeOrder(
 ) RejectionReason {
 	candidate := state.clone()
 	order := &candidate.orders[orderIndex]
+	beforeExecution := *order
+	if order.reduceOnly {
+		if reason := clampReduceOnlyOrder(candidate, order); reason != "" {
+			order.status = OrderStatusCancelled
+			order.version++
+			*state = candidate
+			return ""
+		}
+	}
 	book, ok := candidate.book(order.instrument.ID())
 	if !ok {
 		if order.orderType == OrderTypeMarket {
@@ -45,12 +58,28 @@ func executeOrder(
 	}
 	newFills := candidate.fills[startFillCount:]
 	if len(newFills) > 0 {
+		if err := applyTradingFees(
+			&candidate,
+			*order,
+			startFillCount,
+		); err != nil {
+			return RejectionInvalidOrder
+		}
 		average, err := averageOrderFillPrice(candidate.fills, order.orderID)
 		if err != nil {
 			return RejectionInvalidOrder
 		}
 		order.averagePrice = average
 		order.hasAverage = true
+		if err := applyFillsToPositions(
+			&candidate,
+			*order,
+			startFillCount,
+			input,
+			decision,
+		); err != nil {
+			return RejectionInvalidOrder
+		}
 	}
 
 	switch {
@@ -63,12 +92,76 @@ func executeOrder(
 	default:
 		order.status = OrderStatusWorking
 	}
-	order.version++
+	if orderExecutionChanged(beforeExecution, *order, len(newFills) > 0) {
+		order.version++
+	}
+	reconcileBracketAfterExecution(
+		&candidate,
+		orderIndex,
+		input,
+		decision,
+	)
+	reconcilePositionProtection(
+		&candidate,
+		input,
+		decision,
+	)
 	*state = candidate
 	for _, fill := range newFills {
 		decision.Fills = append(decision.Fills, fill.snapshot())
 	}
 	return ""
+}
+
+func applyTradingFees(
+	state *tradingState,
+	order orderRecord,
+	firstFillIndex int,
+) error {
+	instrument, ok := state.instrumentRecord(order.instrument.ID())
+	if !ok {
+		return fmt.Errorf("missing fee schedule")
+	}
+	liquiditySide := executionLiquiditySide(order)
+	rate := instrument.takerFeeRate
+	if liquiditySide == LiquiditySideMaker {
+		rate = instrument.makerFeeRate
+	}
+	for index := firstFillIndex; index < len(state.fills); index++ {
+		fill := &state.fills[index]
+		fee, err := domain.TradingFee(
+			fill.price,
+			fill.quantity,
+			rate,
+			instrument.settlementCurrency,
+		)
+		if err != nil {
+			return err
+		}
+		fill.liquiditySide = liquiditySide
+		fill.fee = fee
+		fill.hasFee = true
+	}
+	return nil
+}
+
+func executionLiquiditySide(order orderRecord) LiquiditySide {
+	if order.orderType == OrderTypeLimit && order.hasRested {
+		return LiquiditySideMaker
+	}
+	return LiquiditySideTaker
+}
+
+func orderExecutionChanged(
+	before orderRecord,
+	after orderRecord,
+	hasNewFills bool,
+) bool {
+	return hasNewFills ||
+		before.status != after.status ||
+		!before.quantity.Decimal().Equal(after.quantity.Decimal()) ||
+		!before.filledQuantity.Decimal().Equal(after.filledQuantity.Decimal()) ||
+		before.hasAverage != after.hasAverage
 }
 
 func bookFillability(book bookRecord, order orderRecord) RejectionReason {
@@ -107,7 +200,7 @@ func executableLevels(book bookRecord, side Side) []levelRecord {
 }
 
 func levelEligible(level levelRecord, order orderRecord) bool {
-	if order.orderType != OrderTypeMarket && order.orderType != OrderTypeStopMarket {
+	if !marketUsesDeepestFallback(order) {
 		if order.side == SideBuy &&
 			level.price.Decimal().Cmp(order.price.Decimal()) > 0 {
 			return false
@@ -135,7 +228,8 @@ func priceViolatesSlippage(price domain.Price, order orderRecord) bool {
 
 func marketUsesDeepestFallback(order orderRecord) bool {
 	return order.orderType == OrderTypeMarket ||
-		order.orderType == OrderTypeStopMarket
+		order.orderType == OrderTypeStopMarket ||
+		order.orderType == OrderTypeTakeProfitMarket
 }
 
 func matchOrder(

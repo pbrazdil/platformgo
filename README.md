@@ -6,7 +6,7 @@ Clean-room Go replacement for `upcomers-org/platform`, using pinned source tests
 
 Last updated: 2026-07-24
 
-Current delivery stage: **Phase 1 — matching and fills implementation in progress**.
+Current delivery stage: **Phase 1 — pure-engine implementation complete locally; publication and evidence promotion pending**.
 
 The pinned source inventory is complete: all 2,748 tests are recorded in
 `ports/test-port-map.csv`. Five numeric tests are independently reviewed and
@@ -35,6 +35,28 @@ admission-bound mark-price slippage limits, typed slippage rejection, and
 partial IOC execution at the slippage boundary. Its five source rows remain
 unreviewed until the separate evidence promotion is accepted.
 
+The stacked positions/OMS candidate adds exact settlement-currency realized
+PnL, netting fill taxonomy, account-isolated positions, hedging legs, targeted
+leg closure, execution-time reduce-only clamping, and immutable position
+decisions. Its source rows also remain unreviewed until matching lands and the
+positions evidence is independently promoted.
+
+The stacked risk candidate adds exact used/free margin and equity, reservation
+for working orders, typed funding and margin denials, realized-PnL settlement,
+business-key-idempotent funding, cross and isolated liquidation,
+worst-notional-first stop-out order, and fail-closed stale-mark handling. Its
+ten source rows remain unreviewed until the prerequisite slices land.
+
+The final stacked Phase 1 candidate adds durable stop and favorable-touch
+trigger latching, atomic bracket creation, held OTO activation, reduce-only
+OCO cleanup, ladder resizing, hedging-position isolation, and cleanup after
+external closes or reversals. It also closes the fill-fee invariant with
+explicit maker/taker schedules, signed maker rebates, one-boundary half-even
+rounding, fee-aware margin reservation, exact fill attribution, atomic balance
+settlement, and duplicate-delivery protection. Its ten source rows remain
+unreviewed until the implementation stack lands and its evidence is promoted
+separately.
+
 This repository is not yet a production-capable replacement. It has no executable `cmd` services, production PostgreSQL schema or adapter, NATS/JetStream adapter, Centrifugo adapter, or production Hyperliquid adapter. Current integration tests use deterministic in-memory fixtures and do not prove those runtime boundaries.
 
 ## Delivery progress
@@ -42,7 +64,7 @@ This repository is not yet a production-capable replacement. It has no executabl
 | Phase | Status | Evidence and remaining work |
 |---|---|---|
 | 0 — Policy and test harness | Complete | Machine-readable package scope, AST policy checks, split port/review/wiring evidence, exact function provenance, canonical source authorities, pinned Go 1.26.5, CODEOWNERS, immutable CI actions, complete-port and tidy gates, and the initial agent-evaluation corpus exist. `main` is protected and all seven required checks are enforced. The numeric foundation provides the sole `apd/v3`-backed production decimal, strict canonical parsing, explicit one-boundary rounding, immutable unit-bearing values, parser/arithmetic fuzzing, and five reviewed green source rows. The deterministic kernel adds explicit logical time and IDs, strict input sequencing, idempotent duplicate receipts, fail-closed typed errors, canonical decision/state hashes, replay properties, and the minimal synchronous engine fixture. |
-| 1 — Pure engine | Order lifecycle green; matching/fills candidate in progress | The production engine has reviewed `model-real` evidence for market/limit/stop admission, GTC/IOC/FOK behavior, exact cumulative fills, amend, cancel, typed business rejection, immutable decisions, and deterministic replay. Six pinned source rows are green at that boundary, reinforced by policy-native invariant/fuzz coverage. The matching candidate covers depth/VWAP, bid/ask pricing, slippage bands, and partial IOC behavior locally; its evidence is not yet promoted. Positions and OMS modes, margin/funding/liquidation, and brackets/triggers remain. |
+| 1 — Pure engine | Implementation complete locally; publication and evidence pending | The production engine has reviewed `model-real` evidence for market/limit/stop admission, GTC/IOC/FOK behavior, exact cumulative fills, amend, cancel, typed business rejection, immutable decisions, and deterministic replay. Six pinned source rows are green at that boundary, reinforced by policy-native invariant/fuzz coverage. Stacked local candidates now cover deterministic depth/VWAP and slippage, netting and hedging positions, exact PnL, margin, funding, cross/isolated liquidation, durable stop/touch triggers, brackets and ladders, protection cleanup, and exact maker/taker fees. All required local validation passes. Phase 1 is not complete on `main` until the implementation stack lands and each source cohort is independently promoted from placeholder evidence. |
 | 2 — Durable execution | Not started | PostgreSQL migrations and persistence, idempotency journal, transactional ledger/state, NATS/JetStream transport, outbox/inbox, and durable recovery are not implemented. |
 | 3 — Compatibility edges | Not started | Production REST, gRPC, authentication, realtime/Centrifugo, health, CLI, and deployment-compatible services are not implemented. |
 | 4 — Hyperliquid production integration | Not started | No production adapter, reconnect/resynchronization path, controlled live canary, soak test, or incident drill exists. |
@@ -71,11 +93,17 @@ Verified on 2026-07-24:
 - The first six Phase 1 order-lifecycle rows are reviewed and green against the
   production engine. Their focused source, invariant, fuzz seed, 100-repeat,
   and race-enabled tests pass locally.
+- The complete stacked Phase 1 implementation passes focused 100-repeat tests,
+  repository-wide tests, race tests, deterministic repeats, policy, formatting,
+  strict lint, complete source inventory, tidy-diff, and vulnerability checks.
+  Matching, positions, risk, bracket/trigger, and fee source rows remain
+  deliberately unreviewed until their evidence-only promotions are accepted.
 
 ## Next milestone
 
-Promote the matching/fills candidate only after local and hosted validation,
-then implement positions and OMS modes. PostgreSQL and NATS remain Phase 2
-work.
+Publish the stacked Phase 1 slices in order, then promote each source cohort in
+separate evidence-only changes after local and hosted validation. Once those
+changes are green on `main`, begin Phase 2 with PostgreSQL authority and
+immutable migrations before NATS delivery work.
 
 The authoritative scope, phase definitions, and completion criteria are in `PROJECT_CHARTER.md`. Repository-wide execution rules are in `AGENTS.md`.
