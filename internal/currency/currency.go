@@ -145,7 +145,7 @@ func NewRegistry(initial ...Currency) *Registry {
 // NewDefaultRegistry constructs a registry containing the built-ins required
 // by the native model tests.
 func NewDefaultRegistry() *Registry {
-	return NewRegistry(AUD(), USD(), BTC(), USDT())
+	return NewRegistry(AUD(), USD(), BTC(), USDT(), PUSD())
 }
 
 // Register adds a currency. Existing metadata is retained unless overwrite is
@@ -261,4 +261,9 @@ func BTC() Currency {
 // USDT returns the built-in Tether metadata.
 func USDT() Currency {
 	return Currency{Code: "USDT", Precision: 8, Name: "Tether", Type: Crypto}
+}
+
+// PUSD returns Polymarket's six-decimal CLOB V2 collateral token.
+func PUSD() Currency {
+	return Currency{Code: "pUSD", Precision: 6, Name: "Polymarket USD", Type: Crypto}
 }
