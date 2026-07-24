@@ -30,14 +30,18 @@ func TestJetStreamDuplicatePublishAndCommittedRedelivery(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := platformnats.EnsureStreams(ctx, js, platformnats.StreamLimits{
+	limits := platformnats.StreamLimits{
 		Replicas:        1,
 		MaxBytes:        64 << 20,
 		MaxMessageBytes: 1 << 20,
 		MaxAge:          time.Hour,
 		DuplicateWindow: time.Minute,
-	}); err != nil {
+	}
+	if err := platformnats.EnsureStreams(ctx, js, limits); err != nil {
 		t.Fatalf("EnsureStreams: %v", err)
+	}
+	if err := platformnats.EnsureEngineShardStream(ctx, js, 7, limits); err != nil {
+		t.Fatalf("EnsureEngineShardStream: %v", err)
 	}
 
 	publisher := platformnats.NewPublisher(js)
@@ -62,7 +66,7 @@ func TestJetStreamDuplicatePublishAndCommittedRedelivery(t *testing.T) {
 			secondSequence,
 		)
 	}
-	stream, err := js.Stream(ctx, platformnats.EngineInputsStream)
+	stream, err := js.Stream(ctx, platformnats.EngineInputsStream+"_7")
 	if err != nil {
 		t.Fatalf("load engine stream: %v", err)
 	}

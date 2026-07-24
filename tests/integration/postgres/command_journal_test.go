@@ -37,6 +37,10 @@ func TestCommandJournalRejectsConflictsAndReplaysCompletedResponse(t *testing.T)
 		CanonicalPayload: []byte(
 			`{"accountId":"account-1","amount":"10","currency":"USDC"}`,
 		),
+		OutboxSubject: "engine.input.7.command.v1",
+		OutboxPayload: []byte(
+			`{"messageId":"019f0000-0000-4000-8000-000000000001"}`,
+		),
 		LogicalTime: time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC),
 		ExpiresAt:   time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC),
 	}
@@ -95,6 +99,7 @@ func TestCommandJournalRejectsConflictsAndReplaysCompletedResponse(t *testing.T)
 
 	var idempotencyRows int
 	var commandRows int
+	var outboxRows int
 	if err := pool.QueryRow(
 		context.Background(),
 		"SELECT count(*) FROM trading.idempotency_records",
@@ -107,11 +112,18 @@ func TestCommandJournalRejectsConflictsAndReplaysCompletedResponse(t *testing.T)
 	).Scan(&commandRows); err != nil {
 		t.Fatalf("count commands: %v", err)
 	}
-	if idempotencyRows != 1 || commandRows != 1 {
+	if err := pool.QueryRow(
+		context.Background(),
+		"SELECT count(*) FROM messaging.outbox",
+	).Scan(&outboxRows); err != nil {
+		t.Fatalf("count command outbox: %v", err)
+	}
+	if idempotencyRows != 1 || commandRows != 1 || outboxRows != 1 {
 		t.Fatalf(
-			"journal rows = idempotency %d, commands %d, want 1 and 1",
+			"journal rows = idempotency %d, commands %d, outbox %d, want 1 each",
 			idempotencyRows,
 			commandRows,
+			outboxRows,
 		)
 	}
 }
