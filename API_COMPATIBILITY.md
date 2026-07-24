@@ -1,0 +1,132 @@
+# External API Compatibility
+
+## 1. Objective
+
+The Go implementation must be deployable as a replacement without requiring existing client, admin, broker, realtime or infrastructure consumers to change their contract.
+
+Compatibility is proven by tests and frozen artifacts, not by matching internal code.
+
+## 2. Contract sources
+
+In authority order:
+
+1. accepted Go contract tests;
+2. explicit assertions in pinned platform tests;
+3. frozen OpenAPI documents;
+4. frozen protobuf definitions and descriptors;
+5. frozen realtime token/channel/envelope fixtures;
+6. accepted intentional-deviation decisions.
+
+Store frozen artifacts under `contracts/` once imported.
+
+## 3. HTTP compatibility
+
+Preserve as tested:
+
+- methods and paths;
+- query and path parameter parsing;
+- request size and content type behavior;
+- authentication and authorization;
+- status codes;
+- error codes, messages and field structure;
+- JSON field names and casing;
+- omitted versus `null` fields;
+- array ordering where observable;
+- timestamps;
+- decimal string formatting;
+- headers, cookies, cache and CORS behavior;
+- idempotency semantics;
+- pagination and cursors.
+
+Economic decimals are never JSON numbers if the source contract uses strings.
+
+## 4. Idempotency contract
+
+For every mutation requiring idempotency:
+
+- scope and key rules match the source contract;
+- same key and canonical request returns the stored response exactly;
+- same key with a different request is rejected deterministically;
+- retry after timeout never creates a new command;
+- response body, status and required headers are persisted.
+
+## 5. gRPC compatibility
+
+Preserve:
+
+- proto package names;
+- service and method names;
+- field numbers and wire types;
+- enum numeric values;
+- optional/presence semantics;
+- status codes and details;
+- decimal representation;
+- deadlines and cancellation behavior required by tests.
+
+Never reuse a removed protobuf field number.
+
+## 6. Realtime compatibility
+
+Preserve as established by tests:
+
+- token issuer/subject/audience and expiry semantics;
+- channel names and authorization;
+- event envelope shape;
+- event type names;
+- payload field names and decimal formats;
+- aggregate/channel sequence behavior;
+- initial snapshot and reconnect behavior.
+
+Internal delivery changes from Redis/RabbitMQ to NATS are invisible to clients.
+
+Every new implementation event includes stable `eventId` and sequence information. If the historical surface omitted those fields, introduce them only in an additive compatible location or keep them internal until a versioned contract allows exposure.
+
+## 7. CLI and deployment compatibility
+
+Where existing deployment tooling depends on it, retain:
+
+```text
+app serve
+app worker --handlers=<role>
+app migrate
+app doctor
+nautilus
+```
+
+The Go binaries may route these commands to a new implementation. Environment variable names, ports and health endpoints required by deployment compatibility are frozen in tests/manifest.
+
+## 8. Compatibility manifest
+
+Create `contracts/compatibility-manifest.json` containing:
+
+```text
+platform source revision
+OpenAPI artifact hashes
+protobuf descriptor hash
+realtime fixture hash
+supported role commands
+environment key list
+intentional deviations
+```
+
+CI verifies artifact hashes and contract tests.
+
+## 9. Intentional deviations
+
+A deviation requires:
+
+- a test demonstrating old and desired behavior from source assertions/documents;
+- safety/business rationale;
+- migration and client impact;
+- ADR or `ports/decisions/` record;
+- owner approval.
+
+Do not label an unimplemented behavior as an intentional deviation.
+
+## 10. Contract-test approach
+
+- HTTP: `httptest` plus full-process loopback tests.
+- gRPC: `bufconn` plus loopback tests.
+- Realtime: token/envelope unit tests and Centrifugo integration tests.
+- Golden wire fixtures are reviewed and generated from the specification, not from executing the old system.
+- Fuzz request decoders and invalid enums/precision.

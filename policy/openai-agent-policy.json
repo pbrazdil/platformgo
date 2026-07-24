@@ -1,0 +1,79 @@
+{
+  "schema_version": 2,
+  "provider": "openai",
+  "api": "responses",
+  "model": "gpt-5.6-sol",
+  "allowed_models": [
+    "gpt-5.6-sol"
+  ],
+  "allow_aliases": false,
+  "allow_model_fallback": false,
+  "fail_on_model_unavailable": true,
+  "verify_response_model": true,
+  "profiles": {
+    "inventory": {
+      "reasoning": {
+        "effort": "medium",
+        "context": "current_turn"
+      },
+      "text": {
+        "verbosity": "low"
+      }
+    },
+    "implementation": {
+      "reasoning": {
+        "effort": "high",
+        "context": "all_turns"
+      },
+      "text": {
+        "verbosity": "medium"
+      }
+    },
+    "critical-review": {
+      "reasoning": {
+        "effort": "xhigh",
+        "context": "current_turn",
+        "mode": "pro"
+      },
+      "text": {
+        "verbosity": "high"
+      }
+    },
+    "release-gate": {
+      "reasoning": {
+        "effort": "max",
+        "context": "current_turn",
+        "mode": "pro"
+      },
+      "text": {
+        "verbosity": "high"
+      },
+      "requires_explicit_owner_authorization": true
+    }
+  },
+  "prompt_cache": {
+    "mode": "implicit",
+    "stable_prefix": [
+      "AGENTS.md",
+      "MODEL_POLICY.md"
+    ]
+  },
+  "templates": {
+    "task": "docs/AGENT_TASK_TEMPLATE.md",
+    "critical_review": "docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md"
+  },
+  "evaluation": {
+    "policy": "AGENT_EVALS.md",
+    "fixtures": "testdata/agent-evals",
+    "reports": "docs/agent-evals"
+  },
+  "programmatic_tool_calling": {
+    "policy": "bounded-only",
+    "prohibited_for": [
+      "edits",
+      "approvals",
+      "semantic-conflict-resolution",
+      "final-validation"
+    ]
+  }
+}

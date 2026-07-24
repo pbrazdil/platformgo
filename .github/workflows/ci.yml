@@ -1,0 +1,101 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        if: ${{ hashFiles('go.mod') != '' }}
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Policy checks
+        env:
+          BASE_REF: origin/${{ github.base_ref || 'main' }}
+        run: make policy
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        if: ${{ hashFiles('go.mod') != '' }}
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Format check
+        if: ${{ hashFiles('go.mod') != '' }}
+        run: make fmt-check
+      - name: golangci-lint
+        if: ${{ hashFiles('go.mod') != '' }}
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+      - name: Go vet
+        if: ${{ hashFiles('go.mod') != '' }}
+        run: go vet ./...
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        if: ${{ hashFiles('go.mod') != '' }}
+        with:
+          go-version-file: go.mod
+          cache: true
+      - if: ${{ hashFiles('go.mod') != '' }}
+        run: go test ./... -count=1
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        if: ${{ hashFiles('go.mod') != '' }}
+        with:
+          go-version-file: go.mod
+          cache: true
+      - if: ${{ hashFiles('go.mod') != '' }}
+        run: go test -race ./... -count=1
+
+  deterministic-repeat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        if: ${{ hashFiles('go.mod') != '' }}
+        with:
+          go-version-file: go.mod
+          cache: true
+      - if: ${{ hashFiles('go.mod') != '' }}
+        run: make test-repeat
+
+  vulnerability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        if: ${{ hashFiles('go.mod') != '' }}
+        with:
+          go-version-file: go.mod
+          cache: true
+      - if: ${{ hashFiles('go.mod') != '' }}
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+      - if: ${{ hashFiles('go.mod') != '' }}
+        run: govulncheck ./...

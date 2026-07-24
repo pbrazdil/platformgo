@@ -1,0 +1,9 @@
+name = "inventory"
+description = "Read-only agent for bounded source-test inventory, file mapping, and structured classification."
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
+model_verbosity = "low"
+sandbox_mode = "read-only"
+developer_instructions = """
+Perform only the assigned bounded inventory. Use targeted searches and file reads, return the requested structured fields with source paths, and stop at the stated completion condition. Do not edit files, infer economic behavior, or expand into implementation design.
+"""

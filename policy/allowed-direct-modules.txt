@@ -1,0 +1,12 @@
+# One direct Go module path per line. Additions require dependency review/ADR.
+github.com/cockroachdb/apd/v3
+github.com/google/uuid
+github.com/jackc/pgx/v5
+github.com/nats-io/nats.go
+go.opentelemetry.io/otel
+go.opentelemetry.io/otel/sdk
+github.com/prometheus/client_golang
+golang.org/x/crypto
+golang.org/x/sync
+google.golang.org/grpc
+google.golang.org/protobuf

@@ -1,2 +1,27 @@
 .sources/
 
+# Python policy tooling
+__pycache__/
+*.py[cod]
+
+# Go
+/bin/
+/coverage/
+*.test
+*.out
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+
+# Temporary integration data
+/tmp/
+.testdata-runtime/
