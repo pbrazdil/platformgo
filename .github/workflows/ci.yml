@@ -94,7 +94,7 @@ jobs:
           docker run --detach --name platformgo-nats \
             --publish 127.0.0.1:4222:4222 \
             nats:2.14.3-alpine -js
-          docker cp platformgo-nats:/nats-server "$nats_server_bin"
+          docker cp platformgo-nats:/usr/local/bin/nats-server "$nats_server_bin"
           echo "PLATFORMGO_TEST_NATS_SERVER_BIN=$nats_server_bin" >> "$GITHUB_ENV"
           for attempt in {1..20}; do
             if (echo > /dev/tcp/127.0.0.1/4222) 2>/dev/null; then
@@ -138,7 +138,7 @@ jobs:
           docker run --detach --name platformgo-nats \
             --publish 127.0.0.1:4222:4222 \
             nats:2.14.3-alpine -js
-          docker cp platformgo-nats:/nats-server "$nats_server_bin"
+          docker cp platformgo-nats:/usr/local/bin/nats-server "$nats_server_bin"
           echo "PLATFORMGO_TEST_NATS_SERVER_BIN=$nats_server_bin" >> "$GITHUB_ENV"
           for attempt in {1..20}; do
             if (echo > /dev/tcp/127.0.0.1/4222) 2>/dev/null; then
