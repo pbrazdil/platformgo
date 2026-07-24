@@ -312,10 +312,12 @@ func newTradingFixtureWithoutBook(t *testing.T) *tradingFixture {
 	fixture.apply(t, TradingAction{
 		Kind: TradingActionConfigureInstrument,
 		ConfigureInstrument: &ConfigureInstrument{
-			InstrumentID:  "BTC-PERP",
-			Revision:      1,
-			PriceScale:    2,
-			QuantityScale: 3,
+			InstrumentID:            "BTC-PERP",
+			Revision:                1,
+			PriceScale:              2,
+			QuantityScale:           3,
+			SettlementCurrency:      "USDC",
+			SettlementCurrencyScale: 8,
 		},
 	})
 	return fixture

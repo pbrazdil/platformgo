@@ -10,6 +10,7 @@ type TradingActionKind string
 
 const (
 	TradingActionConfigureInstrument TradingActionKind = "configure_instrument"
+	TradingActionConfigureAccount    TradingActionKind = "configure_account"
 	TradingActionUpdateBook          TradingActionKind = "update_book"
 	TradingActionSubmitOrder         TradingActionKind = "submit_order"
 	TradingActionAmendOrder          TradingActionKind = "amend_order"
@@ -65,6 +66,46 @@ func (timeInForce TimeInForce) valid() bool {
 	}
 }
 
+// OmsMode controls whether fills net by account/instrument or remain as
+// independently addressable position legs.
+type OmsMode string
+
+const (
+	OmsModeNetting OmsMode = "NETTING"
+	OmsModeHedging OmsMode = "HEDGING"
+)
+
+func (mode OmsMode) valid() bool {
+	return mode == OmsModeNetting || mode == OmsModeHedging
+}
+
+// PositionSide is the economic direction of an open or closed position.
+type PositionSide string
+
+const (
+	PositionSideLong  PositionSide = "LONG"
+	PositionSideShort PositionSide = "SHORT"
+)
+
+// PositionStatus is the lifecycle state of a position.
+type PositionStatus string
+
+const (
+	PositionStatusOpen   PositionStatus = "open"
+	PositionStatusClosed PositionStatus = "closed"
+)
+
+// PositionEffect classifies how one fill changed its target position.
+type PositionEffect string
+
+const (
+	PositionEffectOpen     PositionEffect = "open"
+	PositionEffectIncrease PositionEffect = "increase"
+	PositionEffectReduce   PositionEffect = "reduce"
+	PositionEffectFlip     PositionEffect = "flip"
+	PositionEffectClose    PositionEffect = "close"
+)
+
 // OrderStatus is the deterministic lifecycle state of an order.
 type OrderStatus string
 
@@ -97,6 +138,7 @@ const (
 	RejectionInsufficientMarket RejectionReason = "insufficient_market"
 	RejectionDuplicateOrderID   RejectionReason = "duplicate_order_id"
 	RejectionSlippageExceeded   RejectionReason = "slippage_exceeded"
+	RejectionReduceOnly         RejectionReason = "reduce_only"
 )
 
 // CommandResult records whether a valid envelope produced or rejected a
@@ -111,6 +153,7 @@ type CommandResult struct {
 type TradingAction struct {
 	Kind                TradingActionKind    `json:"kind"`
 	ConfigureInstrument *ConfigureInstrument `json:"configureInstrument,omitempty"`
+	ConfigureAccount    *ConfigureAccount    `json:"configureAccount,omitempty"`
 	UpdateBook          *UpdateBook          `json:"updateBook,omitempty"`
 	SubmitOrder         *SubmitOrder         `json:"submitOrder,omitempty"`
 	AmendOrder          *AmendOrder          `json:"amendOrder,omitempty"`
@@ -119,10 +162,18 @@ type TradingAction struct {
 
 // ConfigureInstrument installs one immutable instrument revision.
 type ConfigureInstrument struct {
-	InstrumentID  string `json:"instrumentId"`
-	Revision      uint64 `json:"revision"`
-	PriceScale    uint8  `json:"priceScale"`
-	QuantityScale uint8  `json:"quantityScale"`
+	InstrumentID            string `json:"instrumentId"`
+	Revision                uint64 `json:"revision"`
+	PriceScale              uint8  `json:"priceScale"`
+	QuantityScale           uint8  `json:"quantityScale"`
+	SettlementCurrency      string `json:"settlementCurrency"`
+	SettlementCurrencyScale uint8  `json:"settlementCurrencyScale"`
+}
+
+// ConfigureAccount installs the account's explicit OMS position mode.
+type ConfigureAccount struct {
+	AccountID string  `json:"accountId"`
+	OmsMode   OmsMode `json:"omsMode"`
 }
 
 // BookLevel is an exact price and available quantity.
@@ -151,6 +202,7 @@ type SubmitOrder struct {
 	Price          string      `json:"price,omitempty"`
 	TriggerPrice   string      `json:"triggerPrice,omitempty"`
 	ReduceOnly     bool        `json:"reduceOnly"`
+	PositionID     ID          `json:"positionId,omitempty"`
 	MaxSlippageBPS *uint32     `json:"maxSlippageBps,omitempty"`
 }
 
@@ -179,10 +231,18 @@ func EncodeTradingAction(action TradingAction) ([]byte, error) {
 
 // InstrumentSnapshot is the externally inspectable configured revision.
 type InstrumentSnapshot struct {
-	InstrumentID  string
-	Revision      uint64
-	PriceScale    uint8
-	QuantityScale uint8
+	InstrumentID            string
+	Revision                uint64
+	PriceScale              uint8
+	QuantityScale           uint8
+	SettlementCurrency      string
+	SettlementCurrencyScale uint8
+}
+
+// AccountSnapshot is the configured deterministic OMS mode for one account.
+type AccountSnapshot struct {
+	AccountID string
+	OmsMode   OmsMode
 }
 
 // BookSnapshot is the canonical price-sorted market state.
@@ -208,6 +268,7 @@ type OrderSnapshot struct {
 	Price             string
 	TriggerPrice      string
 	ReduceOnly        bool
+	PositionID        ID
 	HasSlippageBand   bool
 	MaxSlippageBPS    uint32
 	SlippageReference string
@@ -217,14 +278,33 @@ type OrderSnapshot struct {
 
 // FillSnapshot is one exact, stable execution fact.
 type FillSnapshot struct {
-	FillID       ID
-	OrderID      ID
-	AccountID    string
-	InstrumentID string
-	Side         Side
-	Price        string
-	Quantity     string
-	LogicalTime  LogicalTime
+	FillID             ID
+	OrderID            ID
+	AccountID          string
+	InstrumentID       string
+	Side               Side
+	Price              string
+	Quantity           string
+	PositionID         ID
+	PositionEffect     PositionEffect
+	RealizedPnL        string
+	SettlementCurrency string
+	LogicalTime        LogicalTime
+}
+
+// PositionSnapshot is the immutable query representation of one position
+// version. SignedQuantity is negative only for short positions.
+type PositionSnapshot struct {
+	PositionID         ID
+	AccountID          string
+	InstrumentID       string
+	Side               PositionSide
+	Status             PositionStatus
+	SignedQuantity     string
+	AverageOpenPrice   string
+	RealizedPnL        string
+	SettlementCurrency string
+	Version            uint64
 }
 
 // DomainEvent records one canonical aggregate transition.

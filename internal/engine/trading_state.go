@@ -8,13 +8,21 @@ import (
 
 type tradingState struct {
 	instruments []instrumentRecord
+	accounts    []accountRecord
 	books       []bookRecord
 	orders      []orderRecord
 	fills       []fillRecord
+	positions   []positionRecord
 }
 
 type instrumentRecord struct {
-	revision domain.InstrumentRevision
+	revision           domain.InstrumentRevision
+	settlementCurrency domain.Currency
+}
+
+type accountRecord struct {
+	accountID string
+	omsMode   OmsMode
 }
 
 type bookRecord struct {
@@ -47,6 +55,7 @@ type orderRecord struct {
 	triggerPrice      domain.Price
 	hasTrigger        bool
 	reduceOnly        bool
+	positionID        ID
 	hasSlippageBand   bool
 	maxSlippageBPS    uint32
 	slippageReference domain.Price
@@ -55,21 +64,40 @@ type orderRecord struct {
 }
 
 type fillRecord struct {
-	fillID      ID
-	orderID     ID
-	accountID   string
-	instrument  domain.InstrumentRevision
-	side        Side
-	price       domain.Price
-	quantity    domain.Quantity
-	logicalTime LogicalTime
+	fillID         ID
+	orderID        ID
+	accountID      string
+	instrument     domain.InstrumentRevision
+	side           Side
+	price          domain.Price
+	quantity       domain.Quantity
+	positionID     ID
+	positionEffect PositionEffect
+	realizedPnL    domain.Money
+	hasRealizedPnL bool
+	logicalTime    LogicalTime
+}
+
+type positionRecord struct {
+	positionID         ID
+	accountID          string
+	instrument         domain.InstrumentRevision
+	settlementCurrency domain.Currency
+	side               PositionSide
+	status             PositionStatus
+	quantity           domain.Quantity
+	averageOpenPrice   domain.Price
+	realizedPnL        domain.Money
+	version            uint64
 }
 
 func (state tradingState) clone() tradingState {
 	cloned := tradingState{
 		instruments: append([]instrumentRecord(nil), state.instruments...),
+		accounts:    append([]accountRecord(nil), state.accounts...),
 		orders:      append([]orderRecord(nil), state.orders...),
 		fills:       append([]fillRecord(nil), state.fills...),
+		positions:   append([]positionRecord(nil), state.positions...),
 		books:       make([]bookRecord, len(state.books)),
 	}
 	for index, book := range state.books {
@@ -89,17 +117,69 @@ func (state tradingState) instrument(instrumentID string) (domain.InstrumentRevi
 	return domain.InstrumentRevision{}, false
 }
 
-func (state *tradingState) replaceInstrument(revision domain.InstrumentRevision) {
+func (state tradingState) instrumentRecord(instrumentID string) (instrumentRecord, bool) {
+	for _, instrument := range state.instruments {
+		if instrument.revision.ID() == instrumentID {
+			return instrument, true
+		}
+	}
+	return instrumentRecord{}, false
+}
+
+func (state *tradingState) replaceInstrument(record instrumentRecord) {
 	for index := range state.instruments {
-		if state.instruments[index].revision.ID() == revision.ID() {
-			state.instruments[index] = instrumentRecord{revision: revision}
+		if state.instruments[index].revision.ID() == record.revision.ID() {
+			state.instruments[index] = record
 			return
 		}
 	}
-	state.instruments = append(state.instruments, instrumentRecord{revision: revision})
+	state.instruments = append(state.instruments, record)
 	sort.Slice(state.instruments, func(left, right int) bool {
 		return state.instruments[left].revision.ID() < state.instruments[right].revision.ID()
 	})
+}
+
+func (state tradingState) accountMode(accountID string) OmsMode {
+	for _, account := range state.accounts {
+		if account.accountID == accountID {
+			return account.omsMode
+		}
+	}
+	return OmsModeNetting
+}
+
+func (state *tradingState) replaceAccount(account accountRecord) {
+	for index := range state.accounts {
+		if state.accounts[index].accountID == account.accountID {
+			state.accounts[index] = account
+			return
+		}
+	}
+	state.accounts = append(state.accounts, account)
+	sort.Slice(state.accounts, func(left, right int) bool {
+		return state.accounts[left].accountID < state.accounts[right].accountID
+	})
+}
+
+func (state tradingState) hasOpenPositions(accountID string) bool {
+	for _, position := range state.positions {
+		if position.accountID == accountID &&
+			position.status == PositionStatusOpen {
+			return true
+		}
+	}
+	return false
+}
+
+func (state tradingState) hasActiveOrders(accountID string) bool {
+	for _, order := range state.orders {
+		if order.accountID == accountID &&
+			(order.status == OrderStatusWorking ||
+				order.status == OrderStatusPartiallyFilled) {
+			return true
+		}
+	}
+	return false
 }
 
 func (state *tradingState) book(instrumentID string) (*bookRecord, bool) {
@@ -168,6 +248,32 @@ func (state State) FillsForOrder(orderID ID) []FillSnapshot {
 	return fills
 }
 
+// Position returns a detached snapshot of one position.
+func (state State) Position(positionID ID) (PositionSnapshot, bool) {
+	for _, position := range state.trading.positions {
+		if position.positionID == positionID {
+			return position.snapshot(), true
+		}
+	}
+	return PositionSnapshot{}, false
+}
+
+// OpenPositions returns stable position-ID-sorted open snapshots for an
+// account.
+func (state State) OpenPositions(accountID string) []PositionSnapshot {
+	var positions []PositionSnapshot
+	for _, position := range state.trading.positions {
+		if position.accountID == accountID &&
+			position.status == PositionStatusOpen {
+			positions = append(positions, position.snapshot())
+		}
+	}
+	sort.Slice(positions, func(left, right int) bool {
+		return positions[left].PositionID.String() < positions[right].PositionID.String()
+	})
+	return positions
+}
+
 func (order orderRecord) snapshot() OrderSnapshot {
 	snapshot := OrderSnapshot{
 		OrderID:         order.orderID,
@@ -180,6 +286,7 @@ func (order orderRecord) snapshot() OrderSnapshot {
 		Quantity:        order.quantity.Decimal().String(),
 		FilledQuantity:  order.filledQuantity.Decimal().String(),
 		ReduceOnly:      order.reduceOnly,
+		PositionID:      order.positionID,
 		HasSlippageBand: order.hasSlippageBand,
 		MaxSlippageBPS:  order.maxSlippageBPS,
 		RejectReason:    order.rejectReason,
@@ -201,15 +308,42 @@ func (order orderRecord) snapshot() OrderSnapshot {
 }
 
 func (fill fillRecord) snapshot() FillSnapshot {
-	return FillSnapshot{
-		FillID:       fill.fillID,
-		OrderID:      fill.orderID,
-		AccountID:    fill.accountID,
-		InstrumentID: fill.instrument.ID(),
-		Side:         fill.side,
-		Price:        fill.price.Decimal().String(),
-		Quantity:     fill.quantity.Decimal().String(),
-		LogicalTime:  fill.logicalTime,
+	snapshot := FillSnapshot{
+		FillID:         fill.fillID,
+		OrderID:        fill.orderID,
+		AccountID:      fill.accountID,
+		InstrumentID:   fill.instrument.ID(),
+		Side:           fill.side,
+		Price:          fill.price.Decimal().String(),
+		Quantity:       fill.quantity.Decimal().String(),
+		PositionID:     fill.positionID,
+		PositionEffect: fill.positionEffect,
+		LogicalTime:    fill.logicalTime,
+	}
+	if fill.hasRealizedPnL {
+		snapshot.RealizedPnL = fill.realizedPnL.Decimal().String()
+		snapshot.SettlementCurrency = fill.realizedPnL.Currency().Code()
+	}
+	return snapshot
+}
+
+func (position positionRecord) snapshot() PositionSnapshot {
+	signedQuantity := position.quantity.Decimal().String()
+	if position.side == PositionSideShort &&
+		!position.quantity.Decimal().IsZero() {
+		signedQuantity = "-" + signedQuantity
+	}
+	return PositionSnapshot{
+		PositionID:         position.positionID,
+		AccountID:          position.accountID,
+		InstrumentID:       position.instrument.ID(),
+		Side:               position.side,
+		Status:             position.status,
+		SignedQuantity:     signedQuantity,
+		AverageOpenPrice:   position.averageOpenPrice.Decimal().String(),
+		RealizedPnL:        position.realizedPnL.Decimal().String(),
+		SettlementCurrency: position.settlementCurrency.Code(),
+		Version:            position.version,
 	}
 }
 
