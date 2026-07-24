@@ -6,8 +6,6 @@ PostgreSQL is the authoritative durable store for all business state. NATS and C
 
 ## 2. Driver and access
 
-- PostgreSQL 17 is the minimum supported server version. Migrations fail closed
-  before acquiring the migration lock or changing schema on an older server.
 - Use `github.com/jackc/pgx/v5` directly.
 - No ORM or generic repository framework.
 - SQL is restricted to `internal/adapters/postgres/**` and `migrations/**`.
