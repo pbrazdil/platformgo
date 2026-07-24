@@ -132,7 +132,8 @@ func TestOrderAnyFromEventsInvalidPredicateReturnsError(t *testing.T) {
 		var replayError *ReplayError
 		if !errors.As(err, &replayError) ||
 			replayError.Kind != ReplayErrorInvalidInitialization ||
-			!replayError.Contains("Invalid `OrderInitialized` event", tc.messagePart) {
+			!strings.Contains(replayError.Error(), "Invalid `OrderInitialized` event") ||
+			!strings.Contains(replayError.Error(), tc.messagePart) {
 			t.Fatalf("side %v error = %#v", tc.side, err)
 		}
 	}
