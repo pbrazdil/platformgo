@@ -6,23 +6,25 @@ import "fmt"
 // coordinator. It includes the fingerprint version needed to verify a
 // historical envelope after the current schema or hash implementation changes.
 type Receipt struct {
-	InputID          ID
-	StreamSequence   uint64
-	SchemaVersion    uint32
-	InputHashVersion uint32
-	InputHash        Hash
-	Decision         Decision
+	InputID           ID
+	StreamSequence    uint64
+	SchemaVersion     uint32
+	InputHashVersion  uint32
+	InputHash         Hash
+	BusinessInputHash Hash
+	Decision          Decision
 }
 
 // NewReceipt constructs the receipt for a successfully applied input.
 func NewReceipt(input InputEnvelope, decision Decision) Receipt {
 	return Receipt{
-		InputID:          input.InputID,
-		StreamSequence:   input.StreamSequence,
-		SchemaVersion:    input.SchemaVersion,
-		InputHashVersion: decision.InputHashVersion,
-		InputHash:        decision.InputHash,
-		Decision:         cloneDecision(decision),
+		InputID:           input.InputID,
+		StreamSequence:    input.StreamSequence,
+		SchemaVersion:     input.SchemaVersion,
+		InputHashVersion:  decision.InputHashVersion,
+		InputHash:         decision.InputHash,
+		BusinessInputHash: hashBusinessInput(input),
+		Decision:          cloneDecision(decision),
 	}
 }
 
@@ -108,6 +110,7 @@ func sameReceiptIdentity(left, right Receipt) bool {
 		left.SchemaVersion == right.SchemaVersion &&
 		left.InputHashVersion == right.InputHashVersion &&
 		left.InputHash == right.InputHash &&
+		left.BusinessInputHash == right.BusinessInputHash &&
 		left.Decision.DecisionHash == right.Decision.DecisionHash &&
 		left.Decision.NextStateHash == right.Decision.NextStateHash
 }

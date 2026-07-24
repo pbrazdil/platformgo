@@ -14,6 +14,35 @@ func hashInput(input InputEnvelope) Hash {
 	return result
 }
 
+// InputHash fingerprints the complete delivered envelope, including its
+// JetStream-assigned stream sequence.
+func InputHash(input InputEnvelope) Hash {
+	return hashInput(input)
+}
+
+// BusinessInputHash fingerprints the stable producer input while excluding
+// the JetStream-assigned delivery sequence.
+func BusinessInputHash(input InputEnvelope) Hash {
+	return hashBusinessInput(input)
+}
+
+func hashBusinessInput(input InputEnvelope) Hash {
+	return finishHash(func(hasher hash.Hash) {
+		writeString(hasher, "platformgo.engine.business-input.v1")
+		writeBytes(hasher, input.InputID[:])
+		writeUint32(hasher, input.SchemaVersion)
+		writeUint32(hasher, uint32(input.ShardID))
+		writeUint8(hasher, uint8(input.Kind))
+		writeString(hasher, input.SourceID)
+		writeUint64(hasher, input.SourceSequence)
+		writeUint64(hasher, input.MarketSequence)
+		writeInt64(hasher, input.LogicalTime.UnixNano())
+		writeUint64(hasher, input.ConfigurationVersion)
+		writeUint64(hasher, input.InstrumentVersion)
+		writeBytes(hasher, input.Payload.value)
+	})
+}
+
 func hashInputAtVersion(input InputEnvelope, version uint32) (Hash, *Error) {
 	if version != CurrentInputHashVersion {
 		return Hash{}, &Error{
@@ -53,6 +82,7 @@ func hashEffects(decision Decision) Hash {
 		writeString(hasher, "platformgo.engine.effects.v1")
 		writeString(hasher, string(decision.CommandResult.Status))
 		writeString(hasher, string(decision.CommandResult.Reason))
+		writeBytes(hasher, decision.DuplicateOfDecisionHash[:])
 		writeUint64(hasher, uint64(len(decision.InstrumentChanges)))
 		for _, instrument := range decision.InstrumentChanges {
 			writeString(hasher, instrument.InstrumentID)

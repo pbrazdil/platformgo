@@ -69,6 +69,84 @@ func ApplyWithReceipts(
 	})
 }
 
+// ApplyDuplicateDelivery records a later JetStream sequence for an already
+// committed identical business input. It advances only the audit/state chain;
+// every economic effect collection remains empty.
+func ApplyDuplicateDelivery(
+	state State,
+	input InputEnvelope,
+	original Receipt,
+) (State, Decision, error) {
+	inputHash := hashInput(input)
+	if !state.ready {
+		return state, Decision{}, &Error{
+			Kind:     ErrShardNotReady,
+			Sequence: input.StreamSequence,
+			Detail:   "the shard has recorded a fatal input error",
+		}
+	}
+	if input.InputID != original.InputID ||
+		hashBusinessInput(input) != original.BusinessInputHash {
+		return halt(state, inputHash, &Error{
+			Kind:     ErrInputConflict,
+			Sequence: input.StreamSequence,
+			Detail:   "re-published input differs from its committed business identity",
+		})
+	}
+	if input.StreamSequence != state.nextStreamSequence {
+		kind := ErrSequenceGap
+		if input.StreamSequence < state.nextStreamSequence {
+			kind = ErrSequenceRegression
+		}
+		return halt(state, inputHash, &Error{
+			Kind:     kind,
+			Sequence: input.StreamSequence,
+			Detail:   fmt.Sprintf("next expected sequence is %d", state.nextStreamSequence),
+		})
+	}
+	if state.nextStreamSequence == ^uint64(0) {
+		return halt(state, inputHash, &Error{
+			Kind:     ErrSequenceExhausted,
+			Sequence: input.StreamSequence,
+			Detail:   "stream sequence cannot advance without overflow",
+		})
+	}
+
+	previousStateHash := state.hash
+	decision := Decision{
+		InputID:                 input.InputID,
+		SourceSequence:          input.SourceSequence,
+		StreamSequence:          input.StreamSequence,
+		MarketSequence:          input.MarketSequence,
+		LogicalTime:             input.LogicalTime,
+		ConfigurationVersion:    input.ConfigurationVersion,
+		InstrumentVersion:       input.InstrumentVersion,
+		InputHashVersion:        CurrentInputHashVersion,
+		DecisionHashVersion:     CurrentDecisionHashVersion,
+		PreviousStateHash:       previousStateHash,
+		InputHash:               inputHash,
+		DuplicateOfDecisionHash: original.Decision.DecisionHash,
+		CommandResult:           original.Decision.CommandResult,
+	}
+	decision.EffectsHash = hashEffects(decision)
+	decision.DecisionHash = hashDecision(
+		previousStateHash,
+		inputHash,
+		decision.EffectsHash,
+	)
+	nextSequence := state.nextStreamSequence + 1
+	decision.NextStateHash = hashAcceptedState(
+		previousStateHash,
+		inputHash,
+		decision.DecisionHash,
+		nextSequence,
+	)
+	state.nextStreamSequence = nextSequence
+	state.hash = decision.NextStateHash
+	state.hasLastReceipt = false
+	return state, cloneDecision(decision), nil
+}
+
 type transition func(State) (State, Decision)
 
 func apply(state State, input InputEnvelope, transition transition) (State, Decision, error) {

@@ -158,30 +158,31 @@ type InputEnvelope struct {
 // Decision records the deterministic result metadata and canonical hashes.
 // Economic effect collections are added by Phase 1 vertical slices.
 type Decision struct {
-	InputID              ID
-	SourceSequence       uint64
-	StreamSequence       uint64
-	MarketSequence       uint64
-	LogicalTime          LogicalTime
-	ConfigurationVersion uint64
-	InstrumentVersion    uint64
-	InputHashVersion     uint32
-	DecisionHashVersion  uint32
-	PreviousStateHash    Hash
-	InputHash            Hash
-	EffectsHash          Hash
-	DecisionHash         Hash
-	NextStateHash        Hash
-	CommandResult        CommandResult
-	InstrumentChanges    []InstrumentSnapshot
-	AccountChanges       []AccountSnapshot
-	RiskChanges          []RiskSnapshot
-	BalanceChanges       []BalanceSnapshot
-	LedgerChanges        []LedgerTransactionSnapshot
-	FundingChanges       []FundingSnapshot
-	BookChanges          []BookSnapshot
-	OrderChanges         []OrderSnapshot
-	Fills                []FillSnapshot
-	PositionChanges      []PositionSnapshot
-	Events               []DomainEvent
+	InputID                 ID
+	SourceSequence          uint64
+	StreamSequence          uint64
+	MarketSequence          uint64
+	LogicalTime             LogicalTime
+	ConfigurationVersion    uint64
+	InstrumentVersion       uint64
+	InputHashVersion        uint32
+	DecisionHashVersion     uint32
+	PreviousStateHash       Hash
+	InputHash               Hash
+	EffectsHash             Hash
+	DecisionHash            Hash
+	DuplicateOfDecisionHash Hash
+	NextStateHash           Hash
+	CommandResult           CommandResult
+	InstrumentChanges       []InstrumentSnapshot
+	AccountChanges          []AccountSnapshot
+	RiskChanges             []RiskSnapshot
+	BalanceChanges          []BalanceSnapshot
+	LedgerChanges           []LedgerTransactionSnapshot
+	FundingChanges          []FundingSnapshot
+	BookChanges             []BookSnapshot
+	OrderChanges            []OrderSnapshot
+	Fills                   []FillSnapshot
+	PositionChanges         []PositionSnapshot
+	Events                  []DomainEvent
 }
