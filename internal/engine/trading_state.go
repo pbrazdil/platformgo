@@ -25,6 +25,8 @@ type instrumentRecord struct {
 	initialMarginRate     domain.Rate
 	maintenanceMarginRate domain.Rate
 	maxLeverage           domain.Ratio
+	makerFeeRate          domain.Rate
+	takerFeeRate          domain.Rate
 }
 
 type accountRecord struct {
@@ -92,8 +94,15 @@ type orderRecord struct {
 	hasPrice          bool
 	triggerPrice      domain.Price
 	hasTrigger        bool
+	triggered         bool
+	triggeredAt       LogicalTime
 	reduceOnly        bool
 	positionID        ID
+	bracketID         ID
+	bracketLeg        BracketLeg
+	bracketLegIndex   uint32
+	originalQuantity  domain.Quantity
+	hasRested         bool
 	hasSlippageBand   bool
 	maxSlippageBPS    uint32
 	slippageReference domain.Price
@@ -113,6 +122,9 @@ type fillRecord struct {
 	positionEffect PositionEffect
 	realizedPnL    domain.Money
 	hasRealizedPnL bool
+	liquiditySide  LiquiditySide
+	fee            domain.Money
+	hasFee         bool
 	logicalTime    LogicalTime
 }
 
@@ -218,7 +230,8 @@ func (state tradingState) hasOpenPositions(accountID string) bool {
 func (state tradingState) hasActiveOrders(accountID string) bool {
 	for _, order := range state.orders {
 		if order.accountID == accountID &&
-			(order.status == OrderStatusWorking ||
+			(order.status == OrderStatusHeld ||
+				order.status == OrderStatusWorking ||
 				order.status == OrderStatusPartiallyFilled) {
 			return true
 		}
@@ -331,11 +344,17 @@ func (order orderRecord) snapshot() OrderSnapshot {
 		FilledQuantity:  order.filledQuantity.Decimal().String(),
 		ReduceOnly:      order.reduceOnly,
 		PositionID:      order.positionID,
+		BracketID:       order.bracketID,
+		BracketLeg:      order.bracketLeg,
+		BracketLegIndex: order.bracketLegIndex,
+		HasRested:       order.hasRested,
 		HasSlippageBand: order.hasSlippageBand,
 		MaxSlippageBPS:  order.maxSlippageBPS,
 		RejectReason:    order.rejectReason,
 		Version:         order.version,
 	}
+	snapshot.Triggered = order.triggered
+	snapshot.TriggeredAt = order.triggeredAt
 	if order.hasSlippageBand {
 		snapshot.SlippageReference = order.slippageReference.Decimal().String()
 	}
@@ -363,6 +382,11 @@ func (fill fillRecord) snapshot() FillSnapshot {
 		PositionID:     fill.positionID,
 		PositionEffect: fill.positionEffect,
 		LogicalTime:    fill.logicalTime,
+		LiquiditySide:  fill.liquiditySide,
+	}
+	if fill.hasFee {
+		snapshot.Fee = fill.fee.Decimal().String()
+		snapshot.FeeCurrency = fill.fee.Currency().Code()
 	}
 	if fill.hasRealizedPnL {
 		snapshot.RealizedPnL = fill.realizedPnL.Decimal().String()
