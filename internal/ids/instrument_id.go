@@ -159,6 +159,33 @@ func ValidateBlockchainAddress(address string) error {
 	return validateBlockchainAddress(address)
 }
 
+// ChecksumBlockchainAddress validates hexadecimal shape and returns the EIP-55
+// checksummed representation. Unlike ValidateBlockchainAddress, lowercase
+// inputs are accepted and normalized.
+func ChecksumBlockchainAddress(address string) (string, error) {
+	if !strings.HasPrefix(address, "0x") {
+		return "", fmt.Errorf("Ethereum address must start with '0x': %s", address)
+	}
+	if len(address) != 42 {
+		return "", fmt.Errorf("Blockchain address '%s' is incorrect", address)
+	}
+	lower := strings.ToLower(address[2:])
+	for index, character := range lower {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			return "", fmt.Errorf("invalid character '%c' at position %d", character, index)
+		}
+	}
+	hash := legacyKeccak256([]byte(lower))
+	result := []byte(lower)
+	for index, character := range result {
+		if character >= 'a' && character <= 'f' &&
+			hash[index/2]>>(4*(1-index%2))&0xf >= 8 {
+			result[index] = character - ('a' - 'A')
+		}
+	}
+	return "0x" + string(result), nil
+}
+
 func validEthereumChecksum(address string) bool {
 	lower := strings.ToLower(address)
 	hash := legacyKeccak256([]byte(lower))
