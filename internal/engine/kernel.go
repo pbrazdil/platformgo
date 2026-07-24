@@ -85,8 +85,15 @@ func ApplyDuplicateDelivery(
 			Detail:   "the shard has recorded a fatal input error",
 		}
 	}
+	businessHash, businessHashErr := businessInputHashAtVersion(
+		input,
+		original.BusinessHashVersion,
+	)
+	if businessHashErr != nil {
+		return halt(state, inputHash, businessHashErr)
+	}
 	if input.InputID != original.InputID ||
-		hashBusinessInput(input) != original.BusinessInputHash {
+		businessHash != original.BusinessInputHash {
 		return halt(state, inputHash, &Error{
 			Kind:     ErrInputConflict,
 			Sequence: input.StreamSequence,

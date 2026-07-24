@@ -11,6 +11,7 @@ import (
 const (
 	CurrentSchemaVersion       uint32 = 1
 	CurrentInputHashVersion    uint32 = 1
+	CurrentBusinessHashVersion uint32 = 1
 	CurrentDecisionHashVersion uint32 = 2
 )
 

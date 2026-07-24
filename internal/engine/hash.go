@@ -26,7 +26,40 @@ func BusinessInputHash(input InputEnvelope) Hash {
 	return hashBusinessInput(input)
 }
 
+// BusinessInputHashAtVersion verifies a historical stable-input fingerprint.
+func BusinessInputHashAtVersion(
+	input InputEnvelope,
+	version uint32,
+) (Hash, error) {
+	result, engineError := businessInputHashAtVersion(input, version)
+	if engineError != nil {
+		return Hash{}, engineError
+	}
+	return result, nil
+}
+
 func hashBusinessInput(input InputEnvelope) Hash {
+	result, engineError := businessInputHashAtVersion(
+		input,
+		CurrentBusinessHashVersion,
+	)
+	if engineError != nil {
+		return Hash{}
+	}
+	return result
+}
+
+func businessInputHashAtVersion(
+	input InputEnvelope,
+	version uint32,
+) (Hash, *Error) {
+	if version != CurrentBusinessHashVersion {
+		return Hash{}, &Error{
+			Kind:     ErrUnknownHashVersion,
+			Sequence: input.StreamSequence,
+			Detail:   "business input hash version is not supported",
+		}
+	}
 	return finishHash(func(hasher hash.Hash) {
 		writeString(hasher, "platformgo.engine.business-input.v1")
 		writeBytes(hasher, input.InputID[:])
@@ -40,7 +73,7 @@ func hashBusinessInput(input InputEnvelope) Hash {
 		writeUint64(hasher, input.ConfigurationVersion)
 		writeUint64(hasher, input.InstrumentVersion)
 		writeBytes(hasher, input.Payload.value)
-	})
+	}), nil
 }
 
 func hashInputAtVersion(input InputEnvelope, version uint32) (Hash, *Error) {

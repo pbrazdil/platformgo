@@ -347,7 +347,8 @@ func loadRelevantReceipts(
 	rows, err := tx.Query(
 		ctx,
 		`SELECT input_id::text, stream_sequence, schema_version,
-		        input_hash_version, input_hash, business_input_hash, decision
+		        input_hash_version, input_hash, business_input_hash_version,
+		        business_input_hash, decision
 		   FROM engine.input_receipts
 		  WHERE shard_id = $1
 		    AND (input_id = $2 OR stream_sequence = $3)
@@ -393,6 +394,7 @@ func scanReceipt(row rowScanner) (engine.Receipt, error) {
 		&receipt.SchemaVersion,
 		&receipt.InputHashVersion,
 		&inputHash,
+		&receipt.BusinessHashVersion,
 		&businessInputHash,
 		&decisionJSON,
 	); err != nil {
@@ -1012,9 +1014,9 @@ func persistReceipt(
 		INSERT INTO engine.input_receipts (
 			shard_id, input_id, stream_sequence, schema_version,
 			input_hash_version, input_hash, business_input_hash,
-			decision_hash_version,
+			business_input_hash_version, decision_hash_version,
 			decision_hash, resulting_state_hash, envelope, decision
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		int64(input.ShardID),
 		input.InputID.String(),
 		input.StreamSequence,
@@ -1022,6 +1024,7 @@ func persistReceipt(
 		decision.InputHashVersion,
 		hashBytes(decision.InputHash),
 		hashBytes(engine.BusinessInputHash(input)),
+		engine.CurrentBusinessHashVersion,
 		decision.DecisionHashVersion,
 		hashBytes(decision.DecisionHash),
 		hashBytes(decision.NextStateHash),
@@ -1149,13 +1152,16 @@ func (store *EngineStore) RecoverTradingState(
 		)
 	}
 	rows, err := store.pool.Query(ctx, `
-		SELECT receipt_kind, envelope, decision_hash, resulting_state_hash
+		SELECT receipt_kind, envelope, decision_hash, resulting_state_hash,
+		       business_input_hash_version, business_input_hash
 		  FROM (
 			SELECT
 				'business'::text AS receipt_kind,
 				envelope,
 				decision_hash,
 				resulting_state_hash,
+				business_input_hash_version,
+				business_input_hash,
 				stream_sequence
 			  FROM engine.input_receipts
 			 WHERE shard_id = $1
@@ -1165,6 +1171,8 @@ func (store *EngineStore) RecoverTradingState(
 				envelope,
 				decision_hash,
 				resulting_state_hash,
+				NULL::integer AS business_input_hash_version,
+				NULL::bytea AS business_input_hash,
 				stream_sequence
 			  FROM engine.duplicate_delivery_receipts
 			 WHERE shard_id = $1
@@ -1184,11 +1192,15 @@ func (store *EngineStore) RecoverTradingState(
 		var envelopeJSON []byte
 		var storedDecisionHash []byte
 		var storedStateHash []byte
+		var storedBusinessHashVersion *uint32
+		var storedBusinessHash []byte
 		if scanErr := rows.Scan(
 			&receiptKind,
 			&envelopeJSON,
 			&storedDecisionHash,
 			&storedStateHash,
+			&storedBusinessHashVersion,
+			&storedBusinessHash,
 		); scanErr != nil {
 			return engine.State{}, fmt.Errorf("scan shard %d replay: %w", shardID, scanErr)
 		}
@@ -1246,7 +1258,32 @@ func (store *EngineStore) RecoverTradingState(
 			)
 		}
 		if receiptKind == "business" {
-			if recordErr := receipts.Record(engine.NewReceipt(input, decision)); recordErr != nil {
+			if storedBusinessHashVersion == nil ||
+				len(storedBusinessHash) != len(engine.Hash{}) {
+				return engine.State{}, fmt.Errorf(
+					"%w: shard %d sequence %d has invalid business hash metadata",
+					ErrCheckpointMismatch,
+					shardID,
+					input.StreamSequence,
+				)
+			}
+			computedBusinessHash, hashErr := engine.BusinessInputHashAtVersion(
+				input,
+				*storedBusinessHashVersion,
+			)
+			if hashErr != nil ||
+				string(storedBusinessHash) != string(computedBusinessHash[:]) {
+				return engine.State{}, fmt.Errorf(
+					"%w: shard %d sequence %d business hash differs",
+					ErrCheckpointMismatch,
+					shardID,
+					input.StreamSequence,
+				)
+			}
+			receipt := engine.NewReceipt(input, decision)
+			receipt.BusinessHashVersion = *storedBusinessHashVersion
+			copy(receipt.BusinessInputHash[:], storedBusinessHash)
+			if recordErr := receipts.Record(receipt); recordErr != nil {
 				return engine.State{}, fmt.Errorf("record replay receipt: %w", recordErr)
 			}
 		}

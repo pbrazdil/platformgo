@@ -156,9 +156,9 @@ func TestMigratorUpgradesDurableExecutionFoundationForwardOnly(t *testing.T) {
 	).Scan(&migrationCount); err != nil {
 		t.Fatalf("count applied migrations: %v", err)
 	}
-	if !faultTableAfter || migrationCount != 7 {
+	if !faultTableAfter || migrationCount != 8 {
 		t.Fatalf(
-			"upgraded schema = fault table %t, migrations %d, want true and 7",
+			"upgraded schema = fault table %t, migrations %d, want true and 8",
 			faultTableAfter,
 			migrationCount,
 		)
@@ -236,10 +236,10 @@ func assertReceiptIdentityConstraints(t *testing.T, pool *pgxpool.Pool) {
 		INSERT INTO engine.input_receipts (
 			shard_id, input_id, stream_sequence, schema_version,
 			input_hash_version, input_hash, business_input_hash,
-			decision_hash_version,
+			business_input_hash_version, decision_hash_version,
 			decision_hash, resulting_state_hash, envelope, decision
 		) VALUES (7, $1, $2, 1, 1, decode(repeat('01', 32), 'hex'),
-		          decode(repeat('04', 32), 'hex'), 2,
+		          decode(repeat('04', 32), 'hex'), 1, 2,
 		          decode(repeat('02', 32), 'hex'), decode(repeat('03', 32), 'hex'),
 		          '{}'::jsonb, '{}'::jsonb)`
 	inputID := "019f9460-4b36-4e9b-8f44-682611f7ee01"
