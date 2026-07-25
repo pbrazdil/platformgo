@@ -1,0 +1,1181 @@
+{
+  "components": {
+    "schemas": {
+      "BalanceView": {
+        "properties": {
+          "currency": {
+            "type": "string"
+          },
+          "equity": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "free": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "locked": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "total": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "currency",
+          "total",
+          "locked",
+          "free",
+          "equity"
+        ],
+        "type": "object"
+      },
+      "BrokerAccountRequest": {
+        "properties": {
+          "baseCurrency": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "userId": {
+            "type": "string"
+          },
+          "venue": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "userId"
+        ],
+        "type": "object"
+      },
+      "BrokerAccountResult": {
+        "properties": {
+          "baseCurrency": {
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "login": {
+            "type": "integer"
+          },
+          "marketVenue": {
+            "type": "string"
+          },
+          "permittedClasses": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "userId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "login",
+          "userId",
+          "baseCurrency",
+          "marketVenue",
+          "permittedClasses",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "BrokerEcho": {
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "BrokerTokenRequest": {
+        "properties": {
+          "ttlSecs": {
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "BrokerTokenResponse": {
+        "properties": {
+          "accessToken": {
+            "type": "string"
+          },
+          "expiresInSecs": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "accessToken",
+          "expiresInSecs"
+        ],
+        "type": "object"
+      },
+      "BrokerUserRequest": {
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "login": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "login",
+          "email"
+        ],
+        "type": "object"
+      },
+      "BrokerUserResult": {
+        "properties": {
+          "created": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created"
+        ],
+        "type": "object"
+      },
+      "Error": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requestId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "FundingView": {
+        "properties": {
+          "amount": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "rate": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "InstrumentView": {
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "makerFee": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "maxLeverage": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "priceIncrement": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "settlementAsset": {
+            "type": "string"
+          },
+          "sizeIncrement": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "takerFee": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "displayName",
+          "settlementAsset",
+          "priceIncrement",
+          "sizeIncrement",
+          "maxLeverage",
+          "makerFee",
+          "takerFee",
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "LoginRequest": {
+        "properties": {
+          "login": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "login",
+          "password"
+        ],
+        "type": "object"
+      },
+      "LoginResponse": {
+        "properties": {
+          "accessToken": {
+            "type": "string"
+          },
+          "refreshToken": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accessToken",
+          "refreshToken"
+        ],
+        "type": "object"
+      },
+      "OrderAccepted": {
+        "properties": {
+          "intentId": {
+            "type": "string"
+          },
+          "orderId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "orderId",
+          "intentId"
+        ],
+        "type": "object"
+      },
+      "OrderView": {
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "filledQuantity": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "intentId": {
+            "type": "string"
+          },
+          "limitPrice": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "orderId": {
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "reduceOnly": {
+            "type": "boolean"
+          },
+          "side": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "timeInForce": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "triggerPrice": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "orderId",
+          "intentId",
+          "symbol",
+          "side",
+          "type",
+          "quantity",
+          "status",
+          "filledQuantity",
+          "reduceOnly",
+          "accountId"
+        ],
+        "type": "object"
+      },
+      "PositionView": {
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "positionId": {
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "side": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "positionId",
+          "symbol",
+          "side",
+          "quantity",
+          "status",
+          "accountId"
+        ],
+        "type": "object"
+      },
+      "RealtimeToken": {
+        "properties": {
+          "channels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "channels"
+        ],
+        "type": "object"
+      },
+      "SubmitOrderRequest": {
+        "properties": {
+          "intentId": {
+            "type": "string"
+          },
+          "maxSlippageBps": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "price": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quantity": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "reduceOnly": {
+            "default": false,
+            "type": "boolean"
+          },
+          "side": {
+            "enum": [
+              "BUY",
+              "SELL"
+            ],
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "timeInForce": {
+            "enum": [
+              "GTC",
+              "IOC",
+              "FOK",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trailingOffset": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "triggerPrice": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "default": "MARKET",
+            "enum": [
+              "MARKET",
+              "LIMIT",
+              "STOP_MARKET",
+              "STOP_LIMIT",
+              "TAKE_PROFIT_MARKET",
+              "TAKE_PROFIT_LIMIT",
+              "TRAILING_STOP_MARKET"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "intentId",
+          "symbol",
+          "side",
+          "quantity"
+        ],
+        "type": "object"
+      },
+      "UserProfile": {
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "login": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "userId",
+          "login",
+          "email",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "title": "uzo Client API",
+    "version": "0.1.0",
+    "x-platform-source-revision": "50141367492be46ebf5623f6191a14b94af2f2bd"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/accounts/{accountId}/balances": {
+      "get": {
+        "operationId": "get_v1_accounts_accountId_balances",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BalanceView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid credentials"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
+          }
+        },
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
+      }
+    },
+    "/v1/accounts/{accountId}/brackets": {
+      "post": {
+        "operationId": "post_v1_accounts_accountId_brackets",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/accounts/{accountId}/fills": {
+      "get": {
+        "operationId": "get_v1_accounts_accountId_fills",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/accounts/{accountId}/funding": {
+      "get": {
+        "operationId": "get_v1_accounts_accountId_funding",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/accounts/{accountId}/margin-config/{symbol}": {
+      "get": {
+        "operationId": "get_v1_accounts_accountId_margin-config_symbol",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "put": {
+        "operationId": "put_v1_accounts_accountId_margin-config_symbol",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/accounts/{accountId}/orders": {
+      "get": {
+        "operationId": "get_v1_accounts_accountId_orders",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/OrderView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid credentials"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
+          }
+        },
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
+      },
+      "post": {
+        "operationId": "post_v1_accounts_accountId_orders",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderAccepted"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid credentials"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Idempotency conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
+          }
+        },
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
+      }
+    },
+    "/v1/accounts/{accountId}/orders/batch": {
+      "post": {
+        "operationId": "post_v1_accounts_accountId_orders_batch",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/accounts/{accountId}/orders/{orderId}": {
+      "delete": {
+        "operationId": "delete_v1_accounts_accountId_orders_orderId",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "patch": {
+        "operationId": "patch_v1_accounts_accountId_orders_orderId",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/accounts/{accountId}/positions": {
+      "get": {
+        "operationId": "get_v1_accounts_accountId_positions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PositionView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid credentials"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
+          }
+        },
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
+      }
+    },
+    "/v1/accounts/{accountId}/positions/close-all": {
+      "post": {
+        "operationId": "post_v1_accounts_accountId_positions_close-all",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/accounts/{accountId}/positions/{symbol}/close": {
+      "post": {
+        "operationId": "post_v1_accounts_accountId_positions_symbol_close",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/accounts/{accountId}/snapshot": {
+      "get": {
+        "operationId": "get_v1_accounts_accountId_snapshot",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/auth/login": {
+      "post": {
+        "operationId": "post_v1_auth_login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid credentials"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
+          }
+        },
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
+      }
+    },
+    "/v1/auth/refresh": {
+      "post": {
+        "operationId": "post_v1_auth_refresh",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/collections": {
+      "get": {
+        "operationId": "get_v1_collections",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/instruments": {
+      "get": {
+        "operationId": "get_v1_instruments",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/InstrumentView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
+          }
+        },
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
+      }
+    },
+    "/v1/leverage-limits/effective": {
+      "get": {
+        "operationId": "get_v1_leverage-limits_effective",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "operationId": "get_v1_me",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserProfile"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid credentials"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
+          }
+        },
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
+      }
+    },
+    "/v1/me/accounts": {
+      "get": {
+        "operationId": "get_v1_me_accounts",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/me/api-keys": {
+      "post": {
+        "operationId": "post_v1_me_api-keys",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/me/logout": {
+      "post": {
+        "operationId": "post_v1_me_logout",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/v1/me/realtime/token": {
+      "post": {
+        "operationId": "post_v1_me_realtime_token",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RealtimeToken"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid credentials"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
+          }
+        },
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
+      }
+    },
+    "/v1/prediction-markets": {
+      "get": {
+        "operationId": "get_v1_prediction-markets",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    }
+  },
+  "x-platformgo-artifact-kind": "pinned-source-route-inventory-with-phase3-accepted-runtime-surface"
+}

@@ -1,0 +1,278 @@
+package edge
+
+import (
+	"context"
+	"errors"
+)
+
+// Audience identifies the externally visible authentication plane.
+type Audience string
+
+const (
+	AudienceClient Audience = "client"
+	AudienceBroker Audience = "broker"
+	AudienceAdmin  Audience = "admin"
+)
+
+var (
+	ErrUnauthorized        = errors.New("unauthorized")
+	ErrForbidden           = errors.New("forbidden")
+	ErrInvalidCredentials  = errors.New("invalid credentials")
+	ErrInvalidRequest      = errors.New("invalid request")
+	ErrNotFound            = errors.New("not found")
+	ErrIdempotencyConflict = errors.New("idempotency key conflicts with another request")
+)
+
+// Principal is the authenticated identity passed to application services.
+type Principal struct {
+	Subject  string
+	Tenant   string
+	Audience Audience
+	Scopes   []string
+	Accounts []string
+}
+
+// HasScope reports whether a principal has a named or wildcard capability.
+func (principal Principal) HasScope(scope string) bool {
+	for _, granted := range principal.Scopes {
+		if granted == "*" || granted == scope {
+			return true
+		}
+	}
+	return false
+}
+
+// OwnsAccount reports whether a client principal may act on an account.
+func (principal Principal) OwnsAccount(accountID string) bool {
+	for _, owned := range principal.Accounts {
+		if owned == "*" || owned == accountID {
+			return true
+		}
+	}
+	return false
+}
+
+// Authenticator verifies credentials without coupling the HTTP edge to their
+// persistence or signing implementation.
+type Authenticator interface {
+	AuthenticateClient(context.Context, string) (Principal, error)
+	AuthenticateBroker(context.Context, string, string) (Principal, error)
+}
+
+// SubmitOrderRequest is the frozen client JSON request shape.
+type SubmitOrderRequest struct {
+	IntentID       string  `json:"intentId"`
+	Symbol         string  `json:"symbol"`
+	Side           string  `json:"side"`
+	Type           string  `json:"type"`
+	Quantity       string  `json:"quantity"`
+	Price          *string `json:"price,omitempty"`
+	TriggerPrice   *string `json:"triggerPrice,omitempty"`
+	TrailingOffset *string `json:"trailingOffset,omitempty"`
+	ReduceOnly     bool    `json:"reduceOnly"`
+	TimeInForce    *string `json:"timeInForce,omitempty"`
+	MaxSlippageBPS *uint32 `json:"maxSlippageBps,omitempty"`
+}
+
+// OrderAccepted is returned after the command is durably admitted.
+type OrderAccepted struct {
+	OrderID  string `json:"orderId"`
+	IntentID string `json:"intentId"`
+}
+
+// StoredResponse is the immutable HTTP response emitted for a durable
+// mutation. Body includes the exact wire bytes, including its final newline.
+type StoredResponse struct {
+	Status  int
+	Headers []byte
+	Body    []byte
+}
+
+// OrderAdmission carries both the typed gRPC result and exact HTTP response.
+type OrderAdmission struct {
+	OrderAccepted
+	Response StoredResponse
+}
+
+// CommandSubmitter owns durable idempotency and command admission.
+type CommandSubmitter interface {
+	SubmitOrder(
+		context.Context,
+		Principal,
+		string,
+		string,
+		SubmitOrderRequest,
+	) (OrderAdmission, error)
+}
+
+// RealtimeToken is the frozen realtime-token response shape.
+type RealtimeToken struct {
+	Token    string   `json:"token"`
+	Channels []string `json:"channels"`
+}
+
+// RealtimeTokenIssuer creates a connection token scoped to one principal.
+type RealtimeTokenIssuer interface {
+	IssueClientToken(context.Context, Principal) (RealtimeToken, error)
+}
+
+// HealthCheck is one runtime dependency readiness probe.
+type HealthCheck struct {
+	Name  string
+	Check func(context.Context) error
+}
+
+// LoginRequest is the frozen client password-login request.
+type LoginRequest struct {
+	Login    string  `json:"login"`
+	Password string  `json:"password"`
+	OTP      *string `json:"otp,omitempty"`
+}
+
+// LoginResponse returns independently rotatable access and refresh tokens.
+type LoginResponse struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+}
+
+// UserProfile is the client-visible identity projection.
+type UserProfile struct {
+	UserID string `json:"userId"`
+	Login  string `json:"login"`
+	Email  string `json:"email"`
+	Status string `json:"status"`
+}
+
+// BrokerUserRequest is the broker identity-convergence request.
+type BrokerUserRequest struct {
+	Login string `json:"login"`
+	Email string `json:"email"`
+}
+
+// BrokerUserResult reports whether this request created the identity.
+type BrokerUserResult struct {
+	ID      string `json:"id"`
+	Created bool   `json:"created"`
+}
+
+// BrokerAccountRequest is the frozen broker provisioning request.
+type BrokerAccountRequest struct {
+	UserID       string  `json:"userId"`
+	BaseCurrency *string `json:"baseCurrency,omitempty"`
+	Venue        *string `json:"venue,omitempty"`
+}
+
+// BrokerAccountResult is the frozen broker-visible account projection.
+type BrokerAccountResult struct {
+	ID               string   `json:"id"`
+	Login            int64    `json:"login"`
+	UserID           string   `json:"userId"`
+	BaseCurrency     string   `json:"baseCurrency"`
+	MarketVenue      string   `json:"marketVenue"`
+	PermittedClasses []string `json:"permittedClasses"`
+	CreatedAt        string   `json:"createdAt"`
+}
+
+// BrokerAccountAdmission carries the typed account and exact HTTP response.
+type BrokerAccountAdmission struct {
+	BrokerAccountResult
+	Response StoredResponse
+}
+
+// BrokerTokenRequest controls the bounded delegated client token lifetime.
+type BrokerTokenRequest struct {
+	TTLSeconds *uint64 `json:"ttlSecs,omitempty"`
+}
+
+// BrokerTokenResponse is a delegated client access token.
+type BrokerTokenResponse struct {
+	AccessToken   string `json:"accessToken"`
+	ExpiresInSecs uint64 `json:"expiresInSecs"`
+}
+
+// IdentityService owns password login, identity reads, and broker delegation.
+type IdentityService interface {
+	Login(context.Context, LoginRequest) (LoginResponse, error)
+	Profile(context.Context, Principal) (UserProfile, error)
+	BrokerEcho(
+		context.Context,
+		Principal,
+		string,
+	) (string, error)
+	CreateBrokerUser(
+		context.Context,
+		Principal,
+		string,
+		BrokerUserRequest,
+	) (BrokerUserResult, error)
+	CreateBrokerAccount(
+		context.Context,
+		Principal,
+		string,
+		BrokerAccountRequest,
+	) (BrokerAccountAdmission, error)
+	MintBrokerToken(
+		context.Context,
+		Principal,
+		string,
+		BrokerTokenRequest,
+	) (BrokerTokenResponse, error)
+}
+
+// InstrumentView is the stable public catalog subset required by the trading
+// transport contract.
+type InstrumentView struct {
+	Symbol          string `json:"symbol"`
+	DisplayName     string `json:"displayName"`
+	SettlementAsset string `json:"settlementAsset"`
+	PriceIncrement  string `json:"priceIncrement"`
+	SizeIncrement   string `json:"sizeIncrement"`
+	MaxLeverage     string `json:"maxLeverage"`
+	MakerFee        string `json:"makerFee"`
+	TakerFee        string `json:"takerFee"`
+	Enabled         bool   `json:"enabled"`
+}
+
+// OrderView is the stable client order projection.
+type OrderView struct {
+	OrderID        string  `json:"orderId"`
+	IntentID       string  `json:"intentId"`
+	Symbol         string  `json:"symbol"`
+	Side           string  `json:"side"`
+	Type           string  `json:"type"`
+	Quantity       string  `json:"quantity"`
+	Status         string  `json:"status"`
+	FilledQuantity string  `json:"filledQuantity"`
+	LimitPrice     *string `json:"limitPrice,omitempty"`
+	TriggerPrice   *string `json:"triggerPrice,omitempty"`
+	TimeInForce    *string `json:"timeInForce,omitempty"`
+	ReduceOnly     bool    `json:"reduceOnly"`
+	AccountID      string  `json:"accountId"`
+}
+
+// PositionView is the stable client position projection subset.
+type PositionView struct {
+	PositionID string `json:"positionId"`
+	Symbol     string `json:"symbol"`
+	Side       string `json:"side"`
+	Quantity   string `json:"quantity"`
+	Status     string `json:"status"`
+	AccountID  string `json:"accountId"`
+}
+
+// BalanceView is the stable exact client balance projection.
+type BalanceView struct {
+	Currency string `json:"currency"`
+	Total    string `json:"total"`
+	Locked   string `json:"locked"`
+	Free     string `json:"free"`
+	Equity   string `json:"equity"`
+}
+
+// TradingReader provides PostgreSQL-backed compatibility projections.
+type TradingReader interface {
+	Instruments(context.Context) ([]InstrumentView, error)
+	Orders(context.Context, string) ([]OrderView, error)
+	Positions(context.Context, string) ([]PositionView, error)
+	Balances(context.Context, string) ([]BalanceView, error)
+}

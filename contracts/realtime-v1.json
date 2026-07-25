@@ -1,0 +1,45 @@
+{
+  "channelPatterns": [
+    "user:{userId}",
+    "tenant:{tenantId}",
+    "acct:{login}:{kind}"
+  ],
+  "connectionTokenClaims": [
+    "sub",
+    "exp",
+    "channels"
+  ],
+  "envelope": {
+    "required": [
+      "type",
+      "accountId",
+      "timestamp",
+      "data",
+      "eventId",
+      "schemaVersion",
+      "sequence"
+    ],
+    "typeValues": [
+      "order.created",
+      "order.updated",
+      "order.cancelled",
+      "order.triggered",
+      "order.filled",
+      "order.partially_filled",
+      "position.opened",
+      "position.updated",
+      "position.closed",
+      "position.liquidated",
+      "position.take_profit.hit",
+      "position.stop_loss.hit",
+      "account.updated",
+      "trade.created"
+    ]
+  },
+  "recovery": {
+    "gapAction": "reload_authoritative_api_snapshot",
+    "duplicates": "deduplicate_by_eventId"
+  },
+  "sourceRevision": "50141367492be46ebf5623f6191a14b94af2f2bd",
+  "version": 1
+}

@@ -40,6 +40,7 @@ func TestJetStreamDuplicatePublishAndCommittedRedelivery(t *testing.T) {
 	if err := platformnats.EnsureStreams(ctx, js, limits); err != nil {
 		t.Fatalf("EnsureStreams: %v", err)
 	}
+	resetEngineShardStream(t, ctx, js, 7)
 	if err := platformnats.EnsureEngineShardStream(ctx, js, 7, limits); err != nil {
 		t.Fatalf("EnsureEngineShardStream: %v", err)
 	}
@@ -148,6 +149,7 @@ func TestEngineInputStreamRejectsNewMessagesAtCapacity(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	resetEngineShardStream(t, ctx, js, 13)
 	if err := platformnats.EnsureEngineShardStream(
 		ctx,
 		js,

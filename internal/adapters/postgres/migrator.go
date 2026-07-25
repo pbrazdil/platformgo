@@ -33,7 +33,45 @@ const (
 	// the platform.
 	MinimumPostgresMajorVersion = 17
 	migrationAdvisoryLockKey    = int64(0x504c4154474f)
+	migrationLockTimeout        = "5s"
 )
+
+const runtimeRoleSafetyPreflight = `
+DO $$
+DECLARE
+    required_role text;
+BEGIN
+    FOREACH required_role IN ARRAY ARRAY[
+        'platformgo_api',
+        'platformgo_engine',
+        'platformgo_outbox',
+        'platformgo_projector'
+    ]
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1
+              FROM pg_roles
+             WHERE rolname = required_role
+               AND NOT rolcanlogin
+               AND NOT rolsuper
+               AND NOT rolcreatedb
+               AND NOT rolcreaterole
+               AND NOT rolreplication
+               AND NOT rolbypassrls
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM pg_auth_members AS membership
+                    WHERE membership.member = pg_roles.oid
+               )
+        ) THEN
+            RAISE EXCEPTION
+                'required pre-provisioned runtime role % is missing or unsafe',
+                required_role
+                USING ERRCODE = '42501';
+        END IF;
+    END LOOP;
+END;
+$$`
 
 var migrationNamePattern = regexp.MustCompile(`^[0-9]{14}_[a-z0-9_]+\.up\.sql$`)
 
@@ -152,6 +190,19 @@ func (migrator *Migrator) Migrate(ctx context.Context) error {
 		}
 	}
 
+	hasPending := false
+	for _, file := range files {
+		if _, ok := applied[file.name]; !ok {
+			hasPending = true
+			break
+		}
+	}
+	if hasPending {
+		if _, err := connection.Exec(ctx, runtimeRoleSafetyPreflight); err != nil {
+			return fmt.Errorf("migrate: runtime role safety preflight: %w", err)
+		}
+	}
+
 	for _, file := range files {
 		if _, ok := applied[file.name]; ok {
 			continue
@@ -159,6 +210,18 @@ func (migrator *Migrator) Migrate(ctx context.Context) error {
 		transaction, err := connection.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("migrate %s: begin: %w", file.name, err)
+		}
+		if _, err := transaction.Exec(
+			ctx,
+			"SELECT set_config('lock_timeout', $1, true)",
+			migrationLockTimeout,
+		); err != nil {
+			_ = transaction.Rollback(ctx)
+			return fmt.Errorf(
+				"migrate %s: configure lock timeout: %w",
+				file.name,
+				err,
+			)
 		}
 		if _, err := transaction.Exec(ctx, string(file.contents)); err != nil {
 			_ = transaction.Rollback(ctx)

@@ -1,0 +1,80 @@
+{
+  "environmentKeys": [
+    "UZO_AUTH_CLIENT_TOKEN_SECRET",
+    "UZO_BROKER_API_KEYS",
+    "UZO_CORS_ALLOWED_ORIGINS",
+    "UZO_DATABASE_URL",
+    "UZO_ENGINE_SHARD_ID",
+    "UZO_HTTP_GRPC_ADDR",
+    "UZO_HTTP_REST_ADDR",
+    "UZO_TRUSTED_PROXY_CIDRS",
+    "UZO_NATS_URL",
+    "UZO_NATS_DUPLICATE_WINDOW_SECS",
+    "UZO_NATS_STREAM_MAX_AGE_SECS",
+    "UZO_NATS_STREAM_MAX_BYTES",
+    "UZO_NATS_STREAM_MAX_MESSAGES",
+    "UZO_NATS_STREAM_MAX_MESSAGE_BYTES",
+    "UZO_NATS_STREAM_REPLICAS",
+    "UZO_REALTIME_API_KEY",
+    "UZO_REALTIME_API_URL",
+    "UZO_REALTIME_TOKEN_SECRET",
+    "UZO_REALTIME_TOKEN_TTL_SECS"
+  ],
+  "intentionalDeviations": [],
+  "implementedHTTPRoutes": [
+    "GET /healthz",
+    "GET /readyz",
+    "GET /v1/openapi.json",
+    "GET /admin/v1/openapi.json",
+    "GET /broker/v1/openapi.json",
+    "POST /v1/auth/login",
+    "GET /v1/me",
+    "GET /v1/instruments",
+    "POST /v1/me/realtime/token",
+    "POST /v1/accounts/{accountId}/orders",
+    "GET /v1/accounts/{accountId}/orders",
+    "GET /v1/accounts/{accountId}/positions",
+    "GET /v1/accounts/{accountId}/balances",
+    "GET /broker/v1/ping",
+    "POST /broker/v1/echo",
+    "POST /broker/v1/users",
+    "POST /broker/v1/users/{userId}/token",
+    "POST /broker/v1/accounts"
+  ],
+  "implementedWorkerHandlers": [
+    "outbox-publisher",
+    "event-consumer",
+    "event-consumer:<pattern>"
+  ],
+  "grpcSurface": {
+    "legacySourceService": false,
+    "status": "additive-versioned-go-contract"
+  },
+  "openAPIArtifacts": {
+    "openapi/admin-v1.json": "615e8a49f9e6a71f6a3ea0108bd71353bd5b7050cc79cee6b17d98af84a6aeb3",
+    "openapi/broker-v1.json": "f8bd15b8c0c9fee3069f779dcbf9ade2cea82e7583804999f6c3e117a91fdac6",
+    "openapi/client-v1.json": "f3a49a95828bc5bbf13bca89c15400007bcaa61141b7eef210510b5e1432423d"
+  },
+  "platformSourceRevision": "50141367492be46ebf5623f6191a14b94af2f2bd",
+  "protobufDescriptor": {
+    "path": "proto/platform/v1/trading.pb",
+    "sha256": "6b8565d9edcc1c9b8a5af36215febb5b8ac39c91d52c99da0d09807fcdd02002"
+  },
+  "realtimeFixture": {
+    "path": "realtime-v1.json",
+    "sha256": "29b9ac4d354ec7d469d9d336a6c0adfd87cc2f73baeca81676006e7643863205"
+  },
+  "sourceWorkerHandlerInventory": [
+    "outbox-publisher",
+    "event-consumer",
+    "marketdata",
+    "cron-scheduler"
+  ],
+  "supportedRoleCommands": [
+    "app serve",
+    "app worker --handlers=<role>",
+    "app migrate",
+    "app doctor",
+    "nautilus"
+  ]
+}

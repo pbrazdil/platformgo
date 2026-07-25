@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -116,6 +117,85 @@ func EnsureEngineShardStream(
 
 func engineShardStreamName(shardID engine.ShardID) string {
 	return fmt.Sprintf("%s_%d", EngineInputsStream, shardID)
+}
+
+// CheckEngineCommandPath verifies the shard stream, durable consumer, explicit
+// capacity policy, and zero unresolved command lag without mutating JetStream.
+func CheckEngineCommandPath(
+	ctx context.Context,
+	js jetstream.JetStream,
+	shardID engine.ShardID,
+	limits StreamLimits,
+) error {
+	if js == nil {
+		return errors.New("check engine command path: JetStream is required")
+	}
+	if limits.Replicas < 1 ||
+		limits.MaxMessages <= 0 ||
+		limits.MaxBytes <= 0 ||
+		limits.MaxMessageBytes <= 0 ||
+		limits.MaxAge <= 0 ||
+		limits.DuplicateWindow <= 0 {
+		return errors.New(
+			"check engine command path: explicit positive limits are required",
+		)
+	}
+	expected := streamConfig(
+		engineShardStreamName(shardID),
+		[]string{fmt.Sprintf("engine.input.%d.>", shardID)},
+		fmt.Sprintf("ordered engine inputs for shard %d", shardID),
+		limits,
+	)
+	stream, err := js.Stream(ctx, expected.Name)
+	if err != nil {
+		return fmt.Errorf("check engine command path stream: %w", err)
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("check engine command path stream info: %w", err)
+	}
+	actual := info.Config
+	if actual.Retention != expected.Retention ||
+		actual.Discard != expected.Discard ||
+		actual.Storage != expected.Storage ||
+		actual.Replicas != expected.Replicas ||
+		actual.MaxMsgs != expected.MaxMsgs ||
+		actual.MaxBytes != expected.MaxBytes ||
+		actual.MaxMsgSize != expected.MaxMsgSize ||
+		actual.MaxAge != expected.MaxAge ||
+		actual.Duplicates != expected.Duplicates ||
+		!slices.Equal(actual.Subjects, expected.Subjects) {
+		return errors.New("check engine command path: stream policy differs")
+	}
+	// The positive-limit validation above makes these conversions exact.
+	if info.State.Bytes >= uint64(expected.MaxBytes) || // #nosec G115
+		info.State.Msgs >= uint64(expected.MaxMsgs) { // #nosec G115
+		return errors.New("check engine command path: stream capacity is exhausted")
+	}
+	consumerName := fmt.Sprintf("platformgo-engine-%d", shardID)
+	consumer, err := stream.Consumer(ctx, consumerName)
+	if err != nil {
+		return fmt.Errorf("check engine command path consumer: %w", err)
+	}
+	consumerInfo, err := consumer.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("check engine command path consumer info: %w", err)
+	}
+	config := consumerInfo.Config
+	if config.AckPolicy != jetstream.AckExplicitPolicy ||
+		config.MaxAckPending != 1 ||
+		config.MaxDeliver != -1 ||
+		config.FilterSubject != fmt.Sprintf("engine.input.%d.>", shardID) {
+		return errors.New("check engine command path: consumer policy differs")
+	}
+	if consumerInfo.NumPending != 0 || consumerInfo.NumAckPending != 0 {
+		return fmt.Errorf(
+			"check engine command path: unresolved lag pending=%d ack_pending=%d",
+			consumerInfo.NumPending,
+			consumerInfo.NumAckPending,
+		)
+	}
+	return nil
 }
 
 func streamConfig(
@@ -257,6 +337,8 @@ type PullConsumer struct {
 	maxWait  time.Duration
 }
 
+const consumerSettlementTimeout = 30 * time.Second
+
 // NewEnginePullConsumer creates or updates one durable consumer for one shard.
 // MaxAckPending=1 makes its live delivery serial and unlimited MaxDeliver
 // prevents automatic poison-message skipping.
@@ -324,8 +406,13 @@ func (consumer *PullConsumer) ProcessOne(
 		if err != nil {
 			return true, err
 		}
-		if err := handler(ctx, inbound); err != nil {
+		settlementContext, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			consumerSettlementTimeout,
+		)
+		if err := handler(settlementContext, inbound); err != nil {
 			nakErr := message.Nak()
+			cancel()
 			if nakErr != nil {
 				return true, errors.Join(
 					fmt.Errorf(
@@ -346,13 +433,15 @@ func (consumer *PullConsumer) ProcessOne(
 				err,
 			)
 		}
-		if err := message.DoubleAck(ctx); err != nil {
+		if err := message.DoubleAck(settlementContext); err != nil {
+			cancel()
 			return true, fmt.Errorf(
 				"ack committed JetStream message %s: %w",
 				inbound.MessageID,
 				err,
 			)
 		}
+		cancel()
 	}
 	if batchErr := batch.Error(); batchErr != nil {
 		return processed, fmt.Errorf("fetch JetStream input batch: %w", batchErr)

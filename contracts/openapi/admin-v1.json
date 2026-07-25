@@ -1,0 +1,1440 @@
+{
+  "components": {
+    "schemas": {
+      "BalanceView": {
+        "properties": {
+          "currency": {
+            "type": "string"
+          },
+          "equity": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "free": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "locked": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "total": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "currency",
+          "total",
+          "locked",
+          "free",
+          "equity"
+        ],
+        "type": "object"
+      },
+      "BrokerAccountRequest": {
+        "properties": {
+          "baseCurrency": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "userId": {
+            "type": "string"
+          },
+          "venue": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "userId"
+        ],
+        "type": "object"
+      },
+      "BrokerAccountResult": {
+        "properties": {
+          "baseCurrency": {
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "login": {
+            "type": "integer"
+          },
+          "marketVenue": {
+            "type": "string"
+          },
+          "permittedClasses": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "userId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "login",
+          "userId",
+          "baseCurrency",
+          "marketVenue",
+          "permittedClasses",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "BrokerEcho": {
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "BrokerTokenRequest": {
+        "properties": {
+          "ttlSecs": {
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "BrokerTokenResponse": {
+        "properties": {
+          "accessToken": {
+            "type": "string"
+          },
+          "expiresInSecs": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "accessToken",
+          "expiresInSecs"
+        ],
+        "type": "object"
+      },
+      "BrokerUserRequest": {
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "login": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "login",
+          "email"
+        ],
+        "type": "object"
+      },
+      "BrokerUserResult": {
+        "properties": {
+          "created": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created"
+        ],
+        "type": "object"
+      },
+      "Error": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requestId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "FundingView": {
+        "properties": {
+          "amount": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "rate": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "InstrumentView": {
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "makerFee": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "maxLeverage": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "priceIncrement": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "settlementAsset": {
+            "type": "string"
+          },
+          "sizeIncrement": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "takerFee": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "displayName",
+          "settlementAsset",
+          "priceIncrement",
+          "sizeIncrement",
+          "maxLeverage",
+          "makerFee",
+          "takerFee",
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "LoginRequest": {
+        "properties": {
+          "login": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "login",
+          "password"
+        ],
+        "type": "object"
+      },
+      "LoginResponse": {
+        "properties": {
+          "accessToken": {
+            "type": "string"
+          },
+          "refreshToken": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accessToken",
+          "refreshToken"
+        ],
+        "type": "object"
+      },
+      "OrderAccepted": {
+        "properties": {
+          "intentId": {
+            "type": "string"
+          },
+          "orderId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "orderId",
+          "intentId"
+        ],
+        "type": "object"
+      },
+      "OrderView": {
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "filledQuantity": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "intentId": {
+            "type": "string"
+          },
+          "limitPrice": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "orderId": {
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "reduceOnly": {
+            "type": "boolean"
+          },
+          "side": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "timeInForce": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "triggerPrice": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "orderId",
+          "intentId",
+          "symbol",
+          "side",
+          "type",
+          "quantity",
+          "status",
+          "filledQuantity",
+          "reduceOnly",
+          "accountId"
+        ],
+        "type": "object"
+      },
+      "PositionView": {
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "positionId": {
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "side": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "positionId",
+          "symbol",
+          "side",
+          "quantity",
+          "status",
+          "accountId"
+        ],
+        "type": "object"
+      },
+      "RealtimeToken": {
+        "properties": {
+          "channels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "channels"
+        ],
+        "type": "object"
+      },
+      "SubmitOrderRequest": {
+        "properties": {
+          "intentId": {
+            "type": "string"
+          },
+          "maxSlippageBps": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "price": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quantity": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "reduceOnly": {
+            "default": false,
+            "type": "boolean"
+          },
+          "side": {
+            "enum": [
+              "BUY",
+              "SELL"
+            ],
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "timeInForce": {
+            "enum": [
+              "GTC",
+              "IOC",
+              "FOK",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trailingOffset": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "triggerPrice": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "default": "MARKET",
+            "enum": [
+              "MARKET",
+              "LIMIT",
+              "STOP_MARKET",
+              "STOP_LIMIT",
+              "TAKE_PROFIT_MARKET",
+              "TAKE_PROFIT_LIMIT",
+              "TRAILING_STOP_MARKET"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "intentId",
+          "symbol",
+          "side",
+          "quantity"
+        ],
+        "type": "object"
+      },
+      "UserProfile": {
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "login": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "userId",
+          "login",
+          "email",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "title": "uzo Admin API",
+    "version": "0.1.0",
+    "x-platform-source-revision": "50141367492be46ebf5623f6191a14b94af2f2bd"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/admin/v1/account-statuses": {
+      "get": {
+        "operationId": "get_admin_v1_account-statuses",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/accounts": {
+      "get": {
+        "operationId": "get_admin_v1_accounts",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "post": {
+        "operationId": "post_admin_v1_accounts",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/accounts/{accountId}": {
+      "get": {
+        "operationId": "get_admin_v1_accounts_accountId",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "patch": {
+        "operationId": "patch_admin_v1_accounts_accountId",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/accounts/{accountId}/balance": {
+      "post": {
+        "operationId": "post_admin_v1_accounts_accountId_balance",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/accounts/{accountId}/balances": {
+      "get": {
+        "operationId": "get_admin_v1_accounts_accountId_balances",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/accounts/{accountId}/fills": {
+      "get": {
+        "operationId": "get_admin_v1_accounts_accountId_fills",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/accounts/{accountId}/flatten": {
+      "post": {
+        "operationId": "post_admin_v1_accounts_accountId_flatten",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/accounts/{accountId}/funding-history": {
+      "get": {
+        "operationId": "get_admin_v1_accounts_accountId_funding-history",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/accounts/{accountId}/leverage": {
+      "post": {
+        "operationId": "post_admin_v1_accounts_accountId_leverage",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/accounts/{accountId}/margin-mode": {
+      "post": {
+        "operationId": "post_admin_v1_accounts_accountId_margin-mode",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/accounts/{accountId}/oms-mode": {
+      "post": {
+        "operationId": "post_admin_v1_accounts_accountId_oms-mode",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/accounts/{accountId}/orders": {
+      "get": {
+        "operationId": "get_admin_v1_accounts_accountId_orders",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/accounts/{accountId}/positions": {
+      "get": {
+        "operationId": "get_admin_v1_accounts_accountId_positions",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/accounts/{accountId}/status": {
+      "post": {
+        "operationId": "post_admin_v1_accounts_accountId_status",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/admins": {
+      "get": {
+        "operationId": "get_admin_v1_admins",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "post": {
+        "operationId": "post_admin_v1_admins",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/admins/{adminId}/roles": {
+      "get": {
+        "operationId": "get_admin_v1_admins_adminId_roles",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "post": {
+        "operationId": "post_admin_v1_admins_adminId_roles",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/admins/{adminId}/roles/{role}": {
+      "delete": {
+        "operationId": "delete_admin_v1_admins_adminId_roles_role",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/admins/{adminId}/status": {
+      "post": {
+        "operationId": "post_admin_v1_admins_adminId_status",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/api-keys": {
+      "get": {
+        "operationId": "get_admin_v1_api-keys",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "post": {
+        "operationId": "post_admin_v1_api-keys",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/api-keys/{id}": {
+      "delete": {
+        "operationId": "delete_admin_v1_api-keys_id",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/auth/login": {
+      "post": {
+        "operationId": "post_admin_v1_auth_login",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/auth/refresh": {
+      "post": {
+        "operationId": "post_admin_v1_auth_refresh",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/auth/step-up": {
+      "post": {
+        "operationId": "post_admin_v1_auth_step-up",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/collections": {
+      "get": {
+        "operationId": "get_admin_v1_collections",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "post": {
+        "operationId": "post_admin_v1_collections",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/collections/reorder": {
+      "put": {
+        "operationId": "put_admin_v1_collections_reorder",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/collections/{id}": {
+      "delete": {
+        "operationId": "delete_admin_v1_collections_id",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "get": {
+        "operationId": "get_admin_v1_collections_id",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "patch": {
+        "operationId": "patch_admin_v1_collections_id",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/collections/{id}/members": {
+      "put": {
+        "operationId": "put_admin_v1_collections_id_members",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/collections/{id}/members/{symbol}": {
+      "delete": {
+        "operationId": "delete_admin_v1_collections_id_members_symbol",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "post": {
+        "operationId": "post_admin_v1_collections_id_members_symbol",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/diagnostics": {
+      "get": {
+        "operationId": "get_admin_v1_diagnostics",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/feeds": {
+      "get": {
+        "operationId": "get_admin_v1_feeds",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "post": {
+        "operationId": "post_admin_v1_feeds",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/feeds/discover": {
+      "get": {
+        "operationId": "get_admin_v1_feeds_discover",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/feeds/health": {
+      "get": {
+        "operationId": "get_admin_v1_feeds_health",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/feeds/import": {
+      "post": {
+        "operationId": "post_admin_v1_feeds_import",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/feeds/protocols": {
+      "get": {
+        "operationId": "get_admin_v1_feeds_protocols",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/fills": {
+      "get": {
+        "operationId": "get_admin_v1_fills",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/funding": {
+      "get": {
+        "operationId": "get_admin_v1_funding",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/instruments": {
+      "get": {
+        "operationId": "get_admin_v1_instruments",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "post": {
+        "operationId": "post_admin_v1_instruments",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/instruments/enabled": {
+      "post": {
+        "operationId": "post_admin_v1_instruments_enabled",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/instruments/trading-mode": {
+      "post": {
+        "operationId": "post_admin_v1_instruments_trading-mode",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/instruments/{symbol}": {
+      "delete": {
+        "operationId": "delete_admin_v1_instruments_symbol",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "get": {
+        "operationId": "get_admin_v1_instruments_symbol",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "patch": {
+        "operationId": "patch_admin_v1_instruments_symbol",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/inventory": {
+      "get": {
+        "operationId": "get_admin_v1_inventory",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/me": {
+      "get": {
+        "operationId": "get_admin_v1_me",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/me/logout": {
+      "post": {
+        "operationId": "post_admin_v1_me_logout",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/me/mfa/confirm": {
+      "post": {
+        "operationId": "post_admin_v1_me_mfa_confirm",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/me/mfa/enroll": {
+      "post": {
+        "operationId": "post_admin_v1_me_mfa_enroll",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/orders": {
+      "get": {
+        "operationId": "get_admin_v1_orders",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/permissions": {
+      "get": {
+        "operationId": "get_admin_v1_permissions",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/positions": {
+      "get": {
+        "operationId": "get_admin_v1_positions",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/risk": {
+      "get": {
+        "operationId": "get_admin_v1_risk",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/roles": {
+      "get": {
+        "operationId": "get_admin_v1_roles",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "post": {
+        "operationId": "post_admin_v1_roles",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/roles/{role}/parents": {
+      "post": {
+        "operationId": "post_admin_v1_roles_role_parents",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/roles/{role}/policies": {
+      "delete": {
+        "operationId": "delete_admin_v1_roles_role_policies",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "get": {
+        "operationId": "get_admin_v1_roles_role_policies",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "post": {
+        "operationId": "post_admin_v1_roles_role_policies",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/sessions/{sessionId}": {
+      "delete": {
+        "operationId": "delete_admin_v1_sessions_sessionId",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/settings": {
+      "get": {
+        "operationId": "get_admin_v1_settings",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/settings/risk/levels": {
+      "put": {
+        "operationId": "put_admin_v1_settings_risk_levels",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/settings/risk/slippage": {
+      "put": {
+        "operationId": "put_admin_v1_settings_risk_slippage",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/settings/risk/trading-mode": {
+      "put": {
+        "operationId": "put_admin_v1_settings_risk_trading-mode",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/tenants": {
+      "get": {
+        "operationId": "get_admin_v1_tenants",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "post": {
+        "operationId": "post_admin_v1_tenants",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/user-statuses": {
+      "get": {
+        "operationId": "get_admin_v1_user-statuses",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/users": {
+      "get": {
+        "operationId": "get_admin_v1_users",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "post": {
+        "operationId": "post_admin_v1_users",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/users/{userId}": {
+      "get": {
+        "operationId": "get_admin_v1_users_userId",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      },
+      "patch": {
+        "operationId": "patch_admin_v1_users_userId",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/users/{userId}/accounts": {
+      "get": {
+        "operationId": "get_admin_v1_users_userId_accounts",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/users/{userId}/password-reset": {
+      "post": {
+        "operationId": "post_admin_v1_users_userId_password-reset",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/users/{userId}/sessions": {
+      "get": {
+        "operationId": "get_admin_v1_users_userId_sessions",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/users/{userId}/status": {
+      "post": {
+        "operationId": "post_admin_v1_users_userId_status",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    },
+    "/admin/v1/users/{userId}/unlock": {
+      "post": {
+        "operationId": "post_admin_v1_users_userId_unlock",
+        "responses": {
+          "default": {
+            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          }
+        },
+        "x-platformgo-contract-status": "source-route-inventory"
+      }
+    }
+  },
+  "x-platformgo-artifact-kind": "pinned-source-route-inventory-with-phase3-accepted-runtime-surface"
+}
