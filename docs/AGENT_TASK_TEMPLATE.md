@@ -27,8 +27,8 @@ Required evidence:
 Success criteria:
 <objective conditions that make the task complete>
 
-Approval boundary:
-<use AGENTS.md; state only a narrower boundary or an additional action requiring approval>
+Authority boundary:
+<use AGENTS.md; state only a narrower boundary or an additional action requiring explicit task authority>
 
 Validation:
 <commands or checks required for this scope>

@@ -4,7 +4,7 @@ This directory contains the governing documents, Codex configuration, custom age
 
 ## Start here
 
-1. `AGENTS.md` — repository-wide execution rules and approval boundary
+1. `AGENTS.md` — repository-wide execution rules and task-authority boundary
 2. `MODEL_POLICY.md` — mandatory `gpt-5.6-sol` configuration and prompting policy
 3. `PROJECT_CHARTER.md`
 4. `ARCHITECTURE.md`
