@@ -20,7 +20,7 @@ ALLOWED_API_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
 ALLOWED_CODEX_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
 ALLOWED_CONTEXTS = {"auto", "all_turns", "current_turn"}
 ALLOWED_VERBOSITY = {"low", "medium", "high"}
-ALLOWED_SANDBOX = {"read-only", "workspace-write", "danger-full-access"}
+ALLOWED_SANDBOX = {"read-only", "danger-full-access"}
 
 EXPECTED_API_PROFILES = {
     "inventory": ("medium", "current_turn", None, "low"),
@@ -31,12 +31,12 @@ EXPECTED_API_PROFILES = {
 
 EXPECTED_CODEX_AGENTS = {
     "determinism_reviewer": ("xhigh", "high", "read-only"),
-    "implementation_worker": ("high", "medium", "workspace-write"),
+    "implementation_worker": ("high", "medium", "danger-full-access"),
     "inventory": ("medium", "low", "read-only"),
     "migration_reviewer": ("xhigh", "high", "read-only"),
     "money_reviewer": ("xhigh", "high", "read-only"),
     "release_reviewer": ("xhigh", "high", "read-only"),
-    "test_porter": ("high", "medium", "workspace-write"),
+    "test_porter": ("high", "medium", "danger-full-access"),
 }
 
 WORD_BUDGETS = {
@@ -119,6 +119,14 @@ def validate_api_policy() -> None:
         if policy.get(key) != expected:
             fail(f"{POLICY_PATH.relative_to(ROOT)}: {key} must be {expected!r}")
 
+    if policy.get("codex_runtime") != {
+        "approval_policy": "never",
+        "default_sandbox_mode": "danger-full-access",
+        "editing_agent_sandbox_mode": "danger-full-access",
+        "read_only_agent_sandbox_mode": "read-only",
+    }:
+        fail("Codex runtime must enforce never approvals and full access for editing agents")
+
     profiles = policy.get("profiles")
     if not isinstance(profiles, dict) or set(profiles) != set(EXPECTED_API_PROFILES):
         fail("Responses API profile set does not match the approved policy")
@@ -192,8 +200,8 @@ def validate_codex_config() -> None:
         "review_model": PINNED_MODEL,
         "model_reasoning_effort": "high",
         "model_verbosity": "medium",
-        "approval_policy": "on-request",
-        "sandbox_mode": "workspace-write",
+        "approval_policy": "never",
+        "sandbox_mode": "danger-full-access",
         "web_search": "cached",
         "personality": "pragmatic",
     }
@@ -333,7 +341,9 @@ def validate_docs() -> None:
             "text.verbosity",
             "reasoning.mode: \"pro\"",
             "Lean prompt policy",
-            "Autonomy and approval boundaries",
+            "Autonomy and authority boundaries",
+            'approval_policy = "never"',
+            '"danger-full-access"',
             "Programmatic Tool Calling",
             "docs/AGENT_TASK_TEMPLATE.md",
             "docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md",
@@ -352,7 +362,7 @@ def validate_docs() -> None:
             "Scope and ownership:",
             "Required evidence:",
             "Success criteria:",
-            "Approval boundary:",
+            "Authority boundary:",
             "Validation:",
             "Deliverables:",
         ],
@@ -385,6 +395,22 @@ def validate_docs() -> None:
     }
     for relative, fragments in required.items():
         require_fragments(ROOT / relative, fragments)
+
+    runtime_policy_docs = [
+        ROOT / "AGENTS.md",
+        ROOT / "MODEL_POLICY.md",
+        ROOT / "README_POLICY_PACK.md",
+        ROOT / "docs" / "AGENT_TASK_TEMPLATE.md",
+        ROOT / "docs" / "AGENT_CRITICAL_REVIEW_TEMPLATE.md",
+    ]
+    for path in runtime_policy_docs:
+        text = path.read_text(encoding="utf-8")
+        for prohibited in ("on-request", "workspace-write"):
+            if prohibited in text:
+                fail(
+                    f"stale restricted runtime policy {prohibited!r} "
+                    f"in {path.relative_to(ROOT)}"
+                )
 
     require_fragments(
         ROOT / "testdata" / "agent-evals" / "README.md",

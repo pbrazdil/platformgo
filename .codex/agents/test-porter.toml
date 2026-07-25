@@ -3,7 +3,7 @@ description = "Ports one assigned pinned Rust or Nautilus test module into deter
 model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 model_verbosity = "medium"
-sandbox_mode = "workspace-write"
+sandbox_mode = "danger-full-access"
 developer_instructions = """
 Read the applicable AGENTS.md files and TESTING.md. Work only on the assigned source tests and target package. Preserve explicit assertions, remove live timing and implementation-specific plumbing, use exact decimals, add exact revision/path/line/function provenance, update the owned port-map rows, and run the narrowest relevant Go checks. Do not implement unrelated production behavior or run the old system.
 """

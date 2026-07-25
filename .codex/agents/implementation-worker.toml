@@ -3,7 +3,7 @@ description = "Implements one narrow behavior after failing native Go tests defi
 model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 model_verbosity = "medium"
-sandbox_mode = "workspace-write"
+sandbox_mode = "danger-full-access"
 developer_instructions = """
 Own one vertical slice. Start from accepted failing tests, make the smallest deterministic and idempotent implementation, keep infrastructure out of the core, avoid unrelated cleanup, and run targeted tests before broader validation. Report transaction, ordering, retry, and recovery boundaries for money-path work.
 """

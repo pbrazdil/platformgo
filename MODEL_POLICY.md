@@ -21,14 +21,14 @@ The project-scoped defaults are in `.codex/config.toml` and load only when the p
 - `model` and `review_model` to `gpt-5.6-sol`;
 - default reasoning effort to `high`;
 - default response verbosity to `medium`;
-- approvals to `on-request`;
-- the sandbox to `workspace-write`;
+- approvals to `never`;
+- the sandbox to `danger-full-access`;
 - every default subagent to `gpt-5.6-sol`.
 
 Every file in `.codex/agents/` repeats the exact model pin because explicit spawn settings otherwise take precedence. Agent roles vary only in reasoning effort, verbosity, and sandbox permissions:
 
 - `inventory`: `medium`, low verbosity, read-only;
-- implementation and test porting: `high`, medium verbosity, workspace-write;
+- implementation and test porting: `high`, medium verbosity, danger-full-access;
 - money, migration, and determinism review: `xhigh`, high verbosity, read-only;
 - release review in Codex: `xhigh`, high verbosity, read-only; `max` is reserved for the Responses API release-gate profile.
 
@@ -64,19 +64,26 @@ State each requirement once. Do not paste repository policies into every assignm
 
 Do not instruct the model to “think harder,” “use pro mode,” “use maximum reasoning,” or reveal private reasoning. Select effort, mode, context, and verbosity in configuration.
 
-## Autonomy and approval boundaries
+## Autonomy and authority boundaries
 
-The single repository-wide action boundary is in `AGENTS.md`:
+The project runtime does not request command or sandbox approvals. Repository
+Codex runs with `approval_policy = "never"` and `sandbox_mode =
+"danger-full-access"`; editing agents inherit full filesystem and command
+access. Read-only inventory and review roles remain intentionally read-only
+because their assigned work must not mutate state.
+
+Full runtime access is not permission to exceed the user's task. The single
+repository-wide authority boundary is in `AGENTS.md`:
 
 - review, explanation, diagnosis, and planning authorize inspection and reporting, not edits;
 - build, fix, change, and port requests authorize in-scope local edits and non-destructive validation;
-- external writes, destructive or costly actions, production operations, secrets, migration-history changes, and material scope expansion require confirmation.
+- external writes, destructive or costly actions, production operations, secrets, migration-history changes, and material scope expansion require explicit task authority.
 
 Task prompts do not repeat or contradict this boundary. They may only narrow it.
 
 ## Tool orchestration
 
-Direct tool calls are the default for coding because each result often changes the next decision, approval must remain visible, and final validation must preserve native artifacts.
+Direct tool calls are the default for coding because each result often changes the next decision, authority and side effects must remain visible, and final validation must preserve native artifacts.
 
 Programmatic Tool Calling is allowed only for a bounded, predictable, non-side-effecting stage such as filtering, joining, ranking, deduplication, aggregation, inventory, or validation. The assignment must name the eligible tools, exact output schema, concurrency and retry limits, stopping condition, and handoff back to direct judgment. Do not use it for edits, approvals, normative conflict resolution, or final validation.
 
