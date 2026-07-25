@@ -42,11 +42,12 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate independent port-ledger acceptance for the source behaviors
   proven by the implementation.
 
-The source ledger contains all 2,748 pinned tests. On current `main`, 41 source
-tests are independently reviewed and green, 2,610 remain explicitly
-unreviewed placeholder ports, and 97 implementation-only tests are reviewed
-and excluded with decision records. Phase 3 ledger acceptance will be proposed
-separately from implementation, as required by repository governance.
+The source ledger contains all 2,748 pinned tests. The current Phase 3
+governance candidate raises independently reviewed green source tests from 41
+to 47; 2,604 remain explicitly unreviewed placeholder ports, and 97
+implementation-only tests are reviewed and excluded with decision records.
+This ledger acceptance is separate from implementation, as required by
+repository governance.
 
 This repository is not yet a production-capable replacement.
 
