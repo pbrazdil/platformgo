@@ -63,11 +63,12 @@ Do not silently resolve a conflict between normative sources. Record it under `p
 
 Changing an accepted economic behavior requires a separate ADR, updated tests, a compatibility impact statement, and owner approval. Governance or invariant changes must not be mixed with the implementation change that benefits from weakening them.
 
-## Autonomy and approval boundary
+## Autonomy and authority boundary
 
 - For review, diagnosis, explanation, or planning: inspect relevant materials and report findings. Do not edit unless the request includes a change.
 - For build, fix, or port requests: make in-scope local changes and run relevant non-destructive checks without asking first.
-- Ask before external writes, production actions, destructive commands, secret access, purchases, force pushes, database resets, migration-history changes, or material scope expansion.
+- Project Codex runs with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"`. Do not request runtime command or sandbox approvals, and do not weaken or override those settings.
+- Full runtime access does not broaden task authority. External writes, production actions, destructive commands, secret access, purchases, force pushes, database resets, migration-history changes, or material scope expansion require explicit user direction or standing authorization in the active task.
 - Do not ask about ordinary implementation details when the tests, invariants, and architecture determine the answer.
 - Stop for a material ambiguity only when choosing incorrectly could alter money, ordering, idempotency, compatibility, security, or irreversible data.
 

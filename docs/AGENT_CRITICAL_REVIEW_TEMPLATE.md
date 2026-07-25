@@ -32,7 +32,7 @@ List findings in severity order. For each finding return:
 
 End with a clear go/no-go recommendation and list any validation that was unavailable.
 
-Approval boundary:
+Authority boundary:
 Read-only. Do not edit files, mutate external systems, or approve a release.
 ```
 

@@ -10,6 +10,12 @@
   "allow_model_fallback": false,
   "fail_on_model_unavailable": true,
   "verify_response_model": true,
+  "codex_runtime": {
+    "approval_policy": "never",
+    "default_sandbox_mode": "danger-full-access",
+    "editing_agent_sandbox_mode": "danger-full-access",
+    "read_only_agent_sandbox_mode": "read-only"
+  },
   "profiles": {
     "inventory": {
       "reasoning": {
