@@ -39,7 +39,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	).MigrateAndProvision(ctx, 9); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -158,9 +158,20 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEnginePullConsumer: %v", err)
 	}
-	processed, err := consumer.ProcessOne(ctx, processor.Handle)
-	if err != nil || !processed {
-		t.Fatalf("ProcessOne = %t, error %v", processed, err)
+	errAckLostAfterCommit := errors.New("injected crash after commit before ack")
+	var firstDelivery platformnats.InboundMessage
+	processed, err := consumer.ProcessOne(
+		ctx,
+		func(ctx context.Context, inbound platformnats.InboundMessage) error {
+			firstDelivery = inbound
+			if err := processor.Handle(ctx, inbound); err != nil {
+				return err
+			}
+			return errAckLostAfterCommit
+		},
+	)
+	if !errors.Is(err, errAckLostAfterCommit) || !processed {
+		t.Fatalf("commit-before-ack ProcessOne = %t, error %v", processed, err)
 	}
 
 	var receiptRows int
@@ -197,31 +208,81 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 		)
 	}
 
+	firstCommittedHash := processor.State().Hash()
+	if err := processor.Close(ctx); err != nil {
+		t.Fatalf("close processor after injected ack loss: %v", err)
+	}
+	restarted, err := platformnats.NewEngineProcessor(ctx, engineStore, 9)
+	if err != nil {
+		t.Fatalf("restart after injected ack loss: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = restarted.Close(context.Background())
+	})
+	var redelivery platformnats.InboundMessage
+	processed, err = consumer.ProcessOne(
+		ctx,
+		func(ctx context.Context, inbound platformnats.InboundMessage) error {
+			redelivery = inbound
+			return restarted.Handle(ctx, inbound)
+		},
+	)
+	if err != nil || !processed {
+		t.Fatalf("redelivered ProcessOne = %t, error %v", processed, err)
+	}
+	if redelivery.StreamSequence != firstDelivery.StreamSequence ||
+		redelivery.NumDelivered < 2 {
+		t.Fatalf(
+			"redelivery = sequence %d deliveries %d, want sequence %d and at least 2",
+			redelivery.StreamSequence,
+			redelivery.NumDelivered,
+			firstDelivery.StreamSequence,
+		)
+	}
+	var duplicateReceiptRows int
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT count(*) FROM engine.duplicate_delivery_receipts",
+	).Scan(&duplicateReceiptRows); err != nil {
+		t.Fatalf("count same-stream duplicate receipts: %v", err)
+	}
+	if duplicateReceiptRows != 0 ||
+		restarted.State().Hash() != firstCommittedHash ||
+		restarted.State().NextStreamSequence() != 2 {
+		t.Fatalf(
+			"same-stream redelivery = duplicates %d hash %s next %d, want 0 %s 2",
+			duplicateReceiptRows,
+			restarted.State().Hash(),
+			restarted.State().NextStreamSequence(),
+			firstCommittedHash,
+		)
+	}
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT count(*) FROM engine.input_receipts",
+	).Scan(&receiptRows); err != nil {
+		t.Fatalf("recount receipts: %v", err)
+	}
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT count(*) FROM trading.instruments",
+	).Scan(&instrumentRows); err != nil {
+		t.Fatalf("recount instruments: %v", err)
+	}
+	if receiptRows != 1 || instrumentRows != 1 {
+		t.Fatalf(
+			"redelivery duplicated effects: receipts %d instruments %d",
+			receiptRows,
+			instrumentRows,
+		)
+	}
+
 	if _, err := platformnats.NewEngineProcessor(
 		ctx,
 		engineStore,
 		9,
 	); !errors.Is(err, platformpostgres.ErrWriterConflict) {
 		t.Fatalf("second active processor error = %v, want ErrWriterConflict", err)
-	}
-	if err := processor.Close(ctx); err != nil {
-		t.Fatalf("close first engine processor: %v", err)
-	}
-	restarted, err := platformnats.NewEngineProcessor(ctx, engineStore, 9)
-	if err != nil {
-		t.Fatalf("restart NewEngineProcessor: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = restarted.Close(context.Background())
-	})
-	if restarted.State().Hash() != processor.State().Hash() ||
-		restarted.State().NextStreamSequence() != 2 {
-		t.Fatalf(
-			"restarted state = hash %s next %d, want %s and 2",
-			restarted.State().Hash(),
-			restarted.State().NextStreamSequence(),
-			processor.State().Hash(),
-		)
 	}
 	if err := restarted.Close(ctx); err != nil {
 		t.Fatalf("close restarted shard 9 processor: %v", err)
@@ -230,7 +291,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	).MigrateAndProvision(ctx, 10); err != nil {
 		t.Fatalf("Migrate duplicate probe: %v", err)
 	}
 
@@ -389,7 +450,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	).MigrateAndProvision(ctx, 11); err != nil {
 		t.Fatalf("Migrate poison probe: %v", err)
 	}
 
@@ -473,7 +534,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	).MigrateAndProvision(ctx, 15); err != nil {
 		t.Fatalf("Migrate subject mismatch probe: %v", err)
 	}
 
@@ -602,13 +663,13 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 
 	for index, poisonKind := range []string{"different", "missing", "malformed"} {
 		resetDurableSchemas(t, ctx, pool)
+		shardID := engine.ShardID(16 + index)
 		if err := platformpostgres.NewMigrator(
 			pool,
 			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-		).Migrate(ctx); err != nil {
+		).MigrateAndProvision(ctx, shardID); err != nil {
 			t.Fatalf("Migrate %s ID poison probe: %v", poisonKind, err)
 		}
-		shardID := engine.ShardID(16 + index)
 		if err := platformnats.EnsureEngineShardStream(
 			ctx,
 			js,
@@ -752,7 +813,7 @@ func TestLaterAccountCommandCannotBypassOrderedPublication(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	).MigrateAndProvision(ctx, 14); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -1000,7 +1061,7 @@ func TestEngineProcessorFailsClosedAfterOwnershipSessionLoss(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	).MigrateAndProvision(ctx, 29); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -1119,7 +1180,7 @@ func TestReconciliationCannotWriteAroundActiveProcessor(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	).MigrateAndProvision(ctx, 30); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -1256,7 +1317,7 @@ func TestAPIOutboxCannotPublishNonCommandEngineInput(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	).MigrateAndProvision(ctx, 23); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	connection, err := gonats.Connect(natsURL)
@@ -1652,13 +1713,13 @@ func TestMalformedTransportInputsRemainDurablyHaltedAfterRestart(t *testing.T) {
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			resetDurableSchemas(t, ctx, pool)
+			shardID := engine.ShardID(40 + index)
 			if err := platformpostgres.NewMigrator(
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-			).Migrate(ctx); err != nil {
+			).MigrateAndProvision(ctx, shardID); err != nil {
 				t.Fatalf("Migrate: %v", err)
 			}
-			shardID := engine.ShardID(40 + index)
 			inputID := engine.IDFromSequence(engine.ID{}, uint64(400+index))
 			message := engine.InputMessage{
 				MessageID:              inputID.String(),

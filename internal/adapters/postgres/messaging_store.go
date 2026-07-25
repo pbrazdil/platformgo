@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -77,6 +78,52 @@ func engineEventAuthorityMatches(
 	}
 	return envelope.MessageID == message.MessageID.String() &&
 		envelope.CorrelationID == *engineInputID
+}
+
+func commandAuthorityMatches(
+	message OutboxMessage,
+	producerClass string,
+	commandID string,
+	accountID string,
+	accountSequence uint64,
+	commandType string,
+	commandSchema uint32,
+	canonicalAction []byte,
+	logicalTime int64,
+) bool {
+	if producerClass != "api" ||
+		commandID != message.MessageID.String() ||
+		commandSchema != message.SchemaVersion {
+		return false
+	}
+	input, action, err := engine.DecodeInputMessage(message.Payload)
+	if err != nil {
+		return false
+	}
+	expectedSubject := fmt.Sprintf(
+		"engine.input.%d.command.v%d",
+		input.ShardID,
+		input.SchemaVersion,
+	)
+	canonicalStored, err := canonicalJSON(canonicalAction)
+	if err != nil {
+		return false
+	}
+	canonicalInput, err := canonicalJSON(input.Payload.Bytes())
+	if err != nil {
+		return false
+	}
+	actionAccountID, scoped := engine.TradingActionAccountID(action)
+	return input.InputID == message.MessageID &&
+		input.Kind == engine.InputKindCommand &&
+		engine.TradingActionAllowedForInputKind(input.Kind, action.Kind) &&
+		input.SchemaVersion == commandSchema &&
+		input.SourceSequence == accountSequence &&
+		int64(input.LogicalTime) == logicalTime &&
+		string(action.Kind) == commandType &&
+		(!scoped || actionAccountID == accountID) &&
+		message.Subject == expectedSubject &&
+		bytes.Equal(canonicalStored, canonicalInput)
 }
 
 func publicationFingerprint(label string, message OutboxMessage) [sha256.Size]byte {
@@ -211,15 +258,28 @@ func (store *MessagingStore) RepublishOutbox(
 	}
 	var message OutboxMessage
 	var messageIDText string
-	var commandMessage bool
 	var producerClass string
+	var commandID string
+	var accountID string
+	var accountSequence uint64
+	var commandType string
+	var commandSchema uint32
+	var canonicalAction []byte
+	var commandLogicalTime int64
 	var engineShardID *int64
 	var engineInputID *string
 	var receiptExists bool
 	if err := store.pool.QueryRow(ctx, `
 		SELECT outbox.message_id::text, outbox.subject,
 		       outbox.schema_version, outbox.payload, outbox.attempts,
-		       command.command_id IS NOT NULL, outbox.producer_class,
+		       outbox.producer_class,
+		       COALESCE(command.command_id::text, ''),
+		       COALESCE(command.account_id, ''),
+		       COALESCE(command.account_sequence, 0),
+		       COALESCE(command.command_type, ''),
+		       COALESCE(command.schema_version, 0),
+		       COALESCE(command.canonical_payload, 'null'::jsonb),
+		       COALESCE(command.logical_time, 0),
 		       outbox.engine_shard_id, outbox.engine_input_id::text,
 		       receipt.input_id IS NOT NULL
 		  FROM messaging.outbox AS outbox
@@ -237,8 +297,14 @@ func (store *MessagingStore) RepublishOutbox(
 		&message.SchemaVersion,
 		&message.Payload,
 		&message.Attempts,
-		&commandMessage,
 		&producerClass,
+		&commandID,
+		&accountID,
+		&accountSequence,
+		&commandType,
+		&commandSchema,
+		&canonicalAction,
+		&commandLogicalTime,
 		&engineShardID,
 		&engineInputID,
 		&receiptExists,
@@ -252,7 +318,17 @@ func (store *MessagingStore) RepublishOutbox(
 		return 0, fmt.Errorf("republish outbox: parse message ID: %w", err)
 	}
 	message.MessageID = parsedID
-	if commandMessage && producerClass == "api" {
+	if commandAuthorityMatches(
+		message,
+		producerClass,
+		commandID,
+		accountID,
+		accountSequence,
+		commandType,
+		commandSchema,
+		canonicalAction,
+		commandLogicalTime,
+	) {
 		message.orderedCommandClaim = commandPublicationFingerprint(message)
 	}
 	if engineEventAuthorityMatches(
@@ -291,7 +367,14 @@ func (store *MessagingStore) claimOutbox(
 	rows, err := tx.Query(ctx, `
 		SELECT outbox.message_id::text, outbox.subject,
 		       outbox.schema_version, outbox.payload, outbox.attempts,
-		       command.command_id IS NOT NULL, outbox.producer_class,
+		       outbox.producer_class,
+		       COALESCE(command.command_id::text, ''),
+		       COALESCE(command.account_id, ''),
+		       COALESCE(command.account_sequence, 0),
+		       COALESCE(command.command_type, ''),
+		       COALESCE(command.schema_version, 0),
+		       COALESCE(command.canonical_payload, 'null'::jsonb),
+		       COALESCE(command.logical_time, 0),
 		       outbox.engine_shard_id, outbox.engine_input_id::text,
 		       receipt.input_id IS NOT NULL
 		  FROM messaging.outbox AS outbox
@@ -308,11 +391,14 @@ func (store *MessagingStore) claimOutbox(
 		       OR NOT EXISTS (
 		           SELECT 1
 		             FROM trading.commands AS prior_command
-		             JOIN messaging.outbox AS prior_outbox
+		             LEFT JOIN messaging.outbox AS prior_outbox
 		               ON prior_outbox.message_id = prior_command.command_id
 		            WHERE prior_command.account_id = command.account_id
 		              AND prior_command.account_sequence < command.account_sequence
-		              AND prior_outbox.published_at IS NULL
+		              AND (
+							prior_outbox.message_id IS NULL
+							OR prior_outbox.published_at IS NULL
+		              )
 		       )
 		   )
 		 ORDER BY outbox.next_attempt_at, outbox.created_at, outbox.message_id
@@ -329,8 +415,14 @@ func (store *MessagingStore) claimOutbox(
 	for rows.Next() {
 		var message OutboxMessage
 		var messageIDText string
-		var commandMessage bool
 		var producerClass string
+		var commandID string
+		var accountID string
+		var accountSequence uint64
+		var commandType string
+		var commandSchema uint32
+		var canonicalAction []byte
+		var commandLogicalTime int64
 		var engineShardID *int64
 		var engineInputID *string
 		var receiptExists bool
@@ -340,8 +432,14 @@ func (store *MessagingStore) claimOutbox(
 			&message.SchemaVersion,
 			&message.Payload,
 			&message.Attempts,
-			&commandMessage,
 			&producerClass,
+			&commandID,
+			&accountID,
+			&accountSequence,
+			&commandType,
+			&commandSchema,
+			&canonicalAction,
+			&commandLogicalTime,
 			&engineShardID,
 			&engineInputID,
 			&receiptExists,
@@ -356,7 +454,17 @@ func (store *MessagingStore) claimOutbox(
 		}
 		message.MessageID = messageID
 		message.Attempts++
-		if commandMessage && producerClass == "api" {
+		if commandAuthorityMatches(
+			message,
+			producerClass,
+			commandID,
+			accountID,
+			accountSequence,
+			commandType,
+			commandSchema,
+			canonicalAction,
+			commandLogicalTime,
+		) {
 			message.orderedCommandClaim = commandPublicationFingerprint(message)
 		}
 		if engineEventAuthorityMatches(

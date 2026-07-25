@@ -118,25 +118,13 @@ func (store *EngineStore) ReconcileShard(
 				min(instrument_id) AS instrument_id,
 				max(instrument_id) AS maximum_instrument_id
 			  FROM trading.fills
-			 WHERE EXISTS (
-				SELECT 1
-				  FROM engine.account_shards AS assignment
-				 WHERE assignment.account_id = fills.account_id
-				   AND assignment.shard_id = $1
-			 )
 			 GROUP BY order_id
 		)
 		SELECT count(*)
 		  FROM trading.orders AS orders
 		  LEFT JOIN fill_totals
 		    ON fill_totals.order_id = orders.order_id
-		 WHERE EXISTS (
-			SELECT 1
-			  FROM engine.account_shards AS assignment
-			 WHERE assignment.account_id = orders.account_id
-			   AND assignment.shard_id = $1
-		 )
-		   AND (
+		 WHERE (
 				orders.filled_quantity <> COALESCE(fill_totals.filled_quantity, 0)
 		    OR (
 				COALESCE(fill_totals.filled_quantity, 0) = 0
@@ -153,7 +141,6 @@ func (store *EngineStore) ReconcileShard(
 			)
 		    OR (orders.status = 'filled') <> (orders.filled_quantity = orders.quantity)
 		   )`,
-		int64(shardID),
 	).Scan(&report.OrderFillMismatchCount); queryErr != nil {
 		return ReconciliationReport{}, fmt.Errorf(
 			"reconcile shard %d orders and fills: %w",
@@ -173,23 +160,11 @@ func (store *EngineStore) ReconcileShard(
 					AS signed_quantity,
 				sum(COALESCE(realized_pnl, 0)) AS realized_pnl
 			  FROM trading.fills
-			 WHERE EXISTS (
-				SELECT 1
-				  FROM engine.account_shards AS assignment
-				 WHERE assignment.account_id = fills.account_id
-				   AND assignment.shard_id = $1
-			 )
 			 GROUP BY position_id
 		),
 		positions AS (
 			SELECT position.*
 			  FROM trading.positions AS position
-			 WHERE EXISTS (
-				SELECT 1
-				  FROM engine.account_shards AS assignment
-				 WHERE assignment.account_id = position.account_id
-				   AND assignment.shard_id = $1
-			 )
 		)
 		SELECT count(*)
 		  FROM fill_totals
@@ -214,7 +189,6 @@ func (store *EngineStore) ReconcileShard(
 				WHEN fill_totals.signed_quantity = 0 THEN 'closed'
 				ELSE 'open'
 			END`,
-		int64(shardID),
 	).Scan(&report.PositionMismatchCount); queryErr != nil {
 		return ReconciliationReport{}, fmt.Errorf(
 			"reconcile shard %d positions: %w",
@@ -253,6 +227,57 @@ func (store *EngineStore) ReconcileShard(
 	report.MarketMismatchCount += projectionMismatches.market
 	report.LedgerMismatchCount += projectionMismatches.ledger
 	report.MessagingMismatchCount += projectionMismatches.messaging
+	var accountAuthorityMismatches uint64
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*)
+			   FROM engine.account_shards AS assignment
+			  WHERE assignment.shard_id <> $1
+			     OR (
+					NOT EXISTS (
+						SELECT 1 FROM trading.accounts AS account
+						 WHERE account.account_id = assignment.account_id
+					)
+					AND NOT EXISTS (
+						SELECT 1 FROM trading.commands AS command
+						 WHERE command.account_id = assignment.account_id
+					)
+			     )
+			)
+			+
+			(SELECT count(*)
+			   FROM (
+					SELECT account_id FROM trading.accounts
+					UNION ALL
+					SELECT account_id FROM trading.commands
+					UNION ALL
+					SELECT account_id FROM trading.risk_configs
+					UNION ALL
+					SELECT account_id FROM trading.orders
+					UNION ALL
+					SELECT account_id FROM trading.fills
+					UNION ALL
+					SELECT account_id FROM trading.positions
+					UNION ALL
+					SELECT account_id FROM trading.funding_settlements
+					UNION ALL
+					SELECT account_id FROM ledger.balances
+			   ) AS fact
+			  WHERE NOT EXISTS (
+					SELECT 1 FROM engine.account_shards AS assignment
+					 WHERE assignment.account_id = fact.account_id
+					   AND assignment.shard_id = $1
+			  )
+			)`,
+		int64(shardID),
+	).Scan(&accountAuthorityMismatches); err != nil {
+		return ReconciliationReport{}, fmt.Errorf(
+			"reconcile shard %d account authority: %w",
+			shardID,
+			err,
+		)
+	}
+	report.ConfigurationMismatchCount += accountAuthorityMismatches
 	var commandInvariantMismatches uint64
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*)
@@ -260,13 +285,7 @@ func (store *EngineStore) ReconcileShard(
 		  LEFT JOIN engine.input_receipts AS receipt
 		    ON receipt.input_id = command.command_id
 		   AND receipt.shard_id = $1
-		 WHERE EXISTS (
-			SELECT 1
-			  FROM engine.account_shards AS assignment
-			 WHERE assignment.account_id = command.account_id
-			   AND assignment.shard_id = $1
-		 )
-		   AND (
+		 WHERE (
 				(
 					command.status = 'pending'
 					AND receipt.input_id IS NOT NULL
@@ -298,12 +317,6 @@ func (store *EngineStore) ReconcileShard(
 		  LEFT JOIN trading.positions AS position
 		    ON position.position_id = protection.position_id
 		 WHERE protection.bracket_leg IS NOT NULL
-		   AND EXISTS (
-			SELECT 1
-			  FROM engine.account_shards AS assignment
-			 WHERE assignment.account_id = protection.account_id
-			   AND assignment.shard_id = $1
-		   )
 		   AND protection.status IN ('held', 'working', 'partially_filled')
 		   AND (
 				protection.position_id IS NULL
@@ -313,7 +326,6 @@ func (store *EngineStore) ReconcileShard(
 				OR position.signed_quantity = 0
 				OR NOT protection.reduce_only
 		   )`,
-		int64(shardID),
 	).Scan(&report.ProtectionMismatchCount); err != nil {
 		return ReconciliationReport{}, fmt.Errorf(
 			"reconcile shard %d position protection: %w",
@@ -341,12 +353,6 @@ func (store *EngineStore) ReconcileShard(
 		actual AS (
 			SELECT input_id, count(*) AS effect_count
 			  FROM trading.funding_settlements AS funding
-			 WHERE EXISTS (
-				SELECT 1
-				  FROM engine.account_shards AS assignment
-				 WHERE assignment.account_id = funding.account_id
-				   AND assignment.shard_id = $1
-			 )
 			 GROUP BY input_id
 		)
 		SELECT count(*)
@@ -416,13 +422,9 @@ func (store *EngineStore) ReconcileShard(
 			  FROM ledger.entries AS entry
 			  JOIN ledger.transactions AS transaction
 			    ON transaction.transaction_id = entry.transaction_id
-			  JOIN engine.input_receipts AS receipt
-			    ON receipt.input_id = transaction.input_id
-			   AND receipt.shard_id = $1
 			 GROUP BY entry.transaction_id, entry.currency
 			HAVING sum(amount) <> 0
 		  ) AS unbalanced`,
-		int64(shardID),
 	).Scan(&report.UnbalancedGroupCount); err != nil {
 		return ReconciliationReport{}, fmt.Errorf(
 			"reconcile shard %d ledger balance: %w",
@@ -434,23 +436,12 @@ func (store *EngineStore) ReconcileShard(
 		WITH ledger_totals AS (
 			SELECT entry.account_id, entry.currency, sum(entry.amount) AS total
 			  FROM ledger.entries AS entry
-			 WHERE EXISTS (
-				SELECT 1
-				  FROM engine.account_shards AS assignment
-				 WHERE assignment.account_id = entry.account_id
-				   AND assignment.shard_id = $1
-			 )
+			 WHERE entry.account_id <> 'system:clearing'
 			 GROUP BY entry.account_id, entry.currency
 		),
 		shard_balances AS (
 			SELECT balance.*
 			  FROM ledger.balances AS balance
-			 WHERE EXISTS (
-				SELECT 1
-				  FROM engine.account_shards AS assignment
-				 WHERE assignment.account_id = balance.account_id
-				   AND assignment.shard_id = $1
-			 )
 		),
 		mismatches AS (
 			SELECT
@@ -463,7 +454,6 @@ func (store *EngineStore) ReconcileShard(
 			 WHERE COALESCE(ledger_totals.total, 0) <> COALESCE(balances.total, 0)
 		)
 		SELECT count(*) FROM mismatches`,
-		int64(shardID),
 	).Scan(&balanceFoldMismatches); err != nil {
 		return ReconciliationReport{}, fmt.Errorf(
 			"reconcile shard %d balance projection: %w",
@@ -475,25 +465,7 @@ func (store *EngineStore) ReconcileShard(
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*)
 		  FROM messaging.outbox AS outbox
-		 WHERE outbox.published_at IS NULL
-		   AND (
-				EXISTS (
-					SELECT 1
-					  FROM trading.commands AS command
-					  JOIN engine.account_shards AS assignment
-					    ON assignment.account_id = command.account_id
-					 WHERE command.command_id = outbox.message_id
-					   AND assignment.shard_id = $1
-				)
-				OR EXISTS (
-					SELECT 1
-					  FROM engine.input_receipts AS receipt
-					 WHERE receipt.shard_id = $1
-					   AND receipt.input_id::text =
-					       outbox.payload ->> 'correlationId'
-				)
-		   )`,
-		int64(shardID),
+		 WHERE outbox.published_at IS NULL`,
 	).Scan(&report.PendingOutboxMessages); err != nil &&
 		!errors.Is(err, pgx.ErrNoRows) {
 		return ReconciliationReport{}, fmt.Errorf(
@@ -585,7 +557,7 @@ func compareRecoveredPositions(
 	ctx context.Context,
 	tx pgx.Tx,
 	recovered engine.State,
-	shardID engine.ShardID,
+	_ engine.ShardID,
 ) (uint64, error) {
 	expected := make(map[string]engine.PositionSnapshot)
 	for _, position := range recovered.Positions() {
@@ -606,15 +578,7 @@ func compareRecoveredPositions(
 			trim_scale(isolated_collateral)::text,
 			version
 		  FROM trading.positions
-		 WHERE EXISTS (
-			SELECT 1
-			  FROM engine.account_shards AS assignment
-			 WHERE assignment.account_id = trading.positions.account_id
-			   AND assignment.shard_id = $1
-		 )
-		 ORDER BY position_id`,
-		int64(shardID),
-	)
+		 ORDER BY position_id`)
 	if err != nil {
 		return 0, err
 	}

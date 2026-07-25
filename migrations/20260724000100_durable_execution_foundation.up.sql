@@ -473,7 +473,7 @@ REVOKE ALL ON ALL TABLES IN SCHEMA engine, trading, ledger, market, messaging
 
 GRANT USAGE ON SCHEMA engine, trading, ledger, market, messaging
     TO platformgo_api;
-GRANT SELECT, INSERT ON engine.deployment_shard TO platformgo_api;
+GRANT SELECT ON engine.deployment_shard TO platformgo_api;
 GRANT SELECT, INSERT ON engine.account_shards TO platformgo_api;
 GRANT SELECT, INSERT ON trading.idempotency_records TO platformgo_api;
 GRANT UPDATE (
@@ -512,7 +512,7 @@ GRANT SELECT, INSERT ON
     engine.duplicate_delivery_receipts
 TO platformgo_engine;
 GRANT SELECT ON engine.account_shards TO platformgo_engine;
-GRANT SELECT, INSERT ON engine.deployment_shard TO platformgo_engine;
+GRANT SELECT ON engine.deployment_shard TO platformgo_engine;
 GRANT SELECT, INSERT ON engine.shard_ownership_epochs TO platformgo_engine;
 GRANT UPDATE (
     epoch,
@@ -539,8 +539,21 @@ GRANT SELECT, INSERT, UPDATE ON ledger.balances, market.books
     TO platformgo_engine;
 GRANT SELECT, INSERT ON messaging.outbox TO platformgo_engine;
 
-GRANT USAGE ON SCHEMA messaging TO platformgo_outbox;
+GRANT USAGE ON SCHEMA messaging, trading, engine TO platformgo_outbox;
 GRANT SELECT ON messaging.outbox TO platformgo_outbox;
+GRANT SELECT (
+    command_id,
+    account_id,
+    account_sequence,
+    command_type,
+    schema_version,
+    canonical_payload,
+    logical_time
+) ON trading.commands TO platformgo_outbox;
+GRANT SELECT (
+    shard_id,
+    input_id
+) ON engine.input_receipts TO platformgo_outbox;
 GRANT UPDATE (
     attempts,
     next_attempt_at,

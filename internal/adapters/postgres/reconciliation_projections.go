@@ -64,6 +64,8 @@ type durableDomainEvent struct {
 	SchemaVersion uint32
 	Payload       []byte
 	ProducerClass string
+	EngineShardID int64
+	EngineInputID string
 }
 
 type durableCommand struct {
@@ -80,6 +82,8 @@ type durableCommand struct {
 	OutboxSchema    uint32
 	OutboxPayload   []byte
 	OutboxProducer  string
+	OutboxShardID   int64
+	OutboxInputID   string
 }
 
 type expectedProjections struct {
@@ -294,6 +298,8 @@ func loadExpectedProjections(
 				SchemaVersion: engine.CurrentSchemaVersion,
 				Payload:       payload,
 				ProducerClass: "engine",
+				EngineShardID: int64(input.ShardID),
+				EngineInputID: input.InputID.String(),
 			}
 		}
 		if input.Kind == engine.InputKindCommand {
@@ -324,6 +330,7 @@ func loadExpectedProjections(
 				OutboxSchema:   input.SchemaVersion,
 				OutboxPayload:  outboxPayload,
 				OutboxProducer: "api",
+				OutboxShardID:  -1,
 			}
 		}
 	}
@@ -385,16 +392,12 @@ func compareInstruments(
 func compareAccounts(
 	ctx context.Context,
 	tx pgx.Tx,
-	shardID engine.ShardID,
+	_ engine.ShardID,
 	expected map[string]versionedAccount,
 ) (uint64, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT account.account_id, account.oms_mode, account.version
-		  FROM trading.accounts AS account
-		  JOIN engine.account_shards AS assignment USING (account_id)
-		 WHERE assignment.shard_id = $1`,
-		int64(shardID),
-	)
+		  FROM trading.accounts AS account`)
 	if err != nil {
 		return 0, err
 	}
@@ -422,17 +425,13 @@ func compareAccounts(
 func compareRisks(
 	ctx context.Context,
 	tx pgx.Tx,
-	shardID engine.ShardID,
+	_ engine.ShardID,
 	expected map[string]versionedRisk,
 ) (uint64, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT risk.account_id, risk.instrument_id, risk.margin_mode,
 		       trim_scale(risk.leverage)::text, risk.version
-		  FROM trading.risk_configs AS risk
-		  JOIN engine.account_shards AS assignment USING (account_id)
-		 WHERE assignment.shard_id = $1`,
-		int64(shardID),
-	)
+		  FROM trading.risk_configs AS risk`)
 	if err != nil {
 		return 0, err
 	}
@@ -462,7 +461,7 @@ func compareRisks(
 func compareBalances(
 	ctx context.Context,
 	tx pgx.Tx,
-	shardID engine.ShardID,
+	_ engine.ShardID,
 	expected map[string]sequencedBalance,
 ) (uint64, error) {
 	rows, err := tx.Query(ctx, `
@@ -472,11 +471,7 @@ func compareBalances(
 		       trim_scale(balance.free)::text,
 		       trim_scale(balance.equity)::text,
 		       balance.ledger_sequence
-		  FROM ledger.balances AS balance
-		  JOIN engine.account_shards AS assignment USING (account_id)
-		 WHERE assignment.shard_id = $1`,
-		int64(shardID),
-	)
+		  FROM ledger.balances AS balance`)
 	if err != nil {
 		return 0, err
 	}
@@ -552,7 +547,7 @@ func compareBooks(
 func compareOrders(
 	ctx context.Context,
 	tx pgx.Tx,
-	shardID engine.ShardID,
+	_ engine.ShardID,
 	expected map[string]engine.OrderSnapshot,
 ) (uint64, error) {
 	rows, err := tx.Query(ctx, `
@@ -576,11 +571,7 @@ func compareOrders(
 		       max_slippage_bps,
 		       COALESCE(trim_scale(slippage_reference)::text, ''),
 		       COALESCE(reject_reason, ''), version
-		  FROM trading.orders AS orders
-		  JOIN engine.account_shards AS assignment USING (account_id)
-		 WHERE assignment.shard_id = $1`,
-		int64(shardID),
-	)
+		  FROM trading.orders AS orders`)
 	if err != nil {
 		return 0, err
 	}
@@ -641,7 +632,7 @@ func compareOrders(
 func compareFills(
 	ctx context.Context,
 	tx pgx.Tx,
-	shardID engine.ShardID,
+	_ engine.ShardID,
 	expected map[string]inputFill,
 ) (uint64, error) {
 	rows, err := tx.Query(ctx, `
@@ -654,11 +645,7 @@ func compareFills(
 		       COALESCE(trim_scale(fee)::text, ''),
 		       COALESCE(fee_currency, ''),
 		       logical_time
-		  FROM trading.fills AS fills
-		  JOIN engine.account_shards AS assignment USING (account_id)
-		 WHERE assignment.shard_id = $1`,
-		int64(shardID),
-	)
+		  FROM trading.fills AS fills`)
 	if err != nil {
 		return 0, err
 	}
@@ -713,7 +700,7 @@ func compareFills(
 func comparePositions(
 	ctx context.Context,
 	tx pgx.Tx,
-	shardID engine.ShardID,
+	_ engine.ShardID,
 	expected map[string]engine.PositionSnapshot,
 ) (uint64, error) {
 	rows, err := tx.Query(ctx, `
@@ -722,11 +709,7 @@ func comparePositions(
 		       trim_scale(average_open_price)::text,
 		       trim_scale(realized_pnl)::text, settlement_currency,
 		       margin_mode, trim_scale(isolated_collateral)::text, version
-		  FROM trading.positions AS position
-		  JOIN engine.account_shards AS assignment USING (account_id)
-		 WHERE assignment.shard_id = $1`,
-		int64(shardID),
-	)
+		  FROM trading.positions AS position`)
 	if err != nil {
 		return 0, err
 	}
@@ -778,14 +761,17 @@ func compareCommands(
 		       COALESCE(outbox.subject, ''),
 		       COALESCE(outbox.schema_version, 0),
 		       COALESCE(outbox.payload, 'null'::jsonb),
-		       COALESCE(outbox.producer_class, '')
+		       COALESCE(outbox.producer_class, ''),
+		       COALESCE(outbox.engine_shard_id, -1),
+		       COALESCE(outbox.engine_input_id::text, ''),
+		       assignment.shard_id,
+		       idempotency.state
 		  FROM trading.commands AS command
-		  JOIN engine.account_shards AS assignment USING (account_id)
+		  LEFT JOIN engine.account_shards AS assignment USING (account_id)
 		  LEFT JOIN messaging.outbox AS outbox
 		    ON outbox.message_id = command.command_id
-		 WHERE assignment.shard_id = $1`,
-		int64(shardID),
-	)
+		  LEFT JOIN trading.idempotency_records AS idempotency
+		    ON idempotency.command_id = command.command_id`)
 	if err != nil {
 		return 0, err
 	}
@@ -795,6 +781,8 @@ func compareCommands(
 		var actual durableCommand
 		var commandID string
 		var logicalTime int64
+		var assignmentShard *int64
+		var idempotencyState *string
 		if scanErr := rows.Scan(
 			&commandID,
 			&actual.AccountID,
@@ -809,6 +797,10 @@ func compareCommands(
 			&actual.OutboxSchema,
 			&actual.OutboxPayload,
 			&actual.OutboxProducer,
+			&actual.OutboxShardID,
+			&actual.OutboxInputID,
+			&assignmentShard,
+			&idempotencyState,
 		); scanErr != nil {
 			return 0, scanErr
 		}
@@ -830,7 +822,12 @@ func compareCommands(
 		}
 		want, found := expected[commandID]
 		if !found {
-			if actual.Status != "pending" {
+			if !pendingCommandProjectionMatches(
+				actual,
+				shardID,
+				assignmentShard,
+				idempotencyState,
+			) {
 				mismatches++
 			}
 			continue
@@ -858,10 +855,55 @@ func compareCommands(
 	return mismatches + uint64(len(expected)), rows.Err()
 }
 
+func pendingCommandProjectionMatches(
+	command durableCommand,
+	shardID engine.ShardID,
+	assignmentShard *int64,
+	idempotencyState *string,
+) bool {
+	if command.Status != "pending" ||
+		assignmentShard == nil ||
+		*assignmentShard != int64(shardID) ||
+		idempotencyState == nil ||
+		*idempotencyState != string(IdempotencyInProgress) ||
+		command.OutboxProducer != "api" ||
+		command.OutboxSchema == 0 ||
+		command.OutboxShardID != -1 ||
+		command.OutboxInputID != "" {
+		return false
+	}
+	input, action, err := engine.DecodeInputMessage(command.OutboxPayload)
+	if err != nil {
+		return false
+	}
+	expectedSubject := fmt.Sprintf(
+		"engine.input.%d.command.v%d",
+		input.ShardID,
+		input.SchemaVersion,
+	)
+	canonicalInput, err := canonicalJSON(input.Payload.Bytes())
+	if err != nil {
+		return false
+	}
+	actionAccountID, scoped := engine.TradingActionAccountID(action)
+	return input.InputID == command.CommandID &&
+		input.Kind == engine.InputKindCommand &&
+		engine.TradingActionAllowedForInputKind(input.Kind, action.Kind) &&
+		input.ShardID == shardID &&
+		input.SchemaVersion == command.SchemaVersion &&
+		input.SourceSequence == command.AccountSequence &&
+		input.LogicalTime == command.LogicalTime &&
+		string(action.Kind) == command.CommandType &&
+		(!scoped || actionAccountID == command.AccountID) &&
+		command.OutboxSubject == expectedSubject &&
+		command.OutboxSchema == input.SchemaVersion &&
+		bytes.Equal(command.CanonicalAction, canonicalInput)
+}
+
 func compareFunding(
 	ctx context.Context,
 	tx pgx.Tx,
-	shardID engine.ShardID,
+	_ engine.ShardID,
 	expected map[string]inputFunding,
 ) (uint64, error) {
 	rows, err := tx.Query(ctx, `
@@ -870,11 +912,7 @@ func compareFunding(
 		       trim_scale(signed_quantity)::text,
 		       trim_scale(oracle_price)::text, trim_scale(rate)::text,
 		       trim_scale(amount)::text, settlement_currency
-		  FROM trading.funding_settlements AS funding
-		  JOIN engine.account_shards AS assignment USING (account_id)
-		 WHERE assignment.shard_id = $1`,
-		int64(shardID),
-	)
+		  FROM trading.funding_settlements AS funding`)
 	if err != nil {
 		return 0, err
 	}
@@ -922,26 +960,13 @@ func compareFunding(
 func compareLedger(
 	ctx context.Context,
 	tx pgx.Tx,
-	shardID engine.ShardID,
+	_ engine.ShardID,
 	expected map[string]engine.LedgerTransactionSnapshot,
 ) (uint64, error) {
 	var transactionCount uint64
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*)
-		  FROM ledger.transactions AS transaction
-		  LEFT JOIN engine.input_receipts AS receipt
-		    ON receipt.input_id = transaction.input_id
-		   AND receipt.shard_id = $1
-		 WHERE receipt.input_id IS NOT NULL
-		    OR EXISTS (
-				SELECT 1
-				  FROM ledger.entries AS scoped_entry
-				  JOIN engine.account_shards AS assignment
-				    ON assignment.account_id = scoped_entry.account_id
-				 WHERE scoped_entry.transaction_id = transaction.transaction_id
-				   AND assignment.shard_id = $1
-		    )`,
-		int64(shardID),
+		  FROM ledger.transactions`,
 	).Scan(&transactionCount); err != nil {
 		return 0, err
 	}
@@ -952,23 +977,9 @@ func compareLedger(
 		       entry.entry_id::text, entry.account_id, entry.currency,
 		       trim_scale(entry.amount)::text
 		  FROM ledger.transactions AS transaction
-		  LEFT JOIN engine.input_receipts AS receipt
-		    ON receipt.input_id = transaction.input_id
-		   AND receipt.shard_id = $1
 		  JOIN ledger.entries AS entry
 		    ON entry.transaction_id = transaction.transaction_id
-		 WHERE receipt.input_id IS NOT NULL
-		    OR EXISTS (
-				SELECT 1
-				  FROM ledger.entries AS scoped_entry
-				  JOIN engine.account_shards AS assignment
-				    ON assignment.account_id = scoped_entry.account_id
-				 WHERE scoped_entry.transaction_id = transaction.transaction_id
-				   AND assignment.shard_id = $1
-		    )
-		 ORDER BY transaction.transaction_id, entry.entry_id`,
-		int64(shardID),
-	)
+		 ORDER BY transaction.transaction_id, entry.entry_id`)
 	if err != nil {
 		return 0, err
 	}
@@ -1038,7 +1049,9 @@ func compareDomainEvents(
 ) (uint64, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT outbox.message_id::text, outbox.subject,
-		       outbox.schema_version, outbox.payload, outbox.producer_class
+		       outbox.schema_version, outbox.payload, outbox.producer_class,
+		       COALESCE(outbox.engine_shard_id, -1),
+		       COALESCE(outbox.engine_input_id::text, '')
 		  FROM messaging.outbox AS outbox
 		 WHERE outbox.subject LIKE 'domain.v1.%'
 		   AND (
@@ -1064,6 +1077,8 @@ func compareDomainEvents(
 			&actual.SchemaVersion,
 			&actual.Payload,
 			&actual.ProducerClass,
+			&actual.EngineShardID,
+			&actual.EngineInputID,
 		); scanErr != nil {
 			return 0, scanErr
 		}

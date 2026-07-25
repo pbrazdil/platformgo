@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -25,7 +26,7 @@ func TestEngineStoreCommitsReceiptLedgerStateAndCheckpointAtomically(t *testing.
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
-	if err := migrator.Migrate(context.Background()); err != nil {
+	if err := migrator.MigrateAndProvision(context.Background(), 7); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -297,7 +298,7 @@ func TestEngineStorePersistsOrdersFillsPositionsAndEvents(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
+	).MigrateAndProvision(context.Background(), 8); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	store := platformpostgres.NewEngineStore(pool)
@@ -692,6 +693,43 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 			},
 		},
 		{
+			name: "unmapped ledger and balance",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				_, err := pool.Exec(context.Background(), `
+					INSERT INTO ledger.transactions (
+						transaction_id, business_key, input_id, logical_time
+					) VALUES (
+						'019f9460-4b36-4e9b-8f44-682611f78901',
+						'orphan-ledger',
+						'019f9460-4b36-4e9b-8f44-682611f78902',
+						1784894400000000000
+					);
+					INSERT INTO ledger.entries (
+						entry_id, transaction_id, account_id, currency, amount
+					) VALUES
+						(
+							'019f9460-4b36-4e9b-8f44-682611f78903',
+							'019f9460-4b36-4e9b-8f44-682611f78901',
+							'orphan-account', 'USDC', 10
+						),
+						(
+							'019f9460-4b36-4e9b-8f44-682611f78904',
+							'019f9460-4b36-4e9b-8f44-682611f78901',
+							'system:clearing', 'USDC', -10
+						);
+					INSERT INTO ledger.balances (
+						account_id, currency, total, used, free, equity,
+						ledger_sequence
+					) VALUES ('orphan-account', 'USDC', 10, 0, 10, 10, 99)`)
+				if err != nil {
+					t.Fatalf("insert unmapped ledger and balance: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.LedgerMismatchCount
+			},
+		},
+		{
 			name: "domain event payload",
 			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
 				_, err := pool.Exec(context.Background(), `
@@ -708,6 +746,35 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 				)
 				if err != nil {
 					t.Fatalf("corrupt domain event payload: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.MessagingMismatchCount
+			},
+		},
+		{
+			name: "domain event receipt binding",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				_, err := pool.Exec(context.Background(), `
+					UPDATE messaging.outbox AS outbox
+					   SET engine_input_id = (
+							SELECT receipt.input_id
+							  FROM engine.input_receipts AS receipt
+							 WHERE receipt.shard_id = outbox.engine_shard_id
+							   AND receipt.input_id <> outbox.engine_input_id
+							 ORDER BY receipt.stream_sequence
+							 LIMIT 1
+					   )
+					 WHERE outbox.subject LIKE 'domain.v1.%'
+					   AND outbox.message_id = (
+							SELECT message_id
+							  FROM messaging.outbox
+							 WHERE subject LIKE 'domain.v1.%'
+							 ORDER BY message_id
+							 LIMIT 1
+					   )`)
+				if err != nil {
+					t.Fatalf("rebind domain event receipt: %v", err)
 				}
 			},
 			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
@@ -906,6 +973,171 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 	}
 }
 
+func TestReconcileShardRejectsCorruptPendingCommandJournal(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(context.Context, *pgxpool.Pool, engine.ID) error
+	}{
+		{
+			name: "missing outbox",
+			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
+				_, err := pool.Exec(
+					ctx,
+					"DELETE FROM messaging.outbox WHERE message_id = $1",
+					id.String(),
+				)
+				return err
+			},
+		},
+		{
+			name: "changed canonical envelope",
+			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
+				_, err := pool.Exec(ctx, `
+					UPDATE messaging.outbox
+					   SET payload = jsonb_set(payload, '{sourceSequence}', '2')
+					 WHERE message_id = $1`,
+					id.String(),
+				)
+				return err
+			},
+		},
+		{
+			name: "changed subject",
+			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
+				_, err := pool.Exec(ctx, `
+					UPDATE messaging.outbox
+					   SET subject = 'engine.input.8.command.v2'
+					 WHERE message_id = $1`,
+					id.String(),
+				)
+				return err
+			},
+		},
+		{
+			name: "changed schema",
+			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
+				_, err := pool.Exec(ctx, `
+					UPDATE messaging.outbox
+					   SET schema_version = schema_version + 1
+					 WHERE message_id = $1`,
+					id.String(),
+				)
+				return err
+			},
+		},
+		{
+			name: "missing idempotency",
+			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
+				_, err := pool.Exec(
+					ctx,
+					"DELETE FROM trading.idempotency_records WHERE command_id = $1",
+					id.String(),
+				)
+				return err
+			},
+		},
+		{
+			name: "changed command payload",
+			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
+				_, err := pool.Exec(ctx, `
+					UPDATE trading.commands
+					   SET canonical_payload = '{}'::jsonb
+					 WHERE command_id = $1`,
+					id.String(),
+				)
+				return err
+			},
+		},
+	}
+
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := postgresPool(t)
+			fixture := seedReconciliationFixture(t, pool, 8)
+			commandID := engine.IDFromSequence(engine.ID{}, uint64(8900+index))
+			action := engine.TradingAction{
+				Kind: engine.TradingActionConfigureAccount,
+				ConfigureAccount: &engine.ConfigureAccount{
+					AccountID: "pending-account",
+					OmsMode:   engine.OmsModeNetting,
+				},
+			}
+			payload, err := engine.EncodeTradingAction(action)
+			if err != nil {
+				t.Fatalf("EncodeTradingAction: %v", err)
+			}
+			logicalTime := time.Date(
+				2026,
+				time.July,
+				24,
+				16,
+				0,
+				0,
+				index,
+				time.UTC,
+			)
+			input := engine.InputEnvelope{
+				InputID:              commandID,
+				SchemaVersion:        engine.CurrentSchemaVersion,
+				ShardID:              8,
+				Kind:                 engine.InputKindCommand,
+				SourceID:             "command-journal",
+				SourceSequence:       1,
+				LogicalTime:          engine.NewLogicalTime(logicalTime),
+				ConfigurationVersion: 1,
+				InstrumentVersion:    1,
+				Payload:              payload,
+			}
+			outboxPayload, err := engine.EncodeInputMessage(input)
+			if err != nil {
+				t.Fatalf("EncodeInputMessage: %v", err)
+			}
+			if _, err := platformpostgres.NewCommandJournal(pool).Begin(
+				ctx,
+				platformpostgres.BeginCommandRequest{
+					Scope:            "account:pending-account",
+					IdempotencyKey:   fmt.Sprintf("pending-%d", index),
+					RequestHash:      sha256.Sum256(outboxPayload),
+					CommandID:        commandID,
+					AccountID:        "pending-account",
+					AccountSequence:  1,
+					CommandType:      string(action.Kind),
+					SchemaVersion:    engine.CurrentSchemaVersion,
+					CanonicalPayload: payload.Bytes(),
+					OutboxSubject:    "engine.input.8.command.v1",
+					OutboxPayload:    outboxPayload,
+					LogicalTime:      logicalTime,
+					ExpiresAt:        logicalTime.Add(24 * time.Hour),
+				},
+			); err != nil {
+				t.Fatalf("Begin pending command: %v", err)
+			}
+			if report, err := fixture.store.ReconcileShard(ctx, 8); err != nil ||
+				!report.Ready {
+				t.Fatalf("valid pending journal reconciliation = %+v, error %v", report, err)
+			}
+			if err := test.mutate(ctx, pool, commandID); err != nil {
+				t.Fatalf("mutate pending command journal: %v", err)
+			}
+			report, err := fixture.store.ReconcileShard(ctx, 8)
+			if !errors.Is(err, platformpostgres.ErrReconciliationMismatch) ||
+				report.Ready ||
+				report.CommandMismatchCount == 0 {
+				t.Fatalf("corrupt pending journal reconciliation = %+v, error %v", report, err)
+			}
+			assertRowCount(t, pool, "engine.shard_faults", 1)
+			recovered, err := fixture.store.RecoverTradingState(ctx, 8)
+			if err != nil {
+				t.Fatalf("RecoverTradingState: %v", err)
+			}
+			if recovered.Ready() {
+				t.Fatal("corrupt pending journal restart became ready")
+			}
+		})
+	}
+}
+
 func TestReconcileShardAcceptsRoundedMultiFillAndClosedPosition(t *testing.T) {
 	pool := postgresPool(t)
 	fixture := seedReconciliationFixture(t, pool, 8)
@@ -1037,7 +1269,7 @@ func TestEngineStoreEnforcesInitialSingleShardDeployment(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
+	).MigrateAndProvision(context.Background(), 8); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	store := platformpostgres.NewEngineStore(pool)
@@ -1154,7 +1386,7 @@ func seedReconciliationFixture(
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
+	).MigrateAndProvision(context.Background(), shardID); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	store := platformpostgres.NewEngineStore(pool)
@@ -1300,7 +1532,7 @@ func TestEngineStoreRejectsCommandInputThatDiffersFromJournal(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
+	).MigrateAndProvision(context.Background(), 7); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -1434,7 +1666,7 @@ func TestEngineStoreRecoveryRejectsInvalidBusinessHashMetadata(t *testing.T) {
 			if err := platformpostgres.NewMigrator(
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-			).Migrate(context.Background()); err != nil {
+			).MigrateAndProvision(context.Background(), 7); err != nil {
 				t.Fatalf("Migrate: %v", err)
 			}
 			store := platformpostgres.NewEngineStore(pool)
@@ -1499,14 +1731,12 @@ func TestEngineStoreBindsNonCommandAccountInputToOneShard(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
+	).MigrateAndProvision(context.Background(), 7); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	store := platformpostgres.NewEngineStore(pool)
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 	if _, err := pool.Exec(context.Background(), `
-		INSERT INTO engine.deployment_shard (shard_id)
-		VALUES (7);
 		INSERT INTO engine.account_shards (account_id, shard_id)
 		VALUES ('account-1', 7)`); err != nil {
 		t.Fatalf("preassign non-command account shard: %v", err)
@@ -1639,7 +1869,7 @@ func TestEngineStoreMissingAccountShardFailsClosedWithoutBinding(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
+	).MigrateAndProvision(context.Background(), 8); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	action := engine.TradingAction{
@@ -1735,7 +1965,7 @@ func TestEngineStoreFailsClosedOnInvalidCommandShardAssignment(t *testing.T) {
 			if err := platformpostgres.NewMigrator(
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-			).Migrate(context.Background()); err != nil {
+			).MigrateAndProvision(context.Background(), 7); err != nil {
 				t.Fatalf("Migrate: %v", err)
 			}
 			now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
@@ -1999,7 +2229,7 @@ func TestEngineStoreBindsCompleteCommandEnvelope(t *testing.T) {
 			if err := platformpostgres.NewMigrator(
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-			).Migrate(context.Background()); err != nil {
+			).MigrateAndProvision(context.Background(), 7); err != nil {
 				t.Fatalf("Migrate: %v", err)
 			}
 			outboxPayload, err := platformnats.EncodeEngineInputMessage(baseInput)
@@ -2068,7 +2298,7 @@ func TestEngineStoreRejectsAccountCommandBeforePredecessorCommits(t *testing.T) 
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
+	).MigrateAndProvision(context.Background(), 7); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -2215,7 +2445,7 @@ func TestEngineStoreBindsRedundantCommandMetadata(t *testing.T) {
 			if err := platformpostgres.NewMigrator(
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-			).Migrate(ctx); err != nil {
+			).MigrateAndProvision(ctx, 7); err != nil {
 				t.Fatalf("Migrate: %v", err)
 			}
 			commandID := engine.IDFromSequence(engine.ID{}, uint64(801+index))
@@ -2269,7 +2499,7 @@ func TestEngineStoreDurablyHaltsNonCommandReuseOfCommandID(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	).MigrateAndProvision(ctx, 7); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -2431,14 +2661,6 @@ func seedPendingCommand(
 	accountID := fmt.Sprintf("test-shard-%d", input.ShardID)
 	if actionAccountID, scoped := engine.TradingActionAccountID(action); scoped {
 		accountID = actionAccountID
-	}
-	if _, err := pool.Exec(context.Background(), `
-		INSERT INTO engine.deployment_shard (shard_id)
-		VALUES ($1)
-		ON CONFLICT (singleton) DO NOTHING`,
-		int64(input.ShardID),
-	); err != nil {
-		t.Fatalf("seed command %s deployment shard: %v", input.InputID, err)
 	}
 	if _, err := pool.Exec(context.Background(), `
 		INSERT INTO engine.account_shards (account_id, shard_id)

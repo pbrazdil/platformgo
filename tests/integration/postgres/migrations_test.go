@@ -288,7 +288,7 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
+	).MigrateAndProvision(context.Background(), 9); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -301,7 +301,6 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 		"SET LOCAL ROLE platformgo_api",
 	); err == nil {
 		_, err = apiTransaction.Exec(context.Background(), `
-			INSERT INTO engine.deployment_shard (shard_id) VALUES (9);
 			INSERT INTO engine.account_shards (account_id, shard_id)
 			VALUES ('role-account', 9);
 			INSERT INTO trading.idempotency_records (
@@ -336,6 +335,8 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 		t.Fatalf("commit API transaction: %v", err)
 	}
 
+	assertRoleStatementDenied(t, pool, "platformgo_api", `
+		INSERT INTO engine.deployment_shard (shard_id) VALUES (10)`)
 	assertRoleStatementDenied(t, pool, "platformgo_api", `
 		INSERT INTO ledger.balances (
 			account_id, currency, total, used, free, equity, ledger_sequence
@@ -388,6 +389,8 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 	if err := engineTransaction.Commit(context.Background()); err != nil {
 		t.Fatalf("commit engine transaction: %v", err)
 	}
+	assertRoleStatementDenied(t, pool, "platformgo_engine", `
+		INSERT INTO engine.deployment_shard (shard_id) VALUES (10)`)
 	assertRoleStatementDenied(t, pool, "platformgo_engine", `
 		UPDATE trading.commands
 		   SET canonical_payload = '{"tampered":true}'

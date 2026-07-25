@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/upcomers-org/platformgo/internal/engine"
 )
@@ -22,6 +21,9 @@ var (
 	// ErrDeploymentShardConflict means the initial single-shard deployment was
 	// already durably bound to a different shard.
 	ErrDeploymentShardConflict = errors.New("deployment shard configuration conflict")
+	// ErrDeploymentShardUnconfigured means the one-shot migrator has not
+	// explicitly provisioned the deployment's engine shard.
+	ErrDeploymentShardUnconfigured = errors.New("deployment shard is not configured")
 	// ErrCheckpointMismatch means caller state and PostgreSQL authority disagree.
 	ErrCheckpointMismatch = errors.New("engine checkpoint mismatch")
 	// ErrCommandInputConflict means the delivered engine input does not match
@@ -523,7 +525,6 @@ func isDeterministicDurableInputConflict(err error) bool {
 }
 
 type deploymentShardExecutor interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
@@ -532,20 +533,18 @@ func ensureDeploymentShard(
 	executor deploymentShardExecutor,
 	shardID engine.ShardID,
 ) error {
-	if _, err := executor.Exec(ctx, `
-		INSERT INTO engine.deployment_shard (singleton, shard_id)
-		VALUES (true, $1)
-		ON CONFLICT (singleton) DO NOTHING`,
-		int64(shardID),
-	); err != nil {
-		return fmt.Errorf("bind deployment shard %d: %w", shardID, err)
-	}
 	var configuredShard uint64
 	if err := executor.QueryRow(ctx, `
 		SELECT shard_id
 		  FROM engine.deployment_shard
 		 WHERE singleton`,
-	).Scan(&configuredShard); err != nil {
+	).Scan(&configuredShard); errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf(
+			"%w: requested shard %d",
+			ErrDeploymentShardUnconfigured,
+			shardID,
+		)
+	} else if err != nil {
 		return fmt.Errorf("read deployment shard %d binding: %w", shardID, err)
 	}
 	if configuredShard != uint64(shardID) {

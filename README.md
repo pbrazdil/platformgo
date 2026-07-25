@@ -62,19 +62,24 @@ Phase 2 is not yet complete. The owner-approved pre-release migration rewrite
 now provides one final checksum-verified baseline, populated PostgreSQL 17
 fixtures, stale-development-history refusal, runtime-role membership
 preflight, immutable durable account-to-shard ownership, and transaction-level
-ownership epochs. The documented initial one-shard deployment is enforced by
-one immutable PostgreSQL binding, so a second shard fails before it can become
-a writer for globally keyed instrument or book projections. Engine logical
+ownership epochs. The privileged one-shot migrator explicitly provisions the
+documented initial shard before traffic; API and engine roles only validate
+the immutable PostgreSQL binding, so request or database scheduling cannot
+choose deployment authority and a second shard fails before it can become a
+writer for globally keyed instrument or book projections. Engine logical
 times persist as exact Unix nanoseconds rather than lossy PostgreSQL
 timestamps. Every engine-input and domain-event publication now requires
 database-established producer authority plus an explicit receipt foreign key;
-unbound events cannot receive a publication claim. Undecodable transport
+command claims also validate the complete redundant envelope, and missing
+predecessor outbox rows block later account commands. Unbound or receipt-rebound
+events cannot receive a publication claim. Undecodable transport
 poison remains durably halted across restart, and reconciliation acquires the
 same lifetime shard ownership capability as execution. Exact
 receipt-to-projection comparison covers configuration, books, balances,
 orders, fills, positions, commands including outbox producer class, funding,
-ledger facts, and all shard-attributed domain-event outbox rows without
-repairing evidence. Destructive PostgreSQL test reset requires an explicit
+all ledger facts, complete pending command journal tuples, and receipt-bound
+domain-event outbox rows without repairing evidence. Destructive PostgreSQL
+test reset requires an explicit
 opt-in and a verified disposable database name. Full PostgreSQL 17 and
 JetStream integration suites and every repository-wide local release gate pass
 on the current working tree; hosted validation and renewed independent approval
@@ -84,6 +89,9 @@ JetStream uses bounded file-backed streams with `DiscardNew`, one physical
 input stream and lifetime PostgreSQL ownership lock per shard, stable
 `Nats-Msg-Id` publication, pull delivery with one unacknowledged input, and
 synchronous acknowledgment only after the PostgreSQL handler commits.
+The live integration suite injects a failure after commit and before
+acknowledgment, restarts the processor, and proves same-sequence redelivery is
+a receipt-backed no-op before the acknowledgment floor advances.
 Beyond-window duplicate publication advances a separate immutable delivery
 receipt and state chain without repeating ledger, fill, balance, position, or
 event effects.
@@ -100,7 +108,7 @@ integration proof; deployment packaging and later phase contracts remain.
 |---|---|---|
 | 0 — Policy and test harness | Complete | Machine-readable package scope, AST policy checks, split port/review/wiring evidence, exact function provenance, canonical source authorities, pinned Go 1.26.5, CODEOWNERS, immutable CI actions, complete-port and tidy gates, and the initial agent-evaluation corpus exist. `main` is protected and all seven required checks are enforced. The numeric foundation provides the sole `apd/v3`-backed production decimal, strict canonical parsing, explicit one-boundary rounding, immutable unit-bearing values, parser/arithmetic fuzzing, and five reviewed green source rows. The deterministic kernel adds explicit logical time and IDs, strict input sequencing, idempotent duplicate receipts, fail-closed typed errors, canonical decision/state hashes, replay properties, and the minimal synchronous engine fixture. |
 | 1 — Pure engine | Complete | Thirty-six pinned source rows are reviewed and green against the production `model-real` engine boundary. Coverage includes deterministic order lifecycle, depth/VWAP and slippage, netting and hedging positions, exact PnL, margin and reservation, idempotent funding, cross/isolated liquidation, stop/touch triggers, brackets and ladders, protection cleanup, and exact maker/taker fees. Policy-native invariant, fuzz, duplicate, replay, repeated, and race-enabled tests reinforce the source-test evidence. |
-| 2 — Durable execution | In progress | Durable execution, command-envelope binding, contiguous account sequencing, an immutable initial single-shard deployment binding with session and epoch fencing, exact nanosecond logical-time persistence, receipt-bound producer-authorized engine input and domain-event publication, restart-stable poison faults, exact durable fail-closed reconciliation under lifetime shard ownership, guarded disposable-database test reset, one clean pre-release PostgreSQL baseline, populated/stale-history migration fixtures, live PostgreSQL/JetStream proof, and hosted PostgreSQL 17/NATS CI execution are implemented. Full live and repository-wide local release gates pass; hosted gates and renewed final independent approval remain. |
+| 2 — Durable execution | In progress | Durable execution, complete command-envelope binding, contiguous account sequencing, explicit migrator provisioning of an immutable initial single-shard deployment binding with session and epoch fencing, exact nanosecond logical-time persistence, receipt-bound producer-authorized engine input and domain-event publication, restart-stable poison faults, exact global fail-closed reconciliation under lifetime shard ownership, guarded disposable-database test reset, one clean pre-release PostgreSQL baseline, populated/stale-history migration fixtures, live PostgreSQL/JetStream proof including commit-before-ack loss, and hosted PostgreSQL 17/NATS CI execution are implemented. Full live and repository-wide local release gates pass on the latest working tree; renewed hosted gates and exact-SHA independent approval remain. |
 | 3 — Compatibility edges | Not started | Production REST, gRPC, authentication, realtime/Centrifugo, health, CLI, and deployment-compatible services are not implemented. |
 | 4 — Hyperliquid production integration | Not started | No production adapter, reconnect/resynchronization path, controlled live canary, soak test, or incident drill exists. |
 | 5 — Replacement rehearsal | Not started | Data import, cutover, rollback, reconciliation, and audited go-live rehearsal remain. |
@@ -134,14 +142,17 @@ Verified on 2026-07-25:
 - Phase 2 PostgreSQL tests pass against a temporary PostgreSQL 17 instance and
   cover the clean final baseline, populated idempotent rerun, stale-history
   refusal, immutable/checksum constraints, executable least-privilege roles,
-  durable account-to-shard binding, atomic rollback/retry, normalized execution
+  explicit shard provisioning and runtime validation-only roles, durable
+  account-to-shard binding, atomic rollback/retry, normalized execution
   projections, idempotency replay/conflict, outbox unknown outcomes,
-  transactional inbox dedupe, restart/fault replay, and reconciliation.
+  transactional inbox dedupe, pending-journal and receipt-binding corruption,
+  unexplained monetary rows, restart/fault replay, and reconciliation.
 - Phase 2 JetStream tests pass against a temporary NATS Server 2.14.3 instance
   and cover versioned bounded streams, duplicate publish acknowledgments,
   handler redelivery, command-to-engine persistence, beyond-window duplicate
   publication, poison-message halt, stream-full rejection, singleton shard
-  ownership, and server reconnect with retained stream sequence.
+  ownership, commit-succeeded/ack-lost same-sequence recovery, and server
+  reconnect with retained stream sequence.
 - Focused PostgreSQL 17 and JetStream tests cover runtime-role membership
   escalation, forged API engine inputs and domain events, backend-terminated
   shard ownership, live-owner reconciliation exclusion, concurrent

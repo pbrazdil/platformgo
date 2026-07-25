@@ -62,7 +62,10 @@ Own only their explicit projection, inbox, outbox or operational tables.
 
 ### Migrator role
 
-Owns DDL and is not used by running services.
+Owns DDL and is not used by running services. The one-shot migrator explicitly
+provisions the configured initial engine shard after applying migrations.
+API and engine runtime roles can read and validate that immutable binding but
+cannot create, choose, or change deployment authority.
 
 Use distinct PostgreSQL roles and grants to enforce these boundaries.
 

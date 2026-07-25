@@ -13,6 +13,7 @@ import (
 	"slices"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/upcomers-org/platformgo/internal/engine"
 )
 
 var (
@@ -46,6 +47,42 @@ type Migrator struct {
 // NewMigrator binds a connection pool and migration filesystem.
 func NewMigrator(pool *pgxpool.Pool, migrations fs.FS) *Migrator {
 	return &Migrator{pool: pool, migrations: migrations}
+}
+
+// MigrateAndProvision applies migrations and explicitly binds the only engine
+// shard before any API or engine runtime is allowed to serve traffic.
+func (migrator *Migrator) MigrateAndProvision(
+	ctx context.Context,
+	shardID engine.ShardID,
+) error {
+	if err := migrator.Migrate(ctx); err != nil {
+		return err
+	}
+	return migrator.ProvisionDeploymentShard(ctx, shardID)
+}
+
+// ProvisionDeploymentShard is the privileged, idempotent bootstrap operation
+// for the initial single-shard deployment. Runtime roles are validation-only.
+func (migrator *Migrator) ProvisionDeploymentShard(
+	ctx context.Context,
+	shardID engine.ShardID,
+) error {
+	if migrator == nil || migrator.pool == nil {
+		return errors.New("provision deployment shard: PostgreSQL pool is required")
+	}
+	tag, err := migrator.pool.Exec(ctx, `
+		INSERT INTO engine.deployment_shard (singleton, shard_id)
+		VALUES (true, $1)
+		ON CONFLICT (singleton) DO NOTHING`,
+		int64(shardID),
+	)
+	if err != nil {
+		return fmt.Errorf("provision deployment shard %d: %w", shardID, err)
+	}
+	if tag.RowsAffected() > 1 {
+		return fmt.Errorf("provision deployment shard %d: unexpected row count", shardID)
+	}
+	return ensureDeploymentShard(ctx, migrator.pool, shardID)
 }
 
 // Migrate verifies applied history and applies every new file in lexical order.

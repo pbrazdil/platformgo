@@ -21,7 +21,7 @@ func TestCommandJournalRejectsConflictsAndReplaysCompletedResponse(t *testing.T)
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
+	).MigrateAndProvision(context.Background(), 7); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -140,7 +140,7 @@ func TestCommandJournalRejectsOutOfOrderAndPrematureCompletion(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
+	).MigrateAndProvision(context.Background(), 7); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -221,7 +221,7 @@ func TestCommandJournalDurablyBindsAccountToOneShard(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
+	).MigrateAndProvision(context.Background(), 7); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -307,7 +307,7 @@ func TestCommandJournalDurablyBindsAccountToOneShard(t *testing.T) {
 	}
 }
 
-func TestConcurrentFirstCommandShardAssignmentHasOneDurableAuthority(t *testing.T) {
+func TestDeploymentShardProvisioningDeterminesConcurrentAuthority(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
 	if err := platformpostgres.NewMigrator(
@@ -317,6 +317,67 @@ func TestConcurrentFirstCommandShardAssignmentHasOneDurableAuthority(t *testing.
 		t.Fatalf("Migrate: %v", err)
 	}
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	unconfigured := validCommandRequest(
+		t,
+		engine.IDFromSequence(engine.ID{}, 130),
+		"account-unconfigured",
+		1,
+		7,
+		now,
+	)
+	if _, err := platformpostgres.NewCommandJournal(pool).Begin(
+		context.Background(),
+		unconfigured,
+	); !errors.Is(err, platformpostgres.ErrDeploymentShardUnconfigured) {
+		t.Fatalf("unconfigured Begin error = %v", err)
+	}
+	if _, err := platformpostgres.NewEngineStore(pool).AcquireShardOwnership(
+		context.Background(),
+		7,
+	); !errors.Is(err, platformpostgres.ErrDeploymentShardUnconfigured) {
+		t.Fatalf("unconfigured ownership error = %v", err)
+	}
+	for _, relation := range []string{
+		"engine.deployment_shard",
+		"engine.account_shards",
+		"engine.shard_ownership_epochs",
+		"trading.idempotency_records",
+		"trading.commands",
+		"messaging.outbox",
+	} {
+		var count int
+		if err := pool.QueryRow(
+			context.Background(),
+			"SELECT count(*) FROM "+relation,
+		).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", relation, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows before provisioning = %d, want 0", relation, count)
+		}
+	}
+	migrator := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	if err := migrator.ProvisionDeploymentShard(
+		context.Background(),
+		7,
+	); err != nil {
+		t.Fatalf("ProvisionDeploymentShard: %v", err)
+	}
+	if err := migrator.ProvisionDeploymentShard(
+		context.Background(),
+		7,
+	); err != nil {
+		t.Fatalf("idempotent ProvisionDeploymentShard: %v", err)
+	}
+	if err := migrator.ProvisionDeploymentShard(
+		context.Background(),
+		8,
+	); !errors.Is(err, platformpostgres.ErrDeploymentShardConflict) {
+		t.Fatalf("conflicting ProvisionDeploymentShard error = %v", err)
+	}
 	requests := []platformpostgres.BeginCommandRequest{
 		validCommandRequest(
 			t,
@@ -406,7 +467,7 @@ func TestConcurrentFirstCommandShardAssignmentHasOneDurableAuthority(t *testing.
 	); err != nil {
 		t.Fatalf("inspect concurrent assignment effects: %v", err)
 	}
-	if (assignedShardID != 7 && assignedShardID != 8) ||
+	if assignedShardID != 7 ||
 		commandRows != 1 ||
 		idempotencyRows != 1 ||
 		outboxRows != 1 ||
@@ -428,7 +489,7 @@ func TestCommandJournalRejectsRedundantMetadataMismatch(t *testing.T) {
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
+	).MigrateAndProvision(context.Background(), 7); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
