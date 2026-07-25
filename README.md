@@ -23,24 +23,22 @@ Phases 0 through 2 are complete:
   single-writer shard ownership, JetStream delivery, replay, reconciliation,
   and restart/fault coverage.
 
-The current Phase 3 candidate establishes the first compatibility slice:
+The landed Phase 3 work establishes the first compatibility slice:
 executable `app` and `nautilus` commands; frozen OpenAPI, protobuf, and
 realtime inventories; selected REST, gRPC, client and broker authentication
 flows; reviewed JWT signing and verification; trusted-proxy client-address
 derivation; least-privilege runtime PostgreSQL role enforcement; exact command
 replay; runtime readiness/drain behavior; a forward-only identity authority
-cutover guard; direct Centrifugo contract proof; and a candidate committed
+cutover guard; direct Centrifugo contract proof; and a committed
 PostgreSQL-to-Centrifugo realtime publication path with stable event identity,
 per-channel ordering, bounded claims, retry, and crash recovery.
 
 Phase 3 is not complete. The runtime must still:
 
-- finish independent review and hosted exact-SHA acceptance for the durable
-  committed-event-to-Centrifugo projection and its governance evidence;
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
   broker, gRPC, realtime, and deployment-role contracts;
-- obtain green hosted exact-SHA PostgreSQL 17, NATS, Centrifugo,
-  compatibility, and race evidence for this foundation candidate;
+- add PostgreSQL query-plan and migration-lock evidence for the hot realtime
+  outbox paths and upgrade boundary;
 - obtain separate independent port-ledger acceptance for the source behaviors
   proven by the implementation.
 
@@ -59,28 +57,26 @@ This repository is not yet a production-capable replacement.
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
 | 2 — Durable execution | Complete | PostgreSQL 17 authority, immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
-| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, and a candidate durable realtime projection. Full frozen surface coverage, independent realtime review and ledger acceptance, and exact-SHA hosted evidence remain. |
+| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, and a landed durable realtime projection. Full frozen surface coverage, PostgreSQL plan/upgrade evidence, and independent port-ledger acceptance remain. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
 ## Validation snapshot
 
-The first Phase 3 slice has passed repository-wide formatting, lint, unit,
-race, repeat, vulnerability, module-consistency, and policy checks in local
-development, plus focused live tests against disposable PostgreSQL 17, NATS,
-and Centrifugo. The landed foundation SHA is green in hosted CI. The current
-realtime candidate has focused live PostgreSQL 17 commit/order/retry evidence,
-a simulated Centrifugo outage proof, and a real Centrifugo history proof. Its
-full repository gates are green locally, including race and
-deterministic-repeat checks. Independent review and hosted exact-SHA evidence
-are still pending. These results do not complete the remaining Phase 3 scope.
+The landed Phase 3 slices have passed repository-wide formatting, lint, unit,
+race, repeat, vulnerability, module-consistency, and policy checks, plus live
+tests against disposable PostgreSQL 17, NATS, and Centrifugo. Their exact SHAs
+are green in hosted CI. The realtime path additionally has live PostgreSQL 17
+commit/order/retry evidence, a simulated Centrifugo outage proof, a real
+Centrifugo history proof, and independent determinism and money review. These
+results do not complete the remaining Phase 3 scope.
 
 ## Next milestone
 
-Land the independently reviewed security and runtime-authority foundation,
-then complete durable realtime delivery and the remaining frozen compatibility
-operations and worker roles through vertically narrow changes. Phase 4 begins
-only after the Phase 3 charter and release gates are fully satisfied.
+Add PostgreSQL plan and upgrade evidence for the durable realtime path, then
+complete the remaining frozen compatibility operations and worker roles
+through vertically narrow changes. Phase 4 begins only after the Phase 3
+charter and release gates are fully satisfied.
 
 The authoritative scope and completion criteria are in
 `PROJECT_CHARTER.md`. Repository-wide execution rules are in `AGENTS.md`.

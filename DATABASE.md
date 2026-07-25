@@ -59,6 +59,11 @@ Owns economic state mutations for its shard.
 ### Worker roles
 
 Own only their explicit projection, inbox, outbox or operational tables.
+`platformgo_realtime` claims and acknowledges committed realtime
+publications; it cannot alter publication identity or economic state.
+`platformgo_realtime_repair` can only inspect realtime delivery state and call
+the audited, idempotent quarantine-requeue function; it cannot update
+publication or economic rows directly.
 
 ### Migrator role
 
@@ -78,6 +83,7 @@ The engine transaction for an input includes, as applicable:
 - ledger entries and balance projection;
 - margin/reservations;
 - domain event outbox;
+- per-user realtime publication and monotonic channel sequence;
 - realtime outbox;
 - scheduled jobs;
 - engine checkpoint and receipt.
