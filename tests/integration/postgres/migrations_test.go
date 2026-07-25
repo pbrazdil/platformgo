@@ -66,10 +66,154 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 
 	assertReceiptIdentityConstraints(t, pool)
 	assertOutboxProducerAuthorityConstraints(t, pool)
-	assertSingleBaselineMigration(t, pool)
+	assertFinalMigrationHistory(t, pool)
+	assertCommandIdempotencyAuthorityConstraints(t, pool)
 	assertLedgerBalanceConstraint(t, pool)
 	assertImmutableLedgerFacts(t, pool)
 	assertAPIRoleCannotMutateEconomicTables(t, pool)
+}
+
+func TestCommandIdempotencyAuthorityMigrationUpgradesPopulatedBaseline(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	migrationDirectory := filepath.Join("..", "..", "..", "migrations")
+	baselineName := "20260724000100_durable_execution_foundation.up.sql"
+	baseline, err := os.ReadFile(filepath.Join(migrationDirectory, baselineName))
+	if err != nil {
+		t.Fatalf("read baseline migration: %v", err)
+	}
+	if err := platformpostgres.NewMigrator(
+		pool,
+		fstest.MapFS{baselineName: {Data: baseline}},
+	).Migrate(ctx); err != nil {
+		t.Fatalf("apply previous baseline: %v", err)
+	}
+	commandID := "019f9460-4b36-4e9b-8f44-682611f70061"
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin populated previous baseline: %v", err)
+	}
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO engine.deployment_shard (shard_id) VALUES (17);
+		INSERT INTO engine.account_shards (account_id, shard_id)
+		VALUES ('upgrade-account', 17)`); err == nil {
+		_, err = tx.Exec(ctx, `
+		INSERT INTO trading.idempotency_records (
+			scope, idempotency_key, request_hash, command_id, state, expires_at
+		) VALUES (
+			'account:upgrade-account', 'upgrade-command',
+			decode(repeat('a1', 32), 'hex'), $1, 'in_progress',
+			'2026-07-26T00:00:00Z'
+		)`,
+			commandID,
+		)
+	}
+	if err == nil {
+		_, err = tx.Exec(ctx, `
+		INSERT INTO trading.commands (
+			command_id, account_id, account_sequence, command_type,
+			schema_version, canonical_payload, status, logical_time
+		) VALUES (
+			$1, 'upgrade-account', 1, 'adjust_balance',
+			1, '{"amount":"10"}', 'pending', 1784970000000000000
+		)`,
+			commandID,
+		)
+	}
+	if err == nil {
+		_, err = tx.Exec(ctx, `
+		INSERT INTO messaging.outbox (
+			message_id, subject, schema_version, payload
+		) VALUES ($1, 'engine.input.17.command.v1', 1, '{}')`,
+			commandID,
+		)
+	}
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("seed populated previous baseline: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit populated previous baseline: %v", err)
+	}
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(migrationDirectory),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("upgrade populated baseline: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+	var commandCount int
+	var idempotencyCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM trading.commands WHERE command_id = $1),
+			(SELECT count(*) FROM trading.idempotency_records WHERE command_id = $1)`,
+		commandID,
+	).Scan(&commandCount, &idempotencyCount); err != nil {
+		t.Fatalf("inspect upgraded command authority: %v", err)
+	}
+	if commandCount != 1 || idempotencyCount != 1 {
+		t.Fatalf(
+			"upgraded authority counts = commands %d idempotency %d",
+			commandCount,
+			idempotencyCount,
+		)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		"DELETE FROM trading.idempotency_records WHERE command_id = $1",
+		commandID,
+	); err == nil {
+		t.Fatal("upgraded idempotency authority was deletable")
+	}
+}
+
+func TestCommandIdempotencyAuthorityMigrationRejectsCorruptBaseline(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	migrationDirectory := filepath.Join("..", "..", "..", "migrations")
+	baselineName := "20260724000100_durable_execution_foundation.up.sql"
+	baseline, err := os.ReadFile(filepath.Join(migrationDirectory, baselineName))
+	if err != nil {
+		t.Fatalf("read baseline migration: %v", err)
+	}
+	if err := platformpostgres.NewMigrator(
+		pool,
+		fstest.MapFS{baselineName: {Data: baseline}},
+	).Migrate(ctx); err != nil {
+		t.Fatalf("apply previous baseline: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.idempotency_records (
+			scope, idempotency_key, request_hash, command_id, state, expires_at
+		) VALUES (
+			'account:orphan', 'orphan',
+			decode(repeat('a2', 32), 'hex'),
+			'019f9460-4b36-4e9b-8f44-682611f70062',
+			'in_progress', '2026-07-26T00:00:00Z'
+		)`); err != nil {
+		t.Fatalf("seed corrupt previous baseline: %v", err)
+	}
+	err = platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(migrationDirectory),
+	).Migrate(ctx)
+	if !isPostgresCode(err, "23514") {
+		t.Fatalf("corrupt baseline upgrade error = %v, want 23514", err)
+	}
+	var applied int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM engine.schema_migrations
+		 WHERE filename = '20260725000100_command_idempotency_authority.up.sql'`,
+	).Scan(&applied); err != nil {
+		t.Fatalf("inspect rejected correction migration: %v", err)
+	}
+	if applied != 0 {
+		t.Fatal("corrupt baseline recorded correction migration")
+	}
 }
 
 func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
@@ -571,7 +715,7 @@ func TestFinalBaselineMigratesWithNoCreateRole(t *testing.T) {
 	if canCreateRole {
 		t.Fatal("test migrator unexpectedly has CREATEROLE")
 	}
-	assertSingleBaselineMigration(t, pool)
+	assertFinalMigrationHistory(t, pool)
 }
 
 func TestFinalBaselineFailsWhenPreprovisionedRuntimeRoleIsMissing(t *testing.T) {
@@ -869,7 +1013,7 @@ func TestMigratorFinalBaselineRerunPreservesPopulatedData(t *testing.T) {
 	if err := migrator.Migrate(context.Background()); err != nil {
 		t.Fatalf("idempotent final baseline rerun: %v", err)
 	}
-	assertSingleBaselineMigration(t, pool)
+	assertFinalMigrationHistory(t, pool)
 	var assignedShard int64
 	var appliedAtAfter time.Time
 	if err := pool.QueryRow(
@@ -964,23 +1108,134 @@ func TestMigratorRejectsDisposableEightFileHistoryWithoutChangingData(t *testing
 	}
 }
 
-func assertSingleBaselineMigration(t *testing.T, pool *pgxpool.Pool) {
+func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	var count int
-	var filename string
+	var first string
+	var last string
 	if err := pool.QueryRow(context.Background(), `
-		SELECT count(*), min(filename)
+		SELECT count(*), min(filename), max(filename)
 		  FROM engine.schema_migrations`,
-	).Scan(&count, &filename); err != nil {
-		t.Fatalf("inspect final baseline history: %v", err)
+	).Scan(&count, &first, &last); err != nil {
+		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 1 ||
-		filename != "20260724000100_durable_execution_foundation.up.sql" {
+	if count != 2 ||
+		first != "20260724000100_durable_execution_foundation.up.sql" ||
+		last != "20260725000100_command_idempotency_authority.up.sql" {
 		t.Fatalf(
-			"final baseline history = count %d filename %q",
+			"final migration history = count %d first %q last %q",
 			count,
-			filename,
+			first,
+			last,
 		)
+	}
+}
+
+func assertCommandIdempotencyAuthorityConstraints(
+	t *testing.T,
+	pool *pgxpool.Pool,
+) {
+	t.Helper()
+	ctx := context.Background()
+	commandID := "019f9460-4b36-4e9b-8f44-682611f7ef01"
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin paired command transaction: %v", err)
+	}
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO trading.commands (
+			command_id, account_id, account_sequence, command_type,
+			schema_version, canonical_payload, status, logical_time
+		) VALUES ($1, 'authority-account', 1, 'probe', 1, '{}', 'pending', 1)`,
+		commandID,
+	); err == nil {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO trading.idempotency_records (
+				scope, idempotency_key, request_hash, command_id, state, expires_at
+			) VALUES (
+				'account:authority-account', 'probe',
+				decode(repeat('91', 32), 'hex'), $1, 'in_progress',
+				'2026-07-26T00:00:00Z'
+			)`,
+			commandID,
+		)
+	}
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("insert paired command authority: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit paired command authority: %v", err)
+	}
+
+	tx, err = pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin command-without-idempotency transaction: %v", err)
+	}
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO trading.commands (
+			command_id, account_id, account_sequence, command_type,
+			schema_version, canonical_payload, status, logical_time
+		) VALUES (
+			'019f9460-4b36-4e9b-8f44-682611f7ef02',
+			'authority-account', 2, 'probe', 1, '{}', 'pending', 2
+		)`); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("insert deferred command probe: %v", err)
+	}
+	if err := tx.Commit(ctx); !isPostgresCode(err, "23503") {
+		t.Fatalf("command without idempotency commit error = %v, want 23503", err)
+	}
+
+	tx, err = pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin orphan-idempotency transaction: %v", err)
+	}
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO trading.idempotency_records (
+			scope, idempotency_key, request_hash, command_id, state, expires_at
+		) VALUES (
+			'account:authority-account', 'orphan',
+			decode(repeat('92', 32), 'hex'),
+			'019f9460-4b36-4e9b-8f44-682611f7ef03',
+			'in_progress', '2026-07-26T00:00:00Z'
+		)`); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("insert deferred orphan idempotency probe: %v", err)
+	}
+	if err := tx.Commit(ctx); !isPostgresCode(err, "23503") {
+		t.Fatalf("orphan idempotency commit error = %v, want 23503", err)
+	}
+
+	if _, err := pool.Exec(
+		ctx,
+		"DELETE FROM trading.idempotency_records WHERE command_id = $1",
+		commandID,
+	); err == nil {
+		t.Fatal("idempotency record deletion succeeded")
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE trading.idempotency_records
+		   SET idempotency_key = 'changed'
+		 WHERE command_id = $1`,
+		commandID,
+	); err == nil {
+		t.Fatal("idempotency identity update succeeded")
+	}
+	if _, err := pool.Exec(
+		ctx,
+		"DELETE FROM trading.commands WHERE command_id = $1",
+		commandID,
+	); err == nil {
+		t.Fatal("command deletion succeeded")
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE trading.commands
+		   SET canonical_payload = '{"changed":true}'
+		 WHERE command_id = $1`,
+		commandID,
+	); err == nil {
+		t.Fatal("command identity update succeeded")
 	}
 }
 

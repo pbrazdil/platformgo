@@ -555,15 +555,12 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 		{
 			name: "command canonical payload",
 			mutate: func(t *testing.T, pool *pgxpool.Pool, fixture reconciliationFixture) {
-				_, err := pool.Exec(context.Background(), `
+				corruptAsReplicationAuthority(t, pool, `
 					UPDATE trading.commands
 					   SET canonical_payload = '{}'::jsonb
 					 WHERE command_id = $1`,
 					fixture.orderInputID.String(),
 				)
-				if err != nil {
-					t.Fatalf("corrupt command canonical payload: %v", err)
-				}
 			},
 			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
 				return report.CommandMismatchCount
@@ -976,11 +973,11 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 func TestReconcileShardRejectsCorruptPendingCommandJournal(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(context.Context, *pgxpool.Pool, engine.ID) error
+		mutate func(*testing.T, context.Context, *pgxpool.Pool, engine.ID) error
 	}{
 		{
 			name: "missing outbox",
-			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
+			mutate: func(_ *testing.T, ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
 				_, err := pool.Exec(
 					ctx,
 					"DELETE FROM messaging.outbox WHERE message_id = $1",
@@ -991,7 +988,7 @@ func TestReconcileShardRejectsCorruptPendingCommandJournal(t *testing.T) {
 		},
 		{
 			name: "changed canonical envelope",
-			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
+			mutate: func(_ *testing.T, ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
 				_, err := pool.Exec(ctx, `
 					UPDATE messaging.outbox
 					   SET payload = jsonb_set(payload, '{sourceSequence}', '2')
@@ -1003,7 +1000,7 @@ func TestReconcileShardRejectsCorruptPendingCommandJournal(t *testing.T) {
 		},
 		{
 			name: "changed subject",
-			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
+			mutate: func(_ *testing.T, ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
 				_, err := pool.Exec(ctx, `
 					UPDATE messaging.outbox
 					   SET subject = 'engine.input.8.command.v2'
@@ -1015,7 +1012,7 @@ func TestReconcileShardRejectsCorruptPendingCommandJournal(t *testing.T) {
 		},
 		{
 			name: "changed schema",
-			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
+			mutate: func(_ *testing.T, ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
 				_, err := pool.Exec(ctx, `
 					UPDATE messaging.outbox
 					   SET schema_version = schema_version + 1
@@ -1027,25 +1024,26 @@ func TestReconcileShardRejectsCorruptPendingCommandJournal(t *testing.T) {
 		},
 		{
 			name: "missing idempotency",
-			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
-				_, err := pool.Exec(
-					ctx,
+			mutate: func(t *testing.T, _ context.Context, pool *pgxpool.Pool, id engine.ID) error {
+				corruptAsReplicationAuthority(
+					t,
+					pool,
 					"DELETE FROM trading.idempotency_records WHERE command_id = $1",
 					id.String(),
 				)
-				return err
+				return nil
 			},
 		},
 		{
 			name: "changed command payload",
-			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
-				_, err := pool.Exec(ctx, `
+			mutate: func(t *testing.T, _ context.Context, pool *pgxpool.Pool, id engine.ID) error {
+				corruptAsReplicationAuthority(t, pool, `
 					UPDATE trading.commands
 					   SET canonical_payload = '{}'::jsonb
 					 WHERE command_id = $1`,
 					id.String(),
 				)
-				return err
+				return nil
 			},
 		},
 	}
@@ -1117,7 +1115,7 @@ func TestReconcileShardRejectsCorruptPendingCommandJournal(t *testing.T) {
 				!report.Ready {
 				t.Fatalf("valid pending journal reconciliation = %+v, error %v", report, err)
 			}
-			if err := test.mutate(ctx, pool, commandID); err != nil {
+			if err := test.mutate(t, ctx, pool, commandID); err != nil {
 				t.Fatalf("mutate pending command journal: %v", err)
 			}
 			report, err := fixture.store.ReconcileShard(ctx, 8)
@@ -1136,6 +1134,198 @@ func TestReconcileShardRejectsCorruptPendingCommandJournal(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcileShardRejectsBrokenTerminalCommandIdempotencyAuthority(t *testing.T) {
+	t.Run("missing terminal idempotency record", func(t *testing.T) {
+		ctx := context.Background()
+		pool := postgresPool(t)
+		fixture := seedReconciliationFixture(t, pool, 8)
+
+		var commandIDText string
+		var scope string
+		var idempotencyKey string
+		var requestHash []byte
+		if err := pool.QueryRow(ctx, `
+			SELECT command.command_id::text, idempotency.scope,
+			       idempotency.idempotency_key, idempotency.request_hash
+			  FROM trading.commands AS command
+			  JOIN trading.idempotency_records AS idempotency
+			    ON idempotency.command_id = command.command_id
+			 WHERE command.command_type = 'adjust_balance'
+			   AND command.status <> 'pending'
+			 ORDER BY command.account_sequence
+			 LIMIT 1`,
+		).Scan(
+			&commandIDText,
+			&scope,
+			&idempotencyKey,
+			&requestHash,
+		); err != nil {
+			t.Fatalf("load terminal monetary command: %v", err)
+		}
+		commandID, err := engine.ParseID(commandIDText)
+		if err != nil {
+			t.Fatalf("parse terminal command ID: %v", err)
+		}
+		var balanceBefore string
+		var ledgerEntriesBefore int
+		if err := pool.QueryRow(ctx, `
+			SELECT trim_scale(total)::text
+			  FROM ledger.balances
+			 WHERE account_id = 'account-1' AND currency = 'USDC'`,
+		).Scan(&balanceBefore); err != nil {
+			t.Fatalf("read balance before corruption: %v", err)
+		}
+		if err := pool.QueryRow(
+			ctx,
+			"SELECT count(*) FROM ledger.entries",
+		).Scan(&ledgerEntriesBefore); err != nil {
+			t.Fatalf("count ledger entries before corruption: %v", err)
+		}
+
+		corruptAsReplicationAuthority(
+			t,
+			pool,
+			"DELETE FROM trading.idempotency_records WHERE command_id = $1",
+			commandID.String(),
+		)
+		report, err := fixture.store.ReconcileShard(ctx, 8)
+		if !errors.Is(err, platformpostgres.ErrReconciliationMismatch) ||
+			report.Ready ||
+			report.CommandMismatchCount == 0 {
+			t.Fatalf("missing terminal idempotency reconciliation = %+v, error %v", report, err)
+		}
+		assertRowCount(t, pool, "engine.shard_faults", 1)
+		recovered, err := fixture.store.RecoverTradingState(ctx, 8)
+		if err != nil {
+			t.Fatalf("RecoverTradingState: %v", err)
+		}
+		if recovered.Ready() {
+			t.Fatal("missing terminal idempotency restart became ready")
+		}
+
+		retryAction := engine.TradingAction{
+			Kind: engine.TradingActionAdjustBalance,
+			AdjustBalance: &engine.AdjustBalance{
+				AccountID:     "account-1",
+				Currency:      "USDC",
+				CurrencyScale: 2,
+				Operation:     engine.BalanceOperationDeposit,
+				Amount:        "1000",
+			},
+		}
+		retryInput := nextStoredInput(
+			t,
+			recovered,
+			fixture.ids,
+			fixture.clock,
+			retryAction,
+		)
+		var nextAccountSequence uint64
+		if err := pool.QueryRow(ctx, `
+			SELECT max(account_sequence) + 1
+			  FROM trading.commands
+			 WHERE account_id = 'account-1'`,
+		).Scan(&nextAccountSequence); err != nil {
+			t.Fatalf("read retry account sequence: %v", err)
+		}
+		retryInput.SourceSequence = nextAccountSequence
+		outboxPayload, err := engine.EncodeInputMessage(retryInput)
+		if err != nil {
+			t.Fatalf("EncodeInputMessage retry: %v", err)
+		}
+		if _, err := platformpostgres.NewCommandJournal(pool).Begin(
+			ctx,
+			platformpostgres.BeginCommandRequest{
+				Scope:            scope,
+				IdempotencyKey:   idempotencyKey,
+				RequestHash:      [sha256.Size]byte(requestHash),
+				CommandID:        retryInput.InputID,
+				AccountID:        "account-1",
+				AccountSequence:  nextAccountSequence,
+				CommandType:      string(retryAction.Kind),
+				SchemaVersion:    retryInput.SchemaVersion,
+				CanonicalPayload: retryInput.Payload.Bytes(),
+				OutboxSubject:    "engine.input.8.command.v1",
+				OutboxPayload:    outboxPayload,
+				LogicalTime:      time.Unix(0, retryInput.LogicalTime.UnixNano()).UTC(),
+				ExpiresAt: time.Unix(
+					0,
+					fixture.clock.Now().UnixNano(),
+				).UTC().Add(24 * time.Hour),
+			},
+		); err != nil {
+			t.Fatalf("Begin retry after corruption: %v", err)
+		}
+		next, _, _, err := fixture.store.ApplyTrading(
+			ctx,
+			recovered,
+			retryInput,
+			retryAction,
+			platformpostgres.ApplyOptions{},
+		)
+		var engineErr *engine.Error
+		if !errors.As(err, &engineErr) ||
+			engineErr.Kind != engine.ErrShardNotReady ||
+			next.Ready() {
+			t.Fatalf("retry after corruption state = %+v, error %v", next, err)
+		}
+		var balanceAfter string
+		var ledgerEntriesAfter int
+		if err := pool.QueryRow(ctx, `
+			SELECT trim_scale(total)::text
+			  FROM ledger.balances
+			 WHERE account_id = 'account-1' AND currency = 'USDC'`,
+		).Scan(&balanceAfter); err != nil {
+			t.Fatalf("read balance after retry: %v", err)
+		}
+		if err := pool.QueryRow(
+			ctx,
+			"SELECT count(*) FROM ledger.entries",
+		).Scan(&ledgerEntriesAfter); err != nil {
+			t.Fatalf("count ledger entries after retry: %v", err)
+		}
+		if balanceAfter != balanceBefore || ledgerEntriesAfter != ledgerEntriesBefore {
+			t.Fatalf(
+				"retry duplicated money: balance %s -> %s, ledger entries %d -> %d",
+				balanceBefore,
+				balanceAfter,
+				ledgerEntriesBefore,
+				ledgerEntriesAfter,
+			)
+		}
+	})
+
+	t.Run("orphan idempotency record", func(t *testing.T) {
+		ctx := context.Background()
+		pool := postgresPool(t)
+		fixture := seedReconciliationFixture(t, pool, 8)
+		orphanID := engine.IDFromSequence(engine.ID{}, 8999)
+		corruptAsReplicationAuthority(t, pool, `
+			INSERT INTO trading.idempotency_records (
+				scope, idempotency_key, request_hash, command_id, state, expires_at
+			) VALUES (
+				'account:orphan', 'orphan',
+				decode(repeat('8f', 32), 'hex'), $1, 'in_progress',
+				'2026-07-26T00:00:00Z'
+			)`,
+			orphanID.String(),
+		)
+		report, err := fixture.store.ReconcileShard(ctx, 8)
+		if !errors.Is(err, platformpostgres.ErrReconciliationMismatch) ||
+			report.Ready ||
+			report.CommandMismatchCount == 0 {
+			t.Fatalf("orphan idempotency reconciliation = %+v, error %v", report, err)
+		}
+		recovered, err := fixture.store.RecoverTradingState(ctx, 8)
+		if err != nil {
+			t.Fatalf("RecoverTradingState: %v", err)
+		}
+		if recovered.Ready() {
+			t.Fatal("orphan idempotency restart became ready")
+		}
+	})
 }
 
 func TestReconcileShardAcceptsRoundedMultiFillAndClosedPosition(t *testing.T) {
@@ -2007,15 +2197,29 @@ func TestEngineStoreFailsClosedOnInvalidCommandShardAssignment(t *testing.T) {
 				}
 			}
 			if _, err := pool.Exec(context.Background(), `
+				WITH idempotency AS (
+					INSERT INTO trading.idempotency_records (
+						scope, idempotency_key, request_hash, command_id,
+						state, expires_at
+					) VALUES (
+						'account:account-1', 'missing-mapping',
+						decode(repeat('61', 32), 'hex'), $1,
+						'in_progress', $6
+					)
+					RETURNING command_id
+				)
 				INSERT INTO trading.commands (
 					command_id, account_id, account_sequence, command_type,
 					schema_version, canonical_payload, status, logical_time
-				) VALUES ($1, 'account-1', 1, $2, $3, $4, 'pending', $5)`,
+				)
+				SELECT command_id, 'account-1', 1, $2, $3, $4, 'pending', $5
+				  FROM idempotency`,
 				commandID.String(),
 				string(action.Kind),
 				storedInput.SchemaVersion,
 				payload.Bytes(),
 				now.UnixNano(),
+				now.Add(24*time.Hour),
 			); err != nil {
 				t.Fatalf("seed durable command without valid mapping: %v", err)
 			}
@@ -2398,35 +2602,35 @@ func TestEngineStoreBindsRedundantCommandMetadata(t *testing.T) {
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name   string
-		mutate func(context.Context, *pgxpool.Pool, engine.ID) error
+		mutate func(*testing.T, context.Context, *pgxpool.Pool, engine.ID) error
 	}{
 		{
 			name: "command type",
-			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
-				_, err := pool.Exec(ctx, `
+			mutate: func(t *testing.T, _ context.Context, pool *pgxpool.Pool, id engine.ID) error {
+				corruptAsReplicationAuthority(t, pool, `
 					UPDATE trading.commands
 					   SET command_type = 'submit_order'
 					 WHERE command_id = $1`,
 					id.String(),
 				)
-				return err
+				return nil
 			},
 		},
 		{
 			name: "logical time",
-			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
-				_, err := pool.Exec(ctx, `
+			mutate: func(t *testing.T, _ context.Context, pool *pgxpool.Pool, id engine.ID) error {
+				corruptAsReplicationAuthority(t, pool, `
 					UPDATE trading.commands
 					   SET logical_time = logical_time + 1000000000
 					 WHERE command_id = $1`,
 					id.String(),
 				)
-				return err
+				return nil
 			},
 		},
 		{
 			name: "outbox schema",
-			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
+			mutate: func(_ *testing.T, ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
 				_, err := pool.Exec(ctx, `
 					UPDATE messaging.outbox
 					   SET schema_version = schema_version + 1
@@ -2463,7 +2667,7 @@ func TestEngineStoreBindsRedundantCommandMetadata(t *testing.T) {
 			); err != nil {
 				t.Fatalf("Begin: %v", err)
 			}
-			if err := test.mutate(ctx, pool, commandID); err != nil {
+			if err := test.mutate(t, ctx, pool, commandID); err != nil {
 				t.Fatalf("mutate durable metadata: %v", err)
 			}
 			input, action, err := engine.DecodeInputMessage(request.OutboxPayload)
@@ -2675,13 +2879,27 @@ func seedPendingCommand(
 	if err != nil {
 		t.Fatalf("encode pending command %s outbox: %v", input.InputID, err)
 	}
+	requestHash := sha256.Sum256(input.Payload.Bytes())
 	if _, err := pool.Exec(context.Background(), `
+		WITH idempotency AS (
+			INSERT INTO trading.idempotency_records (
+				scope, idempotency_key, request_hash, command_id, state, expires_at
+			) VALUES ($1,$2,$3,$4,'in_progress',$5)
+			ON CONFLICT (scope, idempotency_key) DO NOTHING
+			RETURNING command_id
+		)
 		INSERT INTO trading.commands (
 			command_id, account_id, account_sequence, command_type,
 			schema_version, canonical_payload, status, logical_time
-		) VALUES ($1,$2,$3,$4,$5,$6,'pending',$7)
+		)
+		SELECT command_id,$6,$7,$8,$9,$10,'pending',$11
+		  FROM idempotency
 		ON CONFLICT (command_id) DO NOTHING`,
+		"test:"+accountID,
 		input.InputID.String(),
+		requestHash[:],
+		input.InputID.String(),
+		time.Unix(0, input.LogicalTime.UnixNano()).UTC().Add(24*time.Hour),
 		accountID,
 		input.SourceSequence,
 		string(action.Kind),
@@ -2706,6 +2924,41 @@ func seedPendingCommand(
 		outboxPayload,
 	); err != nil {
 		t.Fatalf("seed pending command %s outbox: %v", input.InputID, err)
+	}
+}
+
+func corruptAsReplicationAuthority(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	statement string,
+	arguments ...any,
+) {
+	t.Helper()
+	connection, err := pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire corruption connection: %v", err)
+	}
+	defer connection.Release()
+	if _, err := connection.Exec(
+		context.Background(),
+		"SET session_replication_role = replica",
+	); err != nil {
+		t.Fatalf("enable corruption authority: %v", err)
+	}
+	defer func() {
+		if _, resetErr := connection.Exec(
+			context.Background(),
+			"SET session_replication_role = origin",
+		); resetErr != nil {
+			t.Fatalf("restore replication authority: %v", resetErr)
+		}
+	}()
+	if _, err := connection.Exec(
+		context.Background(),
+		statement,
+		arguments...,
+	); err != nil {
+		t.Fatalf("apply corruption: %v", err)
 	}
 }
 

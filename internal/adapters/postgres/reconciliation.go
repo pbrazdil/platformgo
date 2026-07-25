@@ -282,10 +282,18 @@ func (store *EngineStore) ReconcileShard(
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*)
 		  FROM trading.commands AS command
+		  FULL OUTER JOIN trading.idempotency_records AS idempotency
+		    ON idempotency.command_id = command.command_id
 		  LEFT JOIN engine.input_receipts AS receipt
 		    ON receipt.input_id = command.command_id
 		   AND receipt.shard_id = $1
-		 WHERE (
+		 WHERE command.command_id IS NULL
+		    OR idempotency.command_id IS NULL
+		    OR (
+				command.status = 'pending'
+				AND idempotency.state <> 'in_progress'
+		    )
+		    OR (
 				(
 					command.status = 'pending'
 					AND receipt.input_id IS NOT NULL
