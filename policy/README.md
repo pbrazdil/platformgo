@@ -38,3 +38,7 @@ implementation; the parent `internal/decimal` compatibility tree remains
 quarantined. Classification rows may predeclare a package boundary for the
 next implementation PR; strict lint selects only classified directories that
 exist in the current tree.
+
+`unsafe` remains forbidden in handwritten code. The sole structural exception
+is an actual `protoc-gen-go` generated `.pb.go` file below `contracts/gen/`;
+both its path and standard generated-file header are checked.

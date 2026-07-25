@@ -1,6 +1,8 @@
 path,classification,economic,deterministic
+cmd,infrastructure,false,false
 internal/account,ported-compatibility,true,true
 internal/adapters,infrastructure,false,false
+internal/application,non-economic,false,false
 internal/currency,ported-compatibility,true,true
 internal/decimal,ported-compatibility,true,true
 internal/decimal/economic,production-economic,true,true
@@ -18,6 +20,7 @@ internal/money,ported-compatibility,true,true
 internal/order,ported-compatibility,true,true
 internal/position,ported-compatibility,true,true
 internal/report,ported-compatibility,true,true
+internal/runtime,infrastructure,false,false
 internal/testsupport/postgresfixture,infrastructure,false,false
 testkit,test-placeholder,false,true
 tests,test-placeholder,false,false
