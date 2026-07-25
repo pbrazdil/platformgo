@@ -82,6 +82,9 @@ jobs:
       PLATFORMGO_TEST_POSTGRES_DSN: postgres://postgres:platformgo@127.0.0.1:5432/platformgo_test?sslmode=disable
       PLATFORMGO_TEST_POSTGRES_RESET_AUTHORIZED: YES_I_UNDERSTAND_THIS_DROPS_SCHEMAS
       PLATFORMGO_TEST_NATS_URL: nats://127.0.0.1:4222
+      PLATFORMGO_TEST_CENTRIFUGO_URL: http://127.0.0.1:8000
+      PLATFORMGO_TEST_CENTRIFUGO_API_KEY: phase3-ci-api-key
+      PLATFORMGO_TEST_CENTRIFUGO_TOKEN_SECRET: phase3-ci-token-secret-0123456789abcdef
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -105,6 +108,24 @@ jobs:
           done
           docker logs platformgo-nats
           exit 1
+      - name: Start Centrifugo
+        run: |
+          docker run --detach --name platformgo-centrifugo \
+            --publish 127.0.0.1:8000:8000 \
+            --env CENTRIFUGO_HEALTH_ENABLED=true \
+            --env CENTRIFUGO_HTTP_API_KEY="$PLATFORMGO_TEST_CENTRIFUGO_API_KEY" \
+            --env CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY="$PLATFORMGO_TEST_CENTRIFUGO_TOKEN_SECRET" \
+            --env 'CENTRIFUGO_CHANNEL_NAMESPACES=[{"name":"user","history_size":100,"history_ttl":"300s","force_recovery":true}]' \
+            centrifugo/centrifugo@sha256:8ba0c9443dadedc21b20254b3fc76f35c1998b29acc7cdec877ea0c3636c237e \
+            centrifugo
+          for attempt in {1..20}; do
+            if curl --fail --silent "$PLATFORMGO_TEST_CENTRIFUGO_URL/health" >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs platformgo-centrifugo
+          exit 1
       - if: ${{ hashFiles('go.mod') != '' }}
         run: go test -p 1 ./... -count=1
 
@@ -127,6 +148,9 @@ jobs:
       PLATFORMGO_TEST_POSTGRES_DSN: postgres://postgres:platformgo@127.0.0.1:5432/platformgo_test?sslmode=disable
       PLATFORMGO_TEST_POSTGRES_RESET_AUTHORIZED: YES_I_UNDERSTAND_THIS_DROPS_SCHEMAS
       PLATFORMGO_TEST_NATS_URL: nats://127.0.0.1:4222
+      PLATFORMGO_TEST_CENTRIFUGO_URL: http://127.0.0.1:8000
+      PLATFORMGO_TEST_CENTRIFUGO_API_KEY: phase3-ci-api-key
+      PLATFORMGO_TEST_CENTRIFUGO_TOKEN_SECRET: phase3-ci-token-secret-0123456789abcdef
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -149,6 +173,24 @@ jobs:
             sleep 1
           done
           docker logs platformgo-nats
+          exit 1
+      - name: Start Centrifugo
+        run: |
+          docker run --detach --name platformgo-centrifugo \
+            --publish 127.0.0.1:8000:8000 \
+            --env CENTRIFUGO_HEALTH_ENABLED=true \
+            --env CENTRIFUGO_HTTP_API_KEY="$PLATFORMGO_TEST_CENTRIFUGO_API_KEY" \
+            --env CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY="$PLATFORMGO_TEST_CENTRIFUGO_TOKEN_SECRET" \
+            --env 'CENTRIFUGO_CHANNEL_NAMESPACES=[{"name":"user","history_size":100,"history_ttl":"300s","force_recovery":true}]' \
+            centrifugo/centrifugo@sha256:8ba0c9443dadedc21b20254b3fc76f35c1998b29acc7cdec877ea0c3636c237e \
+            centrifugo
+          for attempt in {1..20}; do
+            if curl --fail --silent "$PLATFORMGO_TEST_CENTRIFUGO_URL/health" >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs platformgo-centrifugo
           exit 1
       - if: ${{ hashFiles('go.mod') != '' }}
         run: go test -race -p 1 ./... -count=1
