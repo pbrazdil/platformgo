@@ -95,11 +95,6 @@ nautilus
 
 The Go binaries may route these commands to a new implementation. Environment variable names, ports and health endpoints required by deployment compatibility are frozen in tests/manifest.
 
-Implemented worker handlers include `outbox-publisher`,
-`realtime-publisher`, and `event-consumer` (including its compatible pattern
-form). The realtime publisher consumes only committed PostgreSQL publications
-and retries with the same event and channel sequence.
-
 ## 8. Compatibility manifest
 
 Create `contracts/compatibility-manifest.json` containing:

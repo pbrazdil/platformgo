@@ -12,63 +12,6 @@
 
 Schema migration failure blocks deployment.
 
-### Phase 3 realtime schema upgrade
-
-Migration `20260725001100_phase3_committed_realtime_outbox.up.sql` has an
-enforced no-overlap compatibility boundary:
-
-1. As the PostgreSQL security owner, pre-provision
-   `platformgo_realtime` and `platformgo_realtime_repair` as `NOLOGIN`,
-   `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`,
-   `NOBYPASSRLS` roles with no memberships. Provision separate login roles
-   that belong to exactly one of those roles.
-2. Enter halt, drain the old engine singleton, and prove its ownership and
-   transaction have ended.
-3. Take the rollback backup and run the new-image migrator. A missing or unsafe
-   role, lock timeout, invalid existing user channel, or failed constraint
-   validation aborts the migration without partial application.
-4. Start only the new API/workers/engine image. Every runtime verifies the
-   exact immutable migration set. The database rejects economic receipts from
-   an old engine that lacks the new runtime-schema binding.
-5. Verify reconciliation and authoritative client snapshots before leaving
-   halt.
-
-After migration 011 commits, binary rollback to the prior engine is forbidden:
-use forward-fix, keep trading halted, reconcile committed state, and require
-clients to reload authoritative snapshots. Database rollback means restoring
-the pre-migration backup during the halted window, not editing or reversing an
-applied migration.
-
-### Realtime quarantine repair
-
-A permanent error or ten transient/ambiguous failures quarantines the channel
-head, keeps readiness false, and blocks later sequence numbers. After fixing
-the cause, the repair login calls only:
-
-```sql
-SELECT realtime.requeue_publication(
-    '<stable-request-uuid>',
-    '<channel>',
-    '<stable-event-uuid>',
-    '<authenticated-operator>',
-    '<verified-repair-reason>'
-);
-```
-
-The function atomically records the immutable repair audit and opens a fresh
-bounded retry cycle without changing event identity or sequence. Retrying the
-same request and payload returns success; reusing its request ID with different
-data fails. Raw publication updates are forbidden. Keep trading halted if
-reconciliation detects a sequence gap, allocator mismatch, or publication
-identity corruption.
-
-Realtime readiness is deliberately false while any publication is claimed but
-not yet durably acknowledged. This includes the bounded interval of a healthy
-Centrifugo request: the database cannot safely distinguish that in-flight
-claim from an orphan left by a process failure. Liveness remains true; use
-readiness for traffic and replacement decisions, not as a restart trigger for
-this short delivery window.
-
 ## 2. Health semantics
 
 ### Liveness
