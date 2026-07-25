@@ -1,5 +1,6 @@
 # One direct Go module path per line. Additions require dependency review/ADR.
 github.com/cockroachdb/apd/v3
+github.com/golang-jwt/jwt/v5
 github.com/google/uuid
 github.com/jackc/pgx/v5
 github.com/nats-io/nats.go
