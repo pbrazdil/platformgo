@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -50,6 +51,12 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 		"ledger.balances",
 		"messaging.outbox",
 		"messaging.inbox",
+		"identity.users",
+		"identity.user_accounts",
+		"identity.sessions",
+		"identity.idempotency_responses",
+		"identity.account_profiles",
+		"trading.order_intents",
 	} {
 		var exists bool
 		if err := pool.QueryRow(
@@ -71,6 +78,7 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 	assertLedgerBalanceConstraint(t, pool)
 	assertImmutableLedgerFacts(t, pool)
 	assertAPIRoleCannotMutateEconomicTables(t, pool)
+	assertAPIRoleIdentityBoundary(t, pool)
 }
 
 func TestCommandIdempotencyAuthorityMigrationUpgradesPopulatedBaseline(t *testing.T) {
@@ -167,6 +175,544 @@ func TestCommandIdempotencyAuthorityMigrationUpgradesPopulatedBaseline(t *testin
 	); err == nil {
 		t.Fatal("upgraded idempotency authority was deletable")
 	}
+}
+
+func TestPhase3MigrationsUpgradePopulatedPhase2Schema(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	migrationDirectory := filepath.Join("..", "..", "..", "migrations")
+	phase2Files := fstest.MapFS{}
+	for _, name := range []string{
+		"20260724000100_durable_execution_foundation.up.sql",
+		"20260725000100_command_idempotency_authority.up.sql",
+	} {
+		raw, err := os.ReadFile(filepath.Join(migrationDirectory, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		phase2Files[name] = &fstest.MapFile{Data: raw}
+	}
+	if err := platformpostgres.NewMigrator(pool, phase2Files).Migrate(ctx); err != nil {
+		t.Fatalf("apply previous Phase 2 schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO engine.deployment_shard (shard_id) VALUES (17);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('phase2-account', 'NETTING');
+		INSERT INTO engine.account_shards (account_id, shard_id)
+		VALUES ('phase2-account', 17)`); err != nil {
+		t.Fatalf("seed populated Phase 2 schema: %v", err)
+	}
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(migrationDirectory),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("upgrade Phase 2 schema to Phase 3: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+	var shardID int64
+	if err := pool.QueryRow(ctx, `
+		SELECT shard_id
+		  FROM engine.account_shards
+		 WHERE account_id = 'phase2-account'`).Scan(&shardID); err != nil {
+		t.Fatalf("read preserved Phase 2 account: %v", err)
+	}
+	if shardID != 17 {
+		t.Fatalf("preserved Phase 2 account shard = %d, want 17", shardID)
+	}
+	var functionExists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT to_regprocedure(
+			'identity.provision_broker_account(text,text,bigint,text,text,text[],timestamp with time zone)'
+		) IS NOT NULL`).Scan(&functionExists); err != nil {
+		t.Fatalf("inspect broker provisioning function: %v", err)
+	}
+	if !functionExists {
+		t.Fatal("broker provisioning function missing after Phase 3 upgrade")
+	}
+}
+
+func TestEngineIdentitySchemaAccessUpgradePreservesIntentBeforeCutoverGuard(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	migrationDirectory := filepath.Join("..", "..", "..", "migrations")
+	previousFiles := fstest.MapFS{}
+	for _, name := range []string{
+		"20260724000100_durable_execution_foundation.up.sql",
+		"20260725000100_command_idempotency_authority.up.sql",
+		"20260725000200_phase3_identity_compatibility.up.sql",
+		"20260725000300_phase3_broker_mutation_compatibility.up.sql",
+		"20260725000400_phase3_authority_and_replay_hardening.up.sql",
+		"20260725000500_phase3_broker_user_conflict_target.up.sql",
+		"20260725000600_phase3_completion_authority_and_candidate_guard.up.sql",
+	} {
+		raw, err := os.ReadFile(filepath.Join(migrationDirectory, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		previousFiles[name] = &fstest.MapFile{Data: raw}
+	}
+	if err := platformpostgres.NewMigrator(pool, previousFiles).
+		MigrateAndProvision(ctx, 7); err != nil {
+		t.Fatalf("apply previous Phase 3 schema: %v", err)
+	}
+	commandID := "019f9460-4b36-4e9b-8f44-682611f70107"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO identity.users (
+			user_id, login, normalized_login, broker_subject
+		) VALUES (
+			'urn:xb:user:schema-upgrade',
+			'schema-upgrade',
+			'schema-upgrade',
+			'urn:xb:tenant:schema-upgrade'
+		);
+		INSERT INTO engine.account_shards (account_id, shard_id)
+		VALUES ('urn:xb:account:schema-upgrade', 7);
+		INSERT INTO trading.idempotency_records (
+			scope, idempotency_key, request_hash, command_id, state, expires_at
+		) VALUES (
+			'broker-accounturn:xb:apikey:schema-upgrade',
+			'schema-upgrade',
+			decode(repeat('17', 32), 'hex'),
+			'019f9460-4b36-4e9b-8f44-682611f70107',
+			'in_progress',
+			'2026-07-26T00:00:00Z'
+		);
+		INSERT INTO trading.commands (
+			command_id, account_id, account_sequence, command_type,
+			schema_version, canonical_payload, status, logical_time
+		) VALUES (
+			'019f9460-4b36-4e9b-8f44-682611f70107',
+			'urn:xb:account:schema-upgrade',
+			1,
+			'configure_account',
+			1,
+			'{"configureAccount":{"accountId":"urn:xb:account:schema-upgrade","omsMode":"NETTING"}}',
+			'pending',
+			1785002400000000000
+		);
+		INSERT INTO identity.account_provisioning_intents (
+			command_id, account_id, broker_subject, user_id, login,
+			base_currency, market_venue, permitted_classes, created_at
+		) VALUES (
+			'019f9460-4b36-4e9b-8f44-682611f70107',
+			'urn:xb:account:schema-upgrade',
+			'urn:xb:tenant:schema-upgrade',
+			'urn:xb:user:schema-upgrade',
+			107,
+			'USDC',
+			'HYPERLIQUID',
+			ARRAY['CRYPTOCURRENCY'],
+			'2026-07-25T18:00:00Z'
+		)`); err != nil {
+		t.Fatalf("seed previous Phase 3 provisioning intent: %v", err)
+	}
+	throughSevenFiles := fstest.MapFS{}
+	for name, file := range previousFiles {
+		throughSevenFiles[name] = file
+	}
+	raw, err := os.ReadFile(filepath.Join(
+		migrationDirectory,
+		"20260725000700_phase3_engine_identity_schema_access.up.sql",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	throughSevenFiles["20260725000700_phase3_engine_identity_schema_access.up.sql"] = &fstest.MapFile{Data: raw}
+	if err := platformpostgres.NewMigrator(
+		pool,
+		throughSevenFiles,
+	).Migrate(ctx); err != nil {
+		t.Fatalf("apply engine identity schema correction: %v", err)
+	}
+	var canUseIdentity bool
+	var intentCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			has_schema_privilege(
+				'platformgo_engine',
+				'identity',
+				'USAGE'
+			),
+			(
+				SELECT count(*)
+				  FROM identity.account_provisioning_intents
+				 WHERE command_id = $1
+			)`,
+		commandID,
+	).Scan(&canUseIdentity, &intentCount); err != nil {
+		t.Fatal(err)
+	}
+	if !canUseIdentity || intentCount != 1 {
+		t.Fatalf(
+			"engine identity usage=%t preserved intents=%d",
+			canUseIdentity,
+			intentCount,
+		)
+	}
+	err = platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(migrationDirectory),
+	).Migrate(ctx)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("cutover guard error=%v, want SQLSTATE 55000", err)
+	}
+}
+
+func TestPhase3UpgradeRejectsAmbiguousCandidateIdentityData(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	migrationDirectory := filepath.Join("..", "..", "..", "migrations")
+	candidateFiles := fstest.MapFS{}
+	for _, name := range []string{
+		"20260724000100_durable_execution_foundation.up.sql",
+		"20260725000100_command_idempotency_authority.up.sql",
+		"20260725000200_phase3_identity_compatibility.up.sql",
+		"20260725000300_phase3_broker_mutation_compatibility.up.sql",
+	} {
+		raw, err := os.ReadFile(filepath.Join(migrationDirectory, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		candidateFiles[name] = &fstest.MapFile{Data: raw}
+	}
+	if err := platformpostgres.NewMigrator(pool, candidateFiles).Migrate(ctx); err != nil {
+		t.Fatalf("apply unreleased candidate history: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO identity.users (
+			user_id, login, normalized_login, email, normalized_email,
+			created_at
+		) VALUES (
+			'urn:xb:user:ambiguous', 'ambiguous', 'ambiguous',
+			'ambiguous@example.com', 'ambiguous@example.com',
+			'9999-01-01T00:00:00Z'
+		);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:ambiguous', 'NETTING');
+		INSERT INTO identity.user_accounts (user_id, account_id, created_at)
+		VALUES (
+			'urn:xb:user:ambiguous',
+			'urn:xb:account:ambiguous',
+			'9999-01-01T00:00:00Z'
+		);
+		INSERT INTO identity.idempotency_responses (
+			scope, idempotency_key, request_hash, response_status,
+			response_body, expires_at, created_at
+		) VALUES (
+			'candidate', 'ambiguous', decode(repeat('aa', 32), 'hex'),
+			201, '{"id":"urn:xb:account:ambiguous"}',
+			'9999-01-02T00:00:00Z',
+			'9999-01-01T00:00:00Z'
+		)`); err != nil {
+		t.Fatalf("seed ambiguous candidate identity data: %v", err)
+	}
+	err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(migrationDirectory),
+	).Migrate(ctx)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("ambiguous candidate upgrade error=%v, want SQLSTATE 55000", err)
+	}
+	var users int
+	var ownerships int
+	var responses int
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM identity.users),
+			(SELECT count(*) FROM identity.user_accounts),
+			(SELECT count(*) FROM identity.idempotency_responses)`,
+	).Scan(&users, &ownerships, &responses); err != nil {
+		t.Fatal(err)
+	}
+	if users != 1 || ownerships != 1 || responses != 1 {
+		t.Fatalf(
+			"refused upgrade changed candidate data users=%d ownerships=%d responses=%d",
+			users,
+			ownerships,
+			responses,
+		)
+	}
+	if _, err := pool.Exec(ctx, `
+		TRUNCATE identity.idempotency_responses,
+		         identity.user_accounts,
+		         identity.users
+		CASCADE`); err != nil {
+		t.Fatalf("owner-directed candidate reset: %v", err)
+	}
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(migrationDirectory),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("upgrade after owner-directed reset: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
+func TestPhase3UpgradeRejectsCandidateTimestampEqualToAuthorityCutover(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	migrationDirectory := filepath.Join("..", "..", "..", "migrations")
+	throughThree := fstest.MapFS{}
+	for _, name := range []string{
+		"20260724000100_durable_execution_foundation.up.sql",
+		"20260725000100_command_idempotency_authority.up.sql",
+		"20260725000200_phase3_identity_compatibility.up.sql",
+		"20260725000300_phase3_broker_mutation_compatibility.up.sql",
+	} {
+		raw, err := os.ReadFile(filepath.Join(migrationDirectory, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		throughThree[name] = &fstest.MapFile{Data: raw}
+	}
+	if err := platformpostgres.NewMigrator(pool, throughThree).Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO identity.users (
+			user_id, login, normalized_login, created_at
+		) VALUES (
+			'urn:xb:user:equal-cutover',
+			'equal-cutover',
+			'equal-cutover',
+			'9999-01-01T00:00:00Z'
+		)`); err != nil {
+		t.Fatal(err)
+	}
+	throughFive := fstest.MapFS{}
+	for name, file := range throughThree {
+		throughFive[name] = file
+	}
+	for _, name := range []string{
+		"20260725000400_phase3_authority_and_replay_hardening.up.sql",
+		"20260725000500_phase3_broker_user_conflict_target.up.sql",
+	} {
+		raw, err := os.ReadFile(filepath.Join(migrationDirectory, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		throughFive[name] = &fstest.MapFile{Data: raw}
+	}
+	if err := platformpostgres.NewMigrator(pool, throughFive).Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var authorityAppliedAt time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT applied_at
+		  FROM engine.schema_migrations
+		 WHERE filename =
+		       '20260725000400_phase3_authority_and_replay_hardening.up.sql'
+	`).Scan(&authorityAppliedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE identity.users
+		   SET created_at = $1
+		 WHERE user_id = 'urn:xb:user:equal-cutover'`,
+		authorityAppliedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(migrationDirectory),
+	).Migrate(ctx)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("equal-cutover upgrade error=%v, want SQLSTATE 55000", err)
+	}
+	var createdAt time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT created_at
+		  FROM identity.users
+		 WHERE user_id = 'urn:xb:user:equal-cutover'
+	`).Scan(&createdAt); err != nil {
+		t.Fatal(err)
+	}
+	if !createdAt.Equal(authorityAppliedAt) {
+		t.Fatalf(
+			"refused upgrade changed created_at=%s, want %s",
+			createdAt,
+			authorityAppliedAt,
+		)
+	}
+	if _, err := pool.Exec(ctx, "TRUNCATE identity.users CASCADE"); err != nil {
+		t.Fatal(err)
+	}
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(migrationDirectory),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("upgrade after owner-directed reset: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
+func TestPhase3UpgradeRejectsRuntimeRoleDriftBeforeApplyingPrivileges(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	migrationDirectory := filepath.Join("..", "..", "..", "migrations")
+	phase2Files := fstest.MapFS{}
+	for _, name := range []string{
+		"20260724000100_durable_execution_foundation.up.sql",
+		"20260725000100_command_idempotency_authority.up.sql",
+	} {
+		raw, err := os.ReadFile(filepath.Join(migrationDirectory, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		phase2Files[name] = &fstest.MapFile{Data: raw}
+	}
+	if err := platformpostgres.NewMigrator(pool, phase2Files).Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO engine.deployment_shard (shard_id) VALUES (17);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('role-drift-account', 'NETTING');
+		GRANT platformgo_engine TO platformgo_api`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(
+			context.Background(),
+			"REVOKE platformgo_engine FROM platformgo_api",
+		)
+	})
+	err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(migrationDirectory),
+	).Migrate(ctx)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "42501" {
+		t.Fatalf("unsafe role upgrade error = %v, want SQLSTATE 42501", err)
+	}
+	var migrationCount int
+	var identityExists bool
+	var accountExists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM engine.schema_migrations),
+			to_regnamespace('identity') IS NOT NULL,
+			EXISTS (
+				SELECT 1
+				  FROM trading.accounts
+				 WHERE account_id = 'role-drift-account'
+			)`,
+	).Scan(
+		&migrationCount,
+		&identityExists,
+		&accountExists,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if migrationCount != 2 || identityExists || !accountExists {
+		t.Fatalf(
+			"role drift changed upgrade state: migrations=%d identity=%t account=%t",
+			migrationCount,
+			identityExists,
+			accountExists,
+		)
+	}
+}
+
+func TestPhase3UpgradeUsesBoundedLockAcquisitionAndRetriesCleanly(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	migrationDirectory := filepath.Join("..", "..", "..", "migrations")
+	phase2Files := fstest.MapFS{}
+	for _, name := range []string{
+		"20260724000100_durable_execution_foundation.up.sql",
+		"20260725000100_command_idempotency_authority.up.sql",
+	} {
+		raw, err := os.ReadFile(filepath.Join(migrationDirectory, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		phase2Files[name] = &fstest.MapFile{Data: raw}
+	}
+	if err := platformpostgres.NewMigrator(pool, phase2Files).Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lockingTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lockingTx.Rollback(context.Background()) }()
+	if _, err := lockingTx.Exec(ctx, `
+		LOCK TABLE trading.commands IN ROW EXCLUSIVE MODE;
+		INSERT INTO trading.idempotency_records (
+			scope, idempotency_key, request_hash, command_id, state, expires_at
+		) VALUES (
+			'lock-test', 'lock-test', decode(repeat('00', 32), 'hex'),
+			'019f9519-ddf7-4b93-a9db-dae6ca7a6499',
+			'in_progress', clock_timestamp() + interval '1 day'
+		);
+		INSERT INTO trading.commands (
+			command_id, account_id, account_sequence, command_type,
+			schema_version, canonical_payload, status, logical_time
+		) VALUES (
+			'019f9519-ddf7-4b93-a9db-dae6ca7a6499',
+			'lock-test-account', 1, 'lock-test', 1, '{}', 'pending', 1
+		)`); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now()
+	err = platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(migrationDirectory),
+	).Migrate(ctx)
+	elapsed := time.Since(startedAt)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55P03" {
+		t.Fatalf("contended upgrade error = %v, want SQLSTATE 55P03", err)
+	}
+	if elapsed < 4*time.Second || elapsed > 8*time.Second {
+		t.Fatalf("bounded lock wait = %s, want approximately 5s", elapsed)
+	}
+	var migrationCount int
+	var identityExists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM engine.schema_migrations),
+			to_regnamespace('identity') IS NOT NULL`,
+	).Scan(&migrationCount, &identityExists); err != nil {
+		t.Fatal(err)
+	}
+	if migrationCount != 2 || identityExists {
+		t.Fatalf(
+			"contended upgrade partially applied: migrations=%d identity=%t",
+			migrationCount,
+			identityExists,
+		)
+	}
+	if err := lockingTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(migrationDirectory),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("retry uncontended Phase 3 upgrade: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
 }
 
 func TestCommandIdempotencyAuthorityMigrationRejectsCorruptBaseline(t *testing.T) {
@@ -543,30 +1089,14 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 		INSERT INTO engine.account_shards (account_id, shard_id)
 		VALUES ('engine-squatted-account', 10)`)
 
-	apiCompletion, err := pool.Begin(context.Background())
-	if err != nil {
-		t.Fatalf("begin API completion transaction: %v", err)
-	}
-	if _, err = apiCompletion.Exec(
-		context.Background(),
-		"SET LOCAL ROLE platformgo_api",
-	); err == nil {
-		_, err = apiCompletion.Exec(context.Background(), `
-			UPDATE trading.idempotency_records
-			   SET state = 'completed',
-			       response_status = 200,
-			       response_headers = '{}',
-			       response_body = decode('7b7d', 'hex')
-			 WHERE scope = 'account:role-account'
-			   AND idempotency_key = 'role-command'`)
-	}
-	if err != nil {
-		_ = apiCompletion.Rollback(context.Background())
-		t.Fatalf("API completion transaction: %v", err)
-	}
-	if err := apiCompletion.Commit(context.Background()); err != nil {
-		t.Fatalf("commit API completion transaction: %v", err)
-	}
+	assertRoleStatementDenied(t, pool, "platformgo_api", `
+		UPDATE trading.idempotency_records
+		   SET state = 'completed',
+		       response_status = 200,
+		       response_headers = '{}',
+		       response_body = decode('7b7d', 'hex')
+		 WHERE scope = 'account:role-account'
+		   AND idempotency_key = 'role-command'`)
 
 	outboxTransaction, err := pool.Begin(context.Background())
 	if err != nil {
@@ -1119,9 +1649,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 2 ||
+	if count != 11 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260725000100_command_idempotency_authority.up.sql" {
+		last != "20260725001000_phase3_api_revision_lock.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,
@@ -1246,6 +1776,8 @@ func assertAPIRoleCannotMutateEconomicTables(
 	t.Helper()
 	var canInsertCommand bool
 	var canUpdateBalance bool
+	var canInsertAccount bool
+	var canProvisionAccount bool
 	if err := pool.QueryRow(context.Background(), `
 		SELECT
 			has_table_privilege(
@@ -1257,15 +1789,179 @@ func assertAPIRoleCannotMutateEconomicTables(
 				'platformgo_api',
 				'ledger.balances',
 				'UPDATE'
+			),
+			has_table_privilege(
+				'platformgo_api',
+				'trading.accounts',
+				'INSERT'
+			),
+			has_function_privilege(
+				'platformgo_api',
+				'identity.provision_broker_account(text,text,bigint,text,text,text[],timestamp with time zone)',
+				'EXECUTE'
 			)`,
-	).Scan(&canInsertCommand, &canUpdateBalance); err != nil {
+	).Scan(
+		&canInsertCommand,
+		&canUpdateBalance,
+		&canInsertAccount,
+		&canProvisionAccount,
+	); err != nil {
 		t.Fatalf("inspect API role privileges: %v", err)
 	}
-	if !canInsertCommand || canUpdateBalance {
+	if !canInsertCommand || canUpdateBalance || canInsertAccount ||
+		canProvisionAccount {
 		t.Fatalf(
-			"API privileges = insert command %t update balance %t",
+			"API privileges = insert command %t update balance %t "+
+				"insert account %t provision account %t",
 			canInsertCommand,
 			canUpdateBalance,
+			canInsertAccount,
+			canProvisionAccount,
+		)
+	}
+}
+
+func assertAPIRoleIdentityBoundary(
+	t *testing.T,
+	pool *pgxpool.Pool,
+) {
+	t.Helper()
+	for _, test := range []struct {
+		name      string
+		statement string
+	}{
+		{name: "direct user insert", statement: `
+			INSERT INTO identity.users (
+				user_id, broker_subject, login, normalized_login
+			) VALUES (
+				'urn:xb:user:forged',
+				'urn:xb:tenant:forged',
+				'forged',
+				'forged'
+			)`},
+		{name: "direct ownership insert", statement: `
+			INSERT INTO identity.user_accounts (
+				user_id, account_id, broker_subject
+			) VALUES (
+				'urn:xb:user:forged',
+				'urn:xb:account:forged',
+				'urn:xb:tenant:forged'
+			)`},
+		{name: "direct response insert", statement: `
+			INSERT INTO identity.idempotency_responses (
+				scope, idempotency_key, request_hash,
+				response_status, response_body, expires_at
+			) VALUES (
+				'forged', 'forged', decode(repeat('00', 32), 'hex'),
+				200, '{}', clock_timestamp() + interval '1 day'
+			)`},
+		{name: "bare account provisioning", statement: `
+			SELECT identity.provision_broker_account(
+				'urn:xb:account:forged',
+				'urn:xb:user:forged',
+				1,
+				'USDC',
+				'HYPERLIQUID',
+				ARRAY['CRYPTOCURRENCY'],
+				clock_timestamp()
+			)`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tx, err := pool.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback(context.Background()) }()
+			if _, err := tx.Exec(
+				context.Background(),
+				"SET LOCAL ROLE platformgo_api",
+			); err != nil {
+				t.Fatal(err)
+			}
+			_, err = tx.Exec(context.Background(), test.statement)
+			var postgresError *pgconn.PgError
+			if !errors.As(err, &postgresError) ||
+				postgresError.Code != "42501" {
+				t.Fatalf("statement error = %v, want SQLSTATE 42501", err)
+			}
+		})
+	}
+
+	tx, err := pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(
+		context.Background(),
+		"SET LOCAL ROLE platformgo_api",
+	); err != nil {
+		t.Fatal(err)
+	}
+	var userID string
+	var created bool
+	if err := tx.QueryRow(context.Background(), `
+		SELECT user_id, created
+		  FROM identity.create_broker_user(
+			'urn:xb:tenant:permission-test',
+			'urn:xb:user:permission-test',
+			'permission-test',
+			'permission-test@example.com'
+		  )`,
+	).Scan(&userID, &created); err != nil {
+		t.Fatalf("execute narrow broker-user function: %v", err)
+	}
+	if !created || userID != "urn:xb:user:permission-test" {
+		t.Fatalf("narrow broker-user result = %q created=%t", userID, created)
+	}
+	var echoID string
+	if err := tx.QueryRow(context.Background(), `
+		SELECT identity.claim_broker_echo(
+			'urn:xb:apikey:permission-test',
+			'permission-test',
+			decode(repeat('01', 32), 'hex'),
+			'permission-result',
+			clock_timestamp() + interval '1 day'
+		)`,
+	).Scan(&echoID); err != nil {
+		t.Fatalf("execute narrow broker-echo function: %v", err)
+	}
+	if echoID != "permission-result" {
+		t.Fatalf("narrow broker-echo result = %q", echoID)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var userFunctionDefiner bool
+	var userFunctionConfig []string
+	var publicCanExecute bool
+	if err := pool.QueryRow(context.Background(), `
+		SELECT
+			prosecdef,
+			COALESCE(proconfig, ARRAY[]::text[]),
+			has_function_privilege(
+				'public',
+				'identity.create_broker_user(text,text,text,text)',
+				'EXECUTE'
+			)
+		  FROM pg_proc
+		 WHERE oid = 'identity.create_broker_user(text,text,text,text)'::regprocedure`,
+	).Scan(
+		&userFunctionDefiner,
+		&userFunctionConfig,
+		&publicCanExecute,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !userFunctionDefiner ||
+		!slices.Equal(userFunctionConfig, []string{"search_path=pg_catalog"}) ||
+		publicCanExecute {
+		t.Fatalf(
+			"broker-user function security = definer %t config %v public %t",
+			userFunctionDefiner,
+			userFunctionConfig,
+			publicCanExecute,
 		)
 	}
 }

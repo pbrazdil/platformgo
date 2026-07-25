@@ -63,6 +63,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	if err := platformnats.EnsureStreams(ctx, js, limits); err != nil {
 		t.Fatalf("EnsureStreams: %v", err)
 	}
+	resetEngineShardStream(t, ctx, js, 9)
 	if err := platformnats.EnsureEngineShardStream(ctx, js, 9, limits); err != nil {
 		t.Fatalf("EnsureEngineShardStream: %v", err)
 	}
@@ -297,6 +298,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 
 	duplicateLimits := limits
 	duplicateLimits.DuplicateWindow = 100 * time.Millisecond
+	resetEngineShardStream(t, ctx, js, 10)
 	if err := platformnats.EnsureEngineShardStream(
 		ctx,
 		js,
@@ -454,6 +456,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 		t.Fatalf("Migrate poison probe: %v", err)
 	}
 
+	resetEngineShardStream(t, ctx, js, 11)
 	if err := platformnats.EnsureEngineShardStream(
 		ctx,
 		js,
@@ -538,6 +541,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 		t.Fatalf("Migrate subject mismatch probe: %v", err)
 	}
 
+	resetEngineShardStream(t, ctx, js, 15)
 	if err := platformnats.EnsureEngineShardStream(ctx, js, 15, limits); err != nil {
 		t.Fatalf("EnsureEngineShardStream subject mismatch: %v", err)
 	}
@@ -670,6 +674,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 		).MigrateAndProvision(ctx, shardID); err != nil {
 			t.Fatalf("Migrate %s ID poison probe: %v", poisonKind, err)
 		}
+		resetEngineShardStream(t, ctx, js, shardID)
 		if err := platformnats.EnsureEngineShardStream(
 			ctx,
 			js,
@@ -834,6 +839,7 @@ func TestLaterAccountCommandCannotBypassOrderedPublication(t *testing.T) {
 		MaxAge:          time.Hour,
 		DuplicateWindow: time.Minute,
 	}
+	resetEngineShardStream(t, ctx, js, 14)
 	if err := platformnats.EnsureEngineShardStream(ctx, js, 14, limits); err != nil {
 		t.Fatalf("EnsureEngineShardStream: %v", err)
 	}
@@ -1338,6 +1344,7 @@ func TestAPIOutboxCannotPublishNonCommandEngineInput(t *testing.T) {
 		DuplicateWindow: time.Minute,
 	}
 	const shardID engine.ShardID = 23
+	resetEngineShardStream(t, ctx, js, shardID)
 	if err := platformnats.EnsureEngineShardStream(ctx, js, shardID, limits); err != nil {
 		t.Fatalf("EnsureEngineShardStream: %v", err)
 	}

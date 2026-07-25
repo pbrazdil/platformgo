@@ -1,0 +1,679 @@
+package postgres
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/upcomers-org/platformgo/internal/application"
+	"github.com/upcomers-org/platformgo/internal/edge"
+	"github.com/upcomers-org/platformgo/internal/engine"
+)
+
+// CompatibilityStore owns Phase 3 identity and query projections.
+type CompatibilityStore struct {
+	pool *pgxpool.Pool
+}
+
+// NewCompatibilityStore binds compatibility persistence to PostgreSQL.
+func NewCompatibilityStore(pool *pgxpool.Pool) *CompatibilityStore {
+	return &CompatibilityStore{pool: pool}
+}
+
+// UserByLogin loads one identity by its case-insensitive login.
+func (store *CompatibilityStore) UserByLogin(
+	ctx context.Context,
+	login string,
+) (application.IdentityRecord, error) {
+	return store.loadIdentity(
+		ctx,
+		`SELECT user_id, login, COALESCE(email, ''), COALESCE(password_hash, '')
+		   FROM identity.users
+		  WHERE broker_subject IS NULL
+		    AND normalized_login = $1`,
+		strings.ToLower(strings.TrimSpace(login)),
+	)
+}
+
+// BrokerUserByID loads one identity only inside the authenticated tenant.
+func (store *CompatibilityStore) BrokerUserByID(
+	ctx context.Context,
+	brokerTenant string,
+	userID string,
+) (application.IdentityRecord, error) {
+	return store.loadIdentity(
+		ctx,
+		`SELECT user_id, login, COALESCE(email, ''), COALESCE(password_hash, '')
+		   FROM identity.users
+		  WHERE broker_subject = $1
+		    AND user_id = $2`,
+		brokerTenant,
+		userID,
+	)
+}
+
+// UserByID loads one identity by its stable URN.
+func (store *CompatibilityStore) UserByID(
+	ctx context.Context,
+	userID string,
+) (application.IdentityRecord, error) {
+	return store.loadIdentity(
+		ctx,
+		`SELECT user_id, login, COALESCE(email, ''), COALESCE(password_hash, '')
+		   FROM identity.users
+		  WHERE user_id = $1`,
+		userID,
+	)
+}
+
+func (store *CompatibilityStore) loadIdentity(
+	ctx context.Context,
+	query string,
+	values ...string,
+) (application.IdentityRecord, error) {
+	if store == nil || store.pool == nil {
+		return application.IdentityRecord{}, errors.New("identity store: PostgreSQL pool is required")
+	}
+	var record application.IdentityRecord
+	arguments := make([]any, len(values))
+	for index := range values {
+		arguments[index] = values[index]
+	}
+	if err := store.pool.QueryRow(ctx, query, arguments...).Scan(
+		&record.UserID,
+		&record.Login,
+		&record.Email,
+		&record.PasswordHash,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return application.IdentityRecord{}, application.ErrIdentityNotFound
+		}
+		return application.IdentityRecord{}, fmt.Errorf("load identity: %w", err)
+	}
+	return record, nil
+}
+
+// BrokerUserAccounts returns only account claims owned by the same tenant.
+func (store *CompatibilityStore) BrokerUserAccounts(
+	ctx context.Context,
+	brokerTenant string,
+	userID string,
+) ([]string, error) {
+	return store.userAccounts(ctx, userID, &brokerTenant)
+}
+
+// UserAccounts returns stable account authorization claims in lexical order.
+func (store *CompatibilityStore) UserAccounts(
+	ctx context.Context,
+	userID string,
+) ([]string, error) {
+	return store.userAccounts(ctx, userID, nil)
+}
+
+func (store *CompatibilityStore) userAccounts(
+	ctx context.Context,
+	userID string,
+	brokerTenant *string,
+) ([]string, error) {
+	var tenant any
+	if brokerTenant != nil {
+		tenant = *brokerTenant
+	}
+	rows, err := store.pool.Query(ctx, `
+		SELECT account_id
+		  FROM identity.user_accounts
+		 WHERE user_id = $1
+		   AND (
+				$2::text IS NULL
+				OR broker_subject = $2
+		   )
+		 ORDER BY account_id`,
+		userID,
+		tenant,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list identity accounts: %w", err)
+	}
+	defer rows.Close()
+	accounts := make([]string, 0)
+	for rows.Next() {
+		var accountID string
+		if err := rows.Scan(&accountID); err != nil {
+			return nil, fmt.Errorf("scan identity account: %w", err)
+		}
+		accounts = append(accounts, accountID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list identity accounts: %w", err)
+	}
+	return accounts, nil
+}
+
+// CreateBrokerUser converges case-insensitively on normalized email.
+func (store *CompatibilityStore) CreateBrokerUser(
+	ctx context.Context,
+	brokerTenant string,
+	userID string,
+	login string,
+	email string,
+) (application.IdentityRecord, bool, error) {
+	var record application.IdentityRecord
+	var created bool
+	if err := store.pool.QueryRow(ctx, `
+		SELECT user_id, login, email, created
+		  FROM identity.create_broker_user($1,$2,$3,$4)`,
+		brokerTenant,
+		userID,
+		login,
+		email,
+	).Scan(
+		&record.UserID,
+		&record.Login,
+		&record.Email,
+		&created,
+	); err != nil {
+		return application.IdentityRecord{}, false, fmt.Errorf("create broker user: %w", err)
+	}
+	return record, created, nil
+}
+
+// CreateSession persists only the hash of an opaque refresh credential.
+func (store *CompatibilityStore) CreateSession(
+	ctx context.Context,
+	sessionID engine.ID,
+	userID string,
+	refreshHash [sha256.Size]byte,
+	expiresAt time.Time,
+) error {
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO identity.sessions (
+			session_id, user_id, refresh_hash, expires_at
+		) VALUES ($1,$2,$3,$4)`,
+		sessionID.String(),
+		userID,
+		refreshHash[:],
+		expiresAt,
+	); err != nil {
+		return fmt.Errorf("create identity session: %w", err)
+	}
+	return nil
+}
+
+// BrokerEcho atomically stores or replays the exact principal-scoped response.
+func (store *CompatibilityStore) BrokerEcho(
+	ctx context.Context,
+	principal string,
+	idempotencyKey string,
+	requestHash [sha256.Size]byte,
+	resultID string,
+	expiresAt time.Time,
+) (string, error) {
+	var stored string
+	if err := store.pool.QueryRow(ctx, `
+		SELECT identity.claim_broker_echo($1,$2,$3,$4,$5)`,
+		principal,
+		idempotencyKey,
+		requestHash[:],
+		resultID,
+		expiresAt,
+	).Scan(&stored); err != nil {
+		var postgresError *pgconn.PgError
+		if errors.As(err, &postgresError) &&
+			postgresError.Code == "23505" {
+			return "", edge.ErrIdempotencyConflict
+		}
+		return "", fmt.Errorf("broker echo: %w", err)
+	}
+	return stored, nil
+}
+
+// ReplayBrokerAccount resolves an existing durable mutation without requiring
+// the command workers to be currently ready.
+func (store *CompatibilityStore) ReplayBrokerAccount(
+	ctx context.Context,
+	principal string,
+	brokerTenant string,
+	idempotencyKey string,
+	requestHash [sha256.Size]byte,
+) (edge.BrokerAccountAdmission, bool, error) {
+	replay, found, err := NewCommandJournal(store.pool).Replay(
+		ctx,
+		"broker-account\x1f"+principal,
+		idempotencyKey,
+		requestHash,
+	)
+	if err != nil || !found {
+		return edge.BrokerAccountAdmission{}, found, err
+	}
+	admission, err := store.waitBrokerAccountCompletion(
+		ctx,
+		brokerTenant,
+		replay,
+	)
+	return admission, true, err
+}
+
+// CreateBrokerAccount atomically admits an ordered configure-account command
+// with the exact response and tenant-scoped identity provisioning intent.
+func (store *CompatibilityStore) CreateBrokerAccount(
+	ctx context.Context,
+	principal string,
+	brokerTenant string,
+	idempotencyKey string,
+	requestHash [sha256.Size]byte,
+	result edge.BrokerAccountResult,
+	expiresAt time.Time,
+	requireRuntimeReady bool,
+) (edge.BrokerAccountAdmission, error) {
+	body, err := json.Marshal(result)
+	if err != nil {
+		return edge.BrokerAccountAdmission{}, fmt.Errorf(
+			"create broker account: encode response: %w",
+			err,
+		)
+	}
+	body = append(body, '\n')
+	accountUUID, err := engine.ParseID(
+		strings.TrimPrefix(result.ID, "urn:xb:account:"),
+	)
+	if err != nil {
+		return edge.BrokerAccountAdmission{}, fmt.Errorf(
+			"create broker account: parse account ID: %w",
+			err,
+		)
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, result.CreatedAt)
+	if err != nil {
+		return edge.BrokerAccountAdmission{}, fmt.Errorf(
+			"create broker account: parse createdAt: %w",
+			err,
+		)
+	}
+	journal := NewCommandJournal(store.pool)
+	configurationVersion, err := journal.ConfigurationVersion(ctx)
+	if err != nil {
+		return edge.BrokerAccountAdmission{}, err
+	}
+	sequence, err := journal.NextAccountSequence(ctx, result.ID)
+	if err != nil {
+		return edge.BrokerAccountAdmission{}, err
+	}
+	action := engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: result.ID,
+			OmsMode:   engine.OmsModeNetting,
+		},
+	}
+	payload, err := engine.EncodeTradingAction(action)
+	if err != nil {
+		return edge.BrokerAccountAdmission{}, fmt.Errorf(
+			"create broker account: encode action: %w",
+			err,
+		)
+	}
+	commandID := engine.IDFromSequence(accountUUID, 1)
+	var shardID uint32
+	if queryErr := store.pool.QueryRow(ctx, `
+		SELECT shard_id
+		  FROM engine.deployment_shard
+		 WHERE singleton`).Scan(&shardID); queryErr != nil {
+		return edge.BrokerAccountAdmission{}, fmt.Errorf(
+			"create broker account: read deployment shard: %w",
+			queryErr,
+		)
+	}
+	input := engine.InputEnvelope{
+		InputID:              commandID,
+		SchemaVersion:        engine.CurrentSchemaVersion,
+		ShardID:              engine.ShardID(shardID),
+		Kind:                 engine.InputKindCommand,
+		SourceID:             principal,
+		SourceSequence:       sequence,
+		LogicalTime:          engine.NewLogicalTime(createdAt),
+		ConfigurationVersion: configurationVersion,
+		InstrumentVersion:    1,
+		Payload:              payload,
+	}
+	outboxPayload, err := engine.EncodeInputMessage(input)
+	if err != nil {
+		return edge.BrokerAccountAdmission{}, fmt.Errorf(
+			"create broker account: encode command: %w",
+			err,
+		)
+	}
+	begin, err := journal.Begin(ctx, application.BeginCommandRequest{
+		Scope:            "broker-account\x1f" + principal,
+		IdempotencyKey:   idempotencyKey,
+		RequestHash:      requestHash,
+		CommandID:        commandID,
+		AccountID:        result.ID,
+		AccountSequence:  sequence,
+		CommandType:      string(engine.TradingActionConfigureAccount),
+		SchemaVersion:    engine.CurrentSchemaVersion,
+		CanonicalPayload: payload.Bytes(),
+		OutboxSubject: fmt.Sprintf(
+			"engine.input.%d.command.v%d",
+			input.ShardID,
+			engine.CurrentSchemaVersion,
+		),
+		OutboxPayload: outboxPayload,
+		LogicalTime:   createdAt,
+		ExpiresAt:     expiresAt,
+		Response: application.StoredResponse{
+			Status:  201,
+			Headers: []byte(`{"content-type":["application/json"]}`),
+			Body:    body,
+		},
+		AccountProvisioning: &application.AccountProvisioningIntent{
+			BrokerTenant: brokerTenant,
+			UserID:       result.UserID,
+			Login:        result.Login,
+			BaseCurrency: result.BaseCurrency,
+			MarketVenue:  result.MarketVenue,
+			PermittedClasses: append(
+				[]string(nil),
+				result.PermittedClasses...,
+			),
+			CreatedAt: createdAt,
+		},
+		RequireRuntimeReady: requireRuntimeReady,
+	})
+	if errors.Is(err, application.ErrIdempotencyConflict) {
+		return edge.BrokerAccountAdmission{}, edge.ErrIdempotencyConflict
+	}
+	if err != nil {
+		return edge.BrokerAccountAdmission{}, err
+	}
+	return store.waitBrokerAccountCompletion(ctx, brokerTenant, begin)
+}
+
+func (store *CompatibilityStore) waitBrokerAccountCompletion(
+	ctx context.Context,
+	brokerTenant string,
+	replay application.BeginCommandResult,
+) (edge.BrokerAccountAdmission, error) {
+	response := replay.Response
+	var account edge.BrokerAccountResult
+	if response.Status != 201 ||
+		json.Unmarshal(response.Body, &account) != nil ||
+		account.ID == "" {
+		return edge.BrokerAccountAdmission{}, errors.New(
+			"create broker account: invalid stored response",
+		)
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var commandStatus string
+		var idempotencyState string
+		var graphComplete bool
+		err := store.pool.QueryRow(ctx, `
+			SELECT
+				command.status,
+				idempotency.state,
+				EXISTS (
+					SELECT 1
+					  FROM trading.accounts AS trading_account
+					  JOIN identity.user_accounts AS ownership
+					    ON ownership.account_id = trading_account.account_id
+					   AND ownership.user_id = $3
+					   AND ownership.broker_subject = $2
+					  JOIN identity.account_profiles AS profile
+					    ON profile.account_id = trading_account.account_id
+					 WHERE trading_account.account_id = $4
+				)
+			  FROM trading.commands AS command
+			  JOIN trading.idempotency_records AS idempotency
+			    ON idempotency.command_id = command.command_id
+			 WHERE command.command_id = $1`,
+			replay.CommandID.String(),
+			brokerTenant,
+			account.UserID,
+			account.ID,
+		).Scan(&commandStatus, &idempotencyState, &graphComplete)
+		if err != nil {
+			return edge.BrokerAccountAdmission{}, fmt.Errorf(
+				"create broker account: inspect engine completion: %w",
+				err,
+			)
+		}
+		switch {
+		case commandStatus == "accepted" &&
+			idempotencyState == "completed" &&
+			graphComplete:
+			return edge.BrokerAccountAdmission{
+				BrokerAccountResult: account,
+				Response: edge.StoredResponse{
+					Status:  response.Status,
+					Headers: append([]byte(nil), response.Headers...),
+					Body:    append([]byte(nil), response.Body...),
+				},
+			}, nil
+		case commandStatus != "pending":
+			return edge.BrokerAccountAdmission{}, fmt.Errorf(
+				"create broker account: engine completed with status %q",
+				commandStatus,
+			)
+		}
+		select {
+		case <-ctx.Done():
+			return edge.BrokerAccountAdmission{}, fmt.Errorf(
+				"create broker account: wait for engine completion: %w",
+				ctx.Err(),
+			)
+		case <-ticker.C:
+		}
+	}
+}
+
+// Instruments returns the public exact catalog projection.
+func (store *CompatibilityStore) Instruments(
+	ctx context.Context,
+) ([]edge.InstrumentView, error) {
+	rows, err := store.pool.Query(ctx, `
+		SELECT
+			instrument_id,
+			settlement_currency,
+			trim_scale(1 / power(10::numeric, price_scale))::text,
+			trim_scale(1 / power(10::numeric, quantity_scale))::text,
+			trim_scale(max_leverage)::text,
+			trim_scale(maker_fee_rate)::text,
+			trim_scale(taker_fee_rate)::text
+		  FROM trading.instruments
+		 ORDER BY instrument_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list instruments: %w", err)
+	}
+	defer rows.Close()
+	values := make([]edge.InstrumentView, 0)
+	for rows.Next() {
+		var value edge.InstrumentView
+		if err := rows.Scan(
+			&value.Symbol,
+			&value.SettlementAsset,
+			&value.PriceIncrement,
+			&value.SizeIncrement,
+			&value.MaxLeverage,
+			&value.MakerFee,
+			&value.TakerFee,
+		); err != nil {
+			return nil, fmt.Errorf("scan instrument: %w", err)
+		}
+		value.DisplayName = value.Symbol
+		value.Enabled = true
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list instruments: %w", err)
+	}
+	return values, nil
+}
+
+// Orders returns the account's durable order projection.
+func (store *CompatibilityStore) Orders(
+	ctx context.Context,
+	accountID string,
+) ([]edge.OrderView, error) {
+	rows, queryErr := store.pool.Query(ctx, `
+		SELECT
+			orders.order_id::text,
+			COALESCE(intent.intent_id, ''),
+			instrument_id,
+			side,
+			order_type,
+			trim_scale(quantity)::text,
+			status,
+			trim_scale(filled_quantity)::text,
+			trim_scale(limit_price)::text,
+			trim_scale(trigger_price)::text,
+			time_in_force,
+			reduce_only
+		  FROM trading.orders AS orders
+		  LEFT JOIN trading.order_intents AS intent
+		    ON intent.order_id = orders.order_id
+		 WHERE orders.account_id = $1
+		UNION ALL
+		SELECT
+			intent.order_id::text,
+			intent.intent_id,
+			command.canonical_payload->'submitOrder'->>'instrumentId',
+			command.canonical_payload->'submitOrder'->>'side',
+			command.canonical_payload->'submitOrder'->>'type',
+			command.canonical_payload->'submitOrder'->>'quantity',
+			'pending',
+			'0',
+			command.canonical_payload->'submitOrder'->>'price',
+			command.canonical_payload->'submitOrder'->>'triggerPrice',
+			command.canonical_payload->'submitOrder'->>'timeInForce',
+			COALESCE(
+				(command.canonical_payload->'submitOrder'->>'reduceOnly')::boolean,
+				false
+			)
+		  FROM trading.order_intents AS intent
+		  JOIN trading.commands AS command
+		    ON command.command_id = intent.command_id
+		  LEFT JOIN trading.orders AS orders
+		    ON orders.order_id = intent.order_id
+		 WHERE intent.account_id = $1
+		   AND command.status = 'pending'
+		   AND orders.order_id IS NULL
+		 ORDER BY 1`,
+		accountID,
+	)
+	if queryErr != nil {
+		return nil, fmt.Errorf("list orders: %w", queryErr)
+	}
+	defer rows.Close()
+	values := make([]edge.OrderView, 0)
+	for rows.Next() {
+		var value edge.OrderView
+		if err := rows.Scan(
+			&value.OrderID,
+			&value.IntentID,
+			&value.Symbol,
+			&value.Side,
+			&value.Type,
+			&value.Quantity,
+			&value.Status,
+			&value.FilledQuantity,
+			&value.LimitPrice,
+			&value.TriggerPrice,
+			&value.TimeInForce,
+			&value.ReduceOnly,
+		); err != nil {
+			return nil, fmt.Errorf("scan order: %w", err)
+		}
+		value.OrderID = "urn:xb:order:" + value.OrderID
+		value.AccountID = accountID
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list orders: %w", err)
+	}
+	return values, nil
+}
+
+// Positions returns the account's durable position projection.
+func (store *CompatibilityStore) Positions(
+	ctx context.Context,
+	accountID string,
+) ([]edge.PositionView, error) {
+	rows, err := store.pool.Query(ctx, `
+		SELECT
+			position_id::text,
+			instrument_id,
+			side,
+			trim_scale(abs(signed_quantity))::text,
+			status
+		  FROM trading.positions
+		 WHERE account_id = $1
+		 ORDER BY position_id`,
+		accountID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list positions: %w", err)
+	}
+	defer rows.Close()
+	values := make([]edge.PositionView, 0)
+	for rows.Next() {
+		var value edge.PositionView
+		if err := rows.Scan(
+			&value.PositionID,
+			&value.Symbol,
+			&value.Side,
+			&value.Quantity,
+			&value.Status,
+		); err != nil {
+			return nil, fmt.Errorf("scan position: %w", err)
+		}
+		value.AccountID = accountID
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
+// Balances returns exact authoritative ledger balance projections.
+func (store *CompatibilityStore) Balances(
+	ctx context.Context,
+	accountID string,
+) ([]edge.BalanceView, error) {
+	rows, err := store.pool.Query(ctx, `
+		SELECT
+			currency,
+			trim_scale(total)::text,
+			trim_scale(used)::text,
+			trim_scale(free)::text,
+			trim_scale(equity)::text
+		  FROM ledger.balances
+		 WHERE account_id = $1
+		 ORDER BY currency`,
+		accountID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list balances: %w", err)
+	}
+	defer rows.Close()
+	values := make([]edge.BalanceView, 0)
+	for rows.Next() {
+		var value edge.BalanceView
+		if err := rows.Scan(
+			&value.Currency,
+			&value.Total,
+			&value.Locked,
+			&value.Free,
+			&value.Equity,
+		); err != nil {
+			return nil, fmt.Errorf("scan balance: %w", err)
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}

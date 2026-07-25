@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -942,6 +943,14 @@ func persistDecision(
 			return fmt.Errorf("persist account %s: %w", change.AccountID, err)
 		}
 	}
+	if err := persistAccountProvisioning(
+		ctx,
+		tx,
+		input.InputID,
+		decision.AccountChanges,
+	); err != nil {
+		return err
+	}
 	for _, change := range decision.RiskChanges {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO trading.risk_configs (
@@ -1011,6 +1020,115 @@ func persistDecision(
 		return err
 	}
 	return persistOutbox(ctx, tx, input, decision.Events)
+}
+
+func persistAccountProvisioning(
+	ctx context.Context,
+	tx pgx.Tx,
+	commandID engine.ID,
+	accountChanges []engine.AccountSnapshot,
+) error {
+	var accountID string
+	var brokerTenant string
+	var userID string
+	var login int64
+	var baseCurrency string
+	var marketVenue string
+	var permittedClasses []string
+	var createdAt time.Time
+	err := tx.QueryRow(ctx, `
+		SELECT
+			account_id,
+			broker_subject,
+			user_id,
+			login,
+			base_currency,
+			market_venue,
+			permitted_classes,
+			created_at
+		  FROM identity.account_provisioning_intents
+		 WHERE command_id = $1`,
+		commandID.String(),
+	).Scan(
+		&accountID,
+		&brokerTenant,
+		&userID,
+		&login,
+		&baseCurrency,
+		&marketVenue,
+		&permittedClasses,
+		&createdAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf(
+			"load account provisioning intent %s: %w",
+			commandID,
+			err,
+		)
+	}
+	matched := false
+	for _, change := range accountChanges {
+		if change.AccountID == accountID {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return fmt.Errorf(
+			"%w: account provisioning command %s produced no account change",
+			ErrCommandCompletionConflict,
+			commandID,
+		)
+	}
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO identity.user_accounts (
+			user_id,
+			account_id,
+			broker_subject,
+			created_at
+		)
+		SELECT $1,$2,$3,$4
+		  FROM identity.users
+		 WHERE user_id = $1
+		   AND broker_subject = $3`,
+		userID,
+		accountID,
+		brokerTenant,
+		createdAt,
+	)
+	if err != nil {
+		return fmt.Errorf("persist account ownership %s: %w", accountID, err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf(
+			"persist account ownership %s: broker user is unavailable",
+			accountID,
+		)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO identity.account_profiles (
+			account_id,
+			broker_subject,
+			login,
+			base_currency,
+			market_venue,
+			permitted_classes,
+			created_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		accountID,
+		brokerTenant,
+		login,
+		baseCurrency,
+		marketVenue,
+		permittedClasses,
+		createdAt,
+	); err != nil {
+		return fmt.Errorf("persist account profile %s: %w", accountID, err)
+	}
+	return nil
 }
 
 func persistCommandResult(
@@ -1197,6 +1315,49 @@ func persistCommandResult(
 			ErrCommandCompletionConflict,
 			input.InputID,
 		)
+	}
+	var replayResponseExists bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM trading.command_replay_responses
+			 WHERE command_id = $1
+		)`,
+		input.InputID.String(),
+	).Scan(&replayResponseExists); err != nil {
+		return fmt.Errorf(
+			"check command %s replay response: %w",
+			input.InputID,
+			err,
+		)
+	}
+	if replayResponseExists {
+		tag, err := tx.Exec(ctx, `
+			UPDATE trading.idempotency_records AS idempotency
+			   SET state = 'completed',
+			       response_status = replay.response_status,
+			       response_headers = replay.response_headers,
+			       response_body = replay.response_body
+			  FROM trading.command_replay_responses AS replay
+			 WHERE idempotency.command_id = $1
+			   AND replay.command_id = idempotency.command_id
+			   AND idempotency.state = 'in_progress'`,
+			input.InputID.String(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"complete command %s replay response: %w",
+				input.InputID,
+				err,
+			)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf(
+				"%w: command %s replay response changed before engine commit",
+				ErrCommandCompletionConflict,
+				input.InputID,
+			)
+		}
 	}
 	return nil
 }

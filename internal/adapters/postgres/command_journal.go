@@ -3,90 +3,51 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/upcomers-org/platformgo/internal/application"
 	"github.com/upcomers-org/platformgo/internal/engine"
 )
 
 var (
-	// ErrIdempotencyConflict means a key was reused for different request bytes.
-	ErrIdempotencyConflict = errors.New("idempotency key request hash conflict")
-	// ErrCommandNotFound means completion referenced no durable command.
-	ErrCommandNotFound = errors.New("durable command not found")
-	// ErrCommandCompletionConflict means a completed command was given a
-	// different terminal result.
-	ErrCommandCompletionConflict = errors.New("command completion conflict")
-	// ErrCommandSequenceGap means a new command did not use the next contiguous
-	// sequence for its account.
-	ErrCommandSequenceGap = errors.New("command account sequence gap")
-	// ErrAccountShardConflict means an account was routed to a shard other than
-	// its immutable durable assignment.
-	ErrAccountShardConflict = errors.New("account shard assignment conflict")
+	ErrIdempotencyConflict       = application.ErrIdempotencyConflict
+	ErrCommandNotFound           = application.ErrCommandNotFound
+	ErrCommandCompletionConflict = application.ErrCommandCompletionConflict
+	ErrCommandSequenceGap        = application.ErrCommandSequenceGap
+	ErrAccountShardConflict      = application.ErrAccountShardConflict
+	ErrEconomicRevisionChanged   = application.ErrEconomicRevisionChanged
+	ErrRuntimeNotReady           = application.ErrRuntimeNotReady
 )
-
-const commandAccountLockNamespace = 0x5047434d
-
-// IdempotencyState is the durable lifecycle of a request key.
-type IdempotencyState string
 
 const (
-	IdempotencyInProgress IdempotencyState = "in_progress"
-	IdempotencyCompleted  IdempotencyState = "completed"
+	commandAccountLockNamespace     = 0x5047434d
+	commandIdempotencyLockNamespace = 0x50474944
 )
 
-// CommandStatus is the durable command outcome.
-type CommandStatus string
+type IdempotencyState = application.IdempotencyState
 
 const (
-	CommandAccepted  CommandStatus = "accepted"
-	CommandRejected  CommandStatus = "rejected"
-	CommandCompleted CommandStatus = "completed"
+	IdempotencyInProgress = application.IdempotencyInProgress
+	IdempotencyCompleted  = application.IdempotencyCompleted
 )
 
-// StoredResponse is the exact replayable response body plus canonical headers.
-type StoredResponse struct {
-	Status  int
-	Headers []byte
-	Body    []byte
-}
+type CommandStatus = application.CommandStatus
 
-// BeginCommandRequest contains one canonical command and its stable identity.
-type BeginCommandRequest struct {
-	Scope            string
-	IdempotencyKey   string
-	RequestHash      [32]byte
-	CommandID        engine.ID
-	AccountID        string
-	AccountSequence  uint64
-	CommandType      string
-	SchemaVersion    uint32
-	CanonicalPayload []byte
-	OutboxSubject    string
-	OutboxPayload    []byte
-	LogicalTime      time.Time
-	ExpiresAt        time.Time
-}
+const (
+	CommandAccepted  = application.CommandAccepted
+	CommandRejected  = application.CommandRejected
+	CommandCompleted = application.CommandCompleted
+)
 
-// BeginCommandResult reports either a newly-created command or a replay.
-type BeginCommandResult struct {
-	Created   bool
-	CommandID engine.ID
-	State     IdempotencyState
-	Response  StoredResponse
-}
-
-// CompleteCommandRequest atomically finalizes the command and replay record.
-type CompleteCommandRequest struct {
-	CommandID engine.ID
-	Status    CommandStatus
-	Result    []byte
-	Response  StoredResponse
-}
+type StoredResponse = application.StoredResponse
+type BeginCommandRequest = application.BeginCommandRequest
+type BeginCommandResult = application.BeginCommandResult
+type CompleteCommandRequest = application.CompleteCommandRequest
 
 // CommandJournal owns durable command and idempotency records.
 type CommandJournal struct {
@@ -96,6 +57,171 @@ type CommandJournal struct {
 // NewCommandJournal binds a command journal to PostgreSQL.
 func NewCommandJournal(pool *pgxpool.Pool) *CommandJournal {
 	return &CommandJournal{pool: pool}
+}
+
+// NextAccountSequence returns the next observed durable sequence for an
+// account. Begin remains the authority: concurrent callers must retry when it
+// returns ErrCommandSequenceGap.
+func (journal *CommandJournal) NextAccountSequence(
+	ctx context.Context,
+	accountID string,
+) (uint64, error) {
+	if journal == nil || journal.pool == nil {
+		return 0, errors.New(
+			"read account command sequence: PostgreSQL pool is required",
+		)
+	}
+	if accountID == "" {
+		return 0, errors.New("read account command sequence: account ID is required")
+	}
+	var next uint64
+	if err := journal.pool.QueryRow(ctx, `
+		SELECT COALESCE(max(account_sequence), 0) + 1
+		  FROM trading.commands
+		 WHERE account_id = $1`,
+		accountID,
+	).Scan(&next); err != nil {
+		return 0, fmt.Errorf(
+			"read account %q next command sequence: %w",
+			accountID,
+			err,
+		)
+	}
+	return next, nil
+}
+
+// ConfigurationVersion returns the durable effective economic configuration
+// revision. Begin revalidates it under row locks before committing a command.
+func (journal *CommandJournal) ConfigurationVersion(
+	ctx context.Context,
+) (uint64, error) {
+	if journal == nil || journal.pool == nil {
+		return 0, errors.New(
+			"read configuration version: PostgreSQL pool is required",
+		)
+	}
+	var version uint64
+	if err := journal.pool.QueryRow(ctx, `
+		SELECT version
+		  FROM engine.runtime_configuration
+		 WHERE singleton`).Scan(&version); err != nil {
+		return 0, fmt.Errorf("read configuration version: %w", err)
+	}
+	return version, nil
+}
+
+// InstrumentVersion returns the immutable economic revision currently
+// authoritative for a submitted instrument.
+func (journal *CommandJournal) InstrumentVersion(
+	ctx context.Context,
+	instrumentID string,
+) (uint64, error) {
+	if journal == nil || journal.pool == nil {
+		return 0, errors.New(
+			"read instrument version: PostgreSQL pool is required",
+		)
+	}
+	if instrumentID == "" {
+		return 0, errors.New("read instrument version: instrument ID is required")
+	}
+	var revision uint64
+	if err := journal.pool.QueryRow(ctx, `
+		SELECT revision
+		  FROM trading.instruments
+		 WHERE instrument_id = $1`,
+		instrumentID,
+	).Scan(&revision); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf(
+				"read instrument version: unknown instrument %q",
+				instrumentID,
+			)
+		}
+		return 0, fmt.Errorf(
+			"read instrument version %q: %w",
+			instrumentID,
+			err,
+		)
+	}
+	return revision, nil
+}
+
+// Replay returns an existing response without requiring command-path
+// readiness. A changed request under the same scope/key still conflicts.
+func (journal *CommandJournal) Replay(
+	ctx context.Context,
+	scope string,
+	key string,
+	requestHash [sha256.Size]byte,
+) (BeginCommandResult, bool, error) {
+	if journal == nil || journal.pool == nil {
+		return BeginCommandResult{}, false, errors.New(
+			"replay command: PostgreSQL pool is required",
+		)
+	}
+	var result BeginCommandResult
+	var commandIDText string
+	var recordedHash []byte
+	var state string
+	var responseStatus *int32
+	var responseHeaders []byte
+	var responseBody []byte
+	err := journal.pool.QueryRow(ctx, `
+		SELECT
+			idempotency.request_hash,
+			idempotency.command_id::text,
+			idempotency.state,
+			COALESCE(idempotency.response_status, replay.response_status),
+			COALESCE(idempotency.response_headers, replay.response_headers),
+			COALESCE(idempotency.response_body, replay.response_body)
+		  FROM trading.idempotency_records AS idempotency
+		  LEFT JOIN trading.command_replay_responses AS replay
+		    ON replay.command_id = idempotency.command_id
+		 WHERE idempotency.scope = $1
+		   AND idempotency.idempotency_key = $2`,
+		scope,
+		key,
+	).Scan(
+		&recordedHash,
+		&commandIDText,
+		&state,
+		&responseStatus,
+		&responseHeaders,
+		&responseBody,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return BeginCommandResult{}, false, nil
+	}
+	if err != nil {
+		return BeginCommandResult{}, false, fmt.Errorf(
+			"load command replay: %w",
+			err,
+		)
+	}
+	if !bytes.Equal(recordedHash, requestHash[:]) {
+		return BeginCommandResult{}, true, ErrIdempotencyConflict
+	}
+	commandID, err := engine.ParseID(commandIDText)
+	if err != nil {
+		return BeginCommandResult{}, true, fmt.Errorf(
+			"parse replay command ID: %w",
+			err,
+		)
+	}
+	result.CommandID = commandID
+	result.State = IdempotencyState(state)
+	if responseStatus != nil {
+		result.Response.Status = int(*responseStatus)
+		result.Response.Headers, err = canonicalJSON(responseHeaders)
+		if err != nil {
+			return BeginCommandResult{}, true, fmt.Errorf(
+				"decode replay response headers: %w",
+				err,
+			)
+		}
+		result.Response.Body = append([]byte(nil), responseBody...)
+	}
+	return result, true, nil
 }
 
 // Begin inserts a key and command atomically or returns the existing identical
@@ -123,6 +249,61 @@ func (journal *CommandJournal) Begin(
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
 
+	if request.RequireRuntimeReady {
+		if _, lockErr := tx.Exec(
+			ctx,
+			"SELECT pg_advisory_xact_lock_shared($1, $2)",
+			commandAdmissionGateLockNamespace,
+			int64(0),
+		); lockErr != nil {
+			return BeginCommandResult{}, fmt.Errorf(
+				"acquire command admission gate: %w",
+				lockErr,
+			)
+		}
+	}
+	if _, lockErr := tx.Exec(
+		ctx,
+		"SELECT pg_advisory_xact_lock($1, hashtext($2))",
+		commandIdempotencyLockNamespace,
+		request.Scope+"\x1f"+request.IdempotencyKey,
+	); lockErr != nil {
+		return BeginCommandResult{}, fmt.Errorf(
+			"lock command idempotency key: %w",
+			lockErr,
+		)
+	}
+	replay, recordedHash, replayErr := loadIdempotency(
+		ctx,
+		tx,
+		request.Scope,
+		request.IdempotencyKey,
+	)
+	if replayErr == nil {
+		if !bytes.Equal(recordedHash, request.RequestHash[:]) {
+			return BeginCommandResult{}, ErrIdempotencyConflict
+		}
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return BeginCommandResult{}, fmt.Errorf(
+				"commit command replay before readiness: %w",
+				commitErr,
+			)
+		}
+		return replay, nil
+	}
+	if !errors.Is(replayErr, pgx.ErrNoRows) {
+		return BeginCommandResult{}, replayErr
+	}
+	if request.RequireRuntimeReady {
+		if readyErr := runtimeCommandReady(
+			ctx,
+			tx,
+			input.ShardID,
+		); readyErr != nil {
+			return BeginCommandResult{}, readyErr
+		}
+	}
+
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO trading.idempotency_records (
 			scope, idempotency_key, request_hash, command_id, state, expires_at
@@ -149,6 +330,39 @@ func (journal *CommandJournal) Begin(
 				request.AccountID,
 				lockErr,
 			)
+		}
+		if input.Kind == engine.InputKindCommand &&
+			request.CommandType == string(engine.TradingActionSubmitOrder) {
+			_, action, decodeErr := engine.DecodeInputMessage(
+				request.OutboxPayload,
+			)
+			if decodeErr != nil || action.SubmitOrder == nil {
+				return BeginCommandResult{}, fmt.Errorf(
+					"%w: submit-order action is unavailable",
+					ErrCommandInputConflict,
+				)
+			}
+			var configurationVersion uint64
+			var instrumentVersion uint64
+			if revisionErr := tx.QueryRow(ctx, `
+				SELECT
+					configuration_version,
+					instrument_version
+				  FROM engine.lock_command_economic_revisions($1)`,
+				action.SubmitOrder.InstrumentID,
+			).Scan(
+				&configurationVersion,
+				&instrumentVersion,
+			); revisionErr != nil {
+				return BeginCommandResult{}, fmt.Errorf(
+					"lock economic revisions: %w",
+					revisionErr,
+				)
+			}
+			if configurationVersion != input.ConfigurationVersion ||
+				instrumentVersion != input.InstrumentVersion {
+				return BeginCommandResult{}, ErrEconomicRevisionChanged
+			}
 		}
 		if shardErr := ensureDeploymentShard(
 			ctx,
@@ -203,6 +417,77 @@ func (journal *CommandJournal) Begin(
 		); insertErr != nil {
 			return BeginCommandResult{}, fmt.Errorf("insert durable command: %w", insertErr)
 		}
+		if request.Response.Status != 0 {
+			headers, headerErr := canonicalJSON(request.Response.Headers)
+			if headerErr != nil {
+				return BeginCommandResult{}, fmt.Errorf(
+					"insert command replay response headers: %w",
+					headerErr,
+				)
+			}
+			if _, insertErr := tx.Exec(ctx, `
+				INSERT INTO trading.command_replay_responses (
+					command_id,
+					response_status,
+					response_headers,
+					response_body
+				) VALUES ($1,$2,$3,$4)`,
+				request.CommandID.String(),
+				request.Response.Status,
+				headers,
+				request.Response.Body,
+			); insertErr != nil {
+				return BeginCommandResult{}, fmt.Errorf(
+					"insert command replay response: %w",
+					insertErr,
+				)
+			}
+		}
+		if provisioning := request.AccountProvisioning; provisioning != nil {
+			if _, insertErr := tx.Exec(ctx, `
+				INSERT INTO identity.account_provisioning_intents (
+					command_id,
+					account_id,
+					broker_subject,
+					user_id,
+					login,
+					base_currency,
+					market_venue,
+					permitted_classes,
+					created_at
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+				request.CommandID.String(),
+				request.AccountID,
+				provisioning.BrokerTenant,
+				provisioning.UserID,
+				provisioning.Login,
+				provisioning.BaseCurrency,
+				provisioning.MarketVenue,
+				provisioning.PermittedClasses,
+				provisioning.CreatedAt,
+			); insertErr != nil {
+				return BeginCommandResult{}, fmt.Errorf(
+					"insert account provisioning intent: %w",
+					insertErr,
+				)
+			}
+		}
+		if !request.OrderID.IsZero() {
+			if _, insertErr := tx.Exec(ctx, `
+				INSERT INTO trading.order_intents (
+					order_id, command_id, account_id, intent_id
+				) VALUES ($1,$2,$3,$4)`,
+				request.OrderID.String(),
+				request.CommandID.String(),
+				request.AccountID,
+				request.IntentID,
+			); insertErr != nil {
+				return BeginCommandResult{}, fmt.Errorf(
+					"insert durable order intent: %w",
+					insertErr,
+				)
+			}
+		}
 		if _, insertErr := tx.Exec(ctx, `
 			INSERT INTO messaging.outbox (
 				message_id, subject, schema_version, payload
@@ -221,10 +506,11 @@ func (journal *CommandJournal) Begin(
 			Created:   true,
 			CommandID: request.CommandID,
 			State:     IdempotencyInProgress,
+			Response:  request.Response,
 		}, nil
 	}
 
-	result, recordedHash, err := loadIdempotencyForUpdate(
+	result, recordedHash, err := loadIdempotency(
 		ctx,
 		tx,
 		request.Scope,
@@ -254,6 +540,10 @@ func validateBeginCommand(
 		)
 	case request.CommandID.IsZero():
 		return engine.InputEnvelope{}, errors.New("begin command: command ID is required")
+	case request.OrderID.IsZero() != (request.IntentID == ""):
+		return engine.InputEnvelope{}, errors.New(
+			"begin command: order ID and intent ID must be supplied together",
+		)
 	case request.AccountID == "":
 		return engine.InputEnvelope{}, errors.New("begin command: account ID is required")
 	case request.AccountSequence == 0:
@@ -280,6 +570,34 @@ func validateBeginCommand(
 		)
 	case request.ExpiresAt.IsZero():
 		return engine.InputEnvelope{}, errors.New("begin command: expiration is required")
+	case request.Response.Status == 0 &&
+		(len(request.Response.Headers) != 0 ||
+			len(request.Response.Body) != 0):
+		return engine.InputEnvelope{}, errors.New(
+			"begin command: replay response status is required",
+		)
+	case request.Response.Status != 0 &&
+		(request.Response.Status < 100 ||
+			request.Response.Status > 599 ||
+			!json.Valid(request.Response.Headers)):
+		return engine.InputEnvelope{}, errors.New(
+			"begin command: replay response is invalid",
+		)
+	case request.AccountProvisioning != nil &&
+		(request.CommandType != string(engine.TradingActionConfigureAccount) ||
+			request.Response.Status != 201 ||
+			request.AccountProvisioning.BrokerTenant == "" ||
+			request.AccountProvisioning.UserID == "" ||
+			request.AccountProvisioning.Login <= 0 ||
+			request.AccountProvisioning.BaseCurrency != "USDC" ||
+			request.AccountProvisioning.MarketVenue != "HYPERLIQUID" ||
+			len(request.AccountProvisioning.PermittedClasses) != 1 ||
+			request.AccountProvisioning.PermittedClasses[0] !=
+				"CRYPTOCURRENCY" ||
+			request.AccountProvisioning.CreatedAt.IsZero()):
+		return engine.InputEnvelope{}, errors.New(
+			"begin command: account provisioning intent is invalid",
+		)
 	}
 	input, action, err := engine.DecodeInputMessage(request.OutboxPayload)
 	if err != nil {
@@ -414,7 +732,7 @@ func requireAccountShard(
 	return nil
 }
 
-func loadIdempotencyForUpdate(
+func loadIdempotency(
 	ctx context.Context,
 	tx pgx.Tx,
 	scope string,
@@ -428,11 +746,18 @@ func loadIdempotencyForUpdate(
 	var responseHeaders []byte
 	var responseBody []byte
 	if err := tx.QueryRow(ctx, `
-		SELECT request_hash, command_id::text, state, response_status,
-		       response_headers, response_body
-		  FROM trading.idempotency_records
-		 WHERE scope = $1 AND idempotency_key = $2
-		 FOR UPDATE`,
+		SELECT
+			idempotency.request_hash,
+			idempotency.command_id::text,
+			idempotency.state,
+			COALESCE(idempotency.response_status, replay.response_status),
+			COALESCE(idempotency.response_headers, replay.response_headers),
+			COALESCE(idempotency.response_body, replay.response_body)
+		  FROM trading.idempotency_records AS idempotency
+		  LEFT JOIN trading.command_replay_responses AS replay
+		    ON replay.command_id = idempotency.command_id
+		 WHERE idempotency.scope = $1
+		   AND idempotency.idempotency_key = $2`,
 		scope,
 		key,
 	).Scan(
