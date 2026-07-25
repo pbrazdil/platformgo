@@ -4,8 +4,7 @@
 
 1. Provision PostgreSQL, NATS/JetStream and Centrifugo.
 2. Validate backups, credentials, TLS and stream capacity.
-3. Run the one-shot migrator with the new image and explicitly provision the
-   configured initial engine shard.
+3. Run the one-shot migrator with the new image.
 4. Start stateless API and worker roles.
 5. Start marketdata and establish fresh synchronized feed state.
 6. Start exactly one engine for each shard using no-overlap deployment.
