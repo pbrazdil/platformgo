@@ -569,6 +569,29 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 			},
 		},
 		{
+			name: "command outbox producer authority",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, fixture reconciliationFixture) {
+				if _, err := pool.Exec(context.Background(), `
+					ALTER TABLE messaging.outbox
+						DROP CONSTRAINT outbox_producer_authority_check`,
+				); err != nil {
+					t.Fatalf("remove producer authority constraint for corruption: %v", err)
+				}
+				_, err := pool.Exec(context.Background(), `
+					UPDATE messaging.outbox
+					   SET producer_class = 'engine'
+					 WHERE message_id = $1`,
+					fixture.orderInputID.String(),
+				)
+				if err != nil {
+					t.Fatalf("corrupt command outbox producer authority: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.CommandMismatchCount
+			},
+		},
+		{
 			name: "balance reservation",
 			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
 				_, err := pool.Exec(context.Background(), `
@@ -685,6 +708,70 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 				)
 				if err != nil {
 					t.Fatalf("corrupt domain event payload: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.MessagingMismatchCount
+			},
+		},
+		{
+			name: "unexpected engine domain event",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				messageID := engine.IDFromSequence(engine.ID{}, 8990)
+				_, err := pool.Exec(context.Background(), `
+					INSERT INTO messaging.outbox (
+						message_id, subject, schema_version, payload,
+						producer_class, engine_shard_id, engine_input_id
+					)
+					SELECT
+						$1, 'domain.v1.order.filled', 1,
+						jsonb_build_object(
+							'messageId', $1::uuid::text,
+							'correlationId', receipt.input_id::text
+						),
+						'engine', receipt.shard_id, receipt.input_id
+					  FROM engine.input_receipts AS receipt
+					 WHERE receipt.shard_id = 8
+					 ORDER BY receipt.stream_sequence
+					 LIMIT 1`,
+					messageID.String(),
+				)
+				if err != nil {
+					t.Fatalf("insert unexpected engine domain event: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.MessagingMismatchCount
+			},
+		},
+		{
+			name: "unbound engine domain event",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				if _, err := pool.Exec(context.Background(), `
+					ALTER TABLE messaging.outbox
+						DROP CONSTRAINT outbox_engine_receipt_fkey`,
+				); err != nil {
+					t.Fatalf("remove engine receipt constraint for corruption: %v", err)
+				}
+				messageID := engine.IDFromSequence(engine.ID{}, 8996)
+				unknownInputID := engine.IDFromSequence(engine.ID{}, 8997)
+				_, err := pool.Exec(context.Background(), `
+					INSERT INTO messaging.outbox (
+						message_id, subject, schema_version, payload,
+						producer_class, engine_shard_id, engine_input_id
+					) VALUES (
+						$1, 'domain.v1.order.filled', 1,
+						jsonb_build_object(
+							'messageId', $1::uuid::text,
+							'correlationId', $2::uuid::text
+						),
+						'engine', 8, $2
+					)`,
+					messageID.String(),
+					unknownInputID.String(),
+				)
+				if err != nil {
+					t.Fatalf("insert unbound engine domain event: %v", err)
 				}
 			},
 			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
@@ -819,105 +906,6 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 	}
 }
 
-func TestReconcileShardIgnoresOtherShardCorruption(t *testing.T) {
-	pool := postgresPool(t)
-	fixture := seedReconciliationFixture(t, pool, 8)
-	baseline, err := fixture.store.ReconcileShard(context.Background(), 8)
-	if err != nil || !baseline.Ready {
-		t.Fatalf("baseline reconciliation = %+v, error %v", baseline, err)
-	}
-	commandID := engine.IDFromSequence(engine.ID{}, 9801)
-	transactionID := engine.IDFromSequence(engine.ID{}, 9802)
-	inputID := engine.IDFromSequence(engine.ID{}, 9803)
-	entryID := engine.IDFromSequence(engine.ID{}, 9804)
-	clearingEntryID := engine.IDFromSequence(engine.ID{}, 9805)
-	ctx := context.Background()
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin other-shard corruption: %v", err)
-	}
-	defer func() {
-		_ = tx.Rollback(context.Background())
-	}()
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO engine.account_shards (account_id, shard_id)
-		VALUES ('other-account', 9)`,
-	); err != nil {
-		t.Fatalf("seed other-shard assignment: %v", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO trading.commands (
-			command_id, account_id, account_sequence, command_type,
-			schema_version, canonical_payload, status, result,
-			logical_time, completed_at
-		) VALUES (
-			$1, 'other-account', 1, 'adjust_balance',
-			1, '{}'::jsonb, 'accepted', NULL,
-			'2026-07-24T00:00:00Z', '2026-07-24T00:00:00Z'
-		)`,
-		commandID.String(),
-	); err != nil {
-		t.Fatalf("seed other-shard command corruption: %v", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO messaging.outbox (
-			message_id, subject, schema_version, payload
-		) VALUES ($1, 'engine.input.9.command.v1', 1, '{}'::jsonb)`,
-		commandID.String(),
-	); err != nil {
-		t.Fatalf("seed other-shard pending outbox: %v", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO ledger.transactions (
-			transaction_id, business_key, input_id, logical_time
-		) VALUES (
-			$1, 'other-shard-transaction', $2, '2026-07-24T00:00:00Z'
-		)`,
-		transactionID.String(),
-		inputID.String(),
-	); err != nil {
-		t.Fatalf("seed other-shard transaction: %v", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO ledger.entries (
-			entry_id, transaction_id, account_id, currency, amount
-		) VALUES
-			($1, $2, 'other-account', 'USDC', 10),
-			($3, $2, $4, 'USDC', -10)`,
-		entryID.String(),
-		transactionID.String(),
-		clearingEntryID.String(),
-		engine.SystemClearingAccount,
-	); err != nil {
-		t.Fatalf("seed other-shard ledger entries: %v", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO ledger.balances (
-			account_id, currency, total, used, free, equity, ledger_sequence
-		) VALUES ('other-account', 'USDC', 11, 0, 11, 11, 1)`,
-	); err != nil {
-		t.Fatalf("seed other-shard balance corruption: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit other-shard corruption: %v", err)
-	}
-
-	report, err := fixture.store.ReconcileShard(ctx, 8)
-	if err != nil || !report.Ready {
-		t.Fatalf("other-shard corruption affected shard 8: report %+v error %v", report, err)
-	}
-	if report.CommandMismatchCount != 0 || report.LedgerMismatchCount != 0 {
-		t.Fatalf("other-shard mismatches leaked into shard 8 report: %+v", report)
-	}
-	if report.PendingOutboxMessages != baseline.PendingOutboxMessages {
-		t.Fatalf(
-			"other-shard outbox changed shard 8 backlog from %d to %d",
-			baseline.PendingOutboxMessages,
-			report.PendingOutboxMessages,
-		)
-	}
-}
-
 func TestReconcileShardAcceptsRoundedMultiFillAndClosedPosition(t *testing.T) {
 	pool := postgresPool(t)
 	fixture := seedReconciliationFixture(t, pool, 8)
@@ -954,6 +942,133 @@ func TestReconcileShardAcceptsRoundedMultiFillAndClosedPosition(t *testing.T) {
 	report, err := fixture.store.ReconcileShard(context.Background(), 8)
 	if err != nil || !report.Ready {
 		t.Fatalf("closed-position reconciliation = %+v, error %v", report, err)
+	}
+}
+
+func TestReconcileShardPreservesNanosecondTimesAndCanonicalSlippage(t *testing.T) {
+	pool := postgresPool(t)
+	fixture := seedReconciliationFixture(t, pool, 8)
+	report, err := fixture.store.ReconcileShard(context.Background(), 8)
+	if err != nil || !report.Ready {
+		t.Fatalf("nanosecond baseline reconciliation = %+v, error %v", report, err)
+	}
+
+	stopOrderID := engine.IDFromSequence(engine.ID{}, 9815)
+	state, _, _, _ := applyStoredTrading(
+		t,
+		pool,
+		fixture.store,
+		fixture.state,
+		fixture.ids,
+		fixture.clock,
+		engine.TradingAction{
+			Kind: engine.TradingActionSubmitOrder,
+			SubmitOrder: &engine.SubmitOrder{
+				OrderID:        stopOrderID,
+				AccountID:      "account-1",
+				InstrumentID:   "BTC-PERP",
+				Side:           engine.SideBuy,
+				Type:           engine.OrderTypeStopMarket,
+				TimeInForce:    engine.TimeInForceGTC,
+				Quantity:       "1",
+				TriggerPrice:   "110",
+				MaxSlippageBPS: uint32Pointer(50),
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		fixture.store,
+		state,
+		fixture.ids,
+		fixture.clock,
+		engine.TradingAction{
+			Kind: engine.TradingActionUpdateBook,
+			UpdateBook: &engine.UpdateBook{
+				InstrumentID: "BTC-PERP",
+				MarkPrice:    "110",
+				Bids:         []engine.BookLevel{{Price: "109", Quantity: "10"}},
+				Asks:         []engine.BookLevel{{Price: "110", Quantity: "10"}},
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	if !state.Ready() {
+		t.Fatal("valid nanosecond trigger halted deterministic state")
+	}
+	report, err = fixture.store.ReconcileShard(context.Background(), 8)
+	if err != nil || !report.Ready {
+		t.Fatalf("nanosecond trigger reconciliation = %+v, error %v", report, err)
+	}
+
+	var triggeredAt int64
+	if err := pool.QueryRow(context.Background(), `
+		SELECT triggered_at
+		  FROM trading.orders
+		 WHERE order_id = $1`,
+		stopOrderID.String(),
+	).Scan(&triggeredAt); err != nil {
+		t.Fatalf("read exact triggered time: %v", err)
+	}
+	if triggeredAt%int64(time.Second) != 123456789 {
+		t.Fatalf("triggered nanoseconds = %d, want 123456789", triggeredAt%int64(time.Second))
+	}
+	var nonExactTimes int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT
+			(SELECT count(*) FROM trading.fills
+			  WHERE logical_time % 1000000000 <> 123456789)
+			+
+			(SELECT count(*) FROM ledger.transactions
+			  WHERE logical_time % 1000000000 <> 123456789)`,
+	).Scan(&nonExactTimes); err != nil {
+		t.Fatalf("check exact durable logical times: %v", err)
+	}
+	if nonExactTimes != 0 {
+		t.Fatalf("non-exact durable logical times = %d", nonExactTimes)
+	}
+}
+
+func TestEngineStoreEnforcesInitialSingleShardDeployment(t *testing.T) {
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	store := platformpostgres.NewEngineStore(pool)
+	owner, err := store.AcquireShardOwnership(context.Background(), 8)
+	if err != nil {
+		t.Fatalf("AcquireShardOwnership shard 8: %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := owner.Close(context.Background()); closeErr != nil {
+			t.Fatalf("close shard 8 owner: %v", closeErr)
+		}
+	})
+	other, err := store.AcquireShardOwnership(context.Background(), 9)
+	if other != nil {
+		_ = other.Close(context.Background())
+		t.Fatal("second deployment shard acquired ownership")
+	}
+	if !errors.Is(err, platformpostgres.ErrDeploymentShardConflict) {
+		t.Fatalf(
+			"AcquireShardOwnership shard 9 error = %v, want ErrDeploymentShardConflict",
+			err,
+		)
+	}
+	var shardID uint64
+	if err := pool.QueryRow(context.Background(), `
+		SELECT shard_id FROM engine.deployment_shard WHERE singleton`,
+	).Scan(&shardID); err != nil {
+		t.Fatalf("read deployment shard: %v", err)
+	}
+	if shardID != 8 {
+		t.Fatalf("deployment shard = %d, want 8", shardID)
 	}
 }
 
@@ -1046,7 +1161,16 @@ func seedReconciliationFixture(
 	state := engine.NewState(shardID)
 	ids := testkit.NewShardIDSequence(shardID)
 	clock := testkit.NewManualClock(
-		engine.NewLogicalTime(time.Date(2026, time.July, 24, 14, 0, 0, 0, time.UTC)),
+		engine.NewLogicalTime(time.Date(
+			2026,
+			time.July,
+			24,
+			14,
+			0,
+			0,
+			123456789,
+			time.UTC,
+		)),
 	)
 	actions := []engine.TradingAction{
 		{
@@ -1127,13 +1251,14 @@ func seedReconciliationFixture(
 		engine.TradingAction{
 			Kind: engine.TradingActionSubmitOrder,
 			SubmitOrder: &engine.SubmitOrder{
-				OrderID:      orderID,
-				AccountID:    "account-1",
-				InstrumentID: "BTC-PERP",
-				Side:         engine.SideBuy,
-				Type:         engine.OrderTypeMarket,
-				TimeInForce:  engine.TimeInForceIOC,
-				Quantity:     "3",
+				OrderID:        orderID,
+				AccountID:      "account-1",
+				InstrumentID:   "BTC-PERP",
+				Side:           engine.SideBuy,
+				Type:           engine.OrderTypeMarket,
+				TimeInForce:    engine.TimeInForceIOC,
+				Quantity:       "3",
+				MaxSlippageBPS: uint32Pointer(50),
 			},
 		},
 		platformpostgres.ApplyOptions{},
@@ -1380,6 +1505,8 @@ func TestEngineStoreBindsNonCommandAccountInputToOneShard(t *testing.T) {
 	store := platformpostgres.NewEngineStore(pool)
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO engine.deployment_shard (shard_id)
+		VALUES (7);
 		INSERT INTO engine.account_shards (account_id, shard_id)
 		VALUES ('account-1', 7)`); err != nil {
 		t.Fatalf("preassign non-command account shard: %v", err)
@@ -1456,14 +1583,13 @@ func TestEngineStoreBindsNonCommandAccountInputToOneShard(t *testing.T) {
 		conflictingAction,
 		platformpostgres.ApplyOptions{},
 	)
-	if !errors.Is(err, platformpostgres.ErrAccountShardConflict) ||
-		!errors.Is(err, engine.ErrDurableInputConflict) {
+	if !errors.Is(err, platformpostgres.ErrDeploymentShardConflict) {
 		t.Fatalf(
-			"cross-shard configuration error = %v, want account-shard and durable conflicts",
+			"cross-shard configuration error = %v, want deployment-shard conflict",
 			err,
 		)
 	}
-	if halted.Ready() || halted.NextStreamSequence() != 1 {
+	if !halted.Ready() || halted.NextStreamSequence() != 1 {
 		t.Fatalf("cross-shard configuration state = %+v", halted)
 	}
 
@@ -1492,17 +1618,17 @@ func TestEngineStoreBindsNonCommandAccountInputToOneShard(t *testing.T) {
 		)
 	}
 	assertRowCount(t, pool, "engine.input_receipts", 1)
-	assertRowCount(t, pool, "engine.shard_faults", 1)
-	recovered, err := store.RecoverTradingState(context.Background(), 8)
+	assertRowCount(t, pool, "engine.shard_faults", 0)
+	recovered, err := store.RecoverTradingState(context.Background(), 7)
 	if err != nil {
-		t.Fatalf("RecoverTradingState conflicting shard: %v", err)
+		t.Fatalf("RecoverTradingState configured shard: %v", err)
 	}
-	if recovered.Ready() || recovered.Hash() != halted.Hash() {
+	if !recovered.Ready() || recovered.Hash() != firstState.Hash() {
 		t.Fatalf(
-			"recovered conflicting shard = ready %t hash %s, want false %s",
+			"recovered configured shard = ready %t hash %s, want true %s",
 			recovered.Ready(),
 			recovered.Hash(),
-			halted.Hash(),
+			firstState.Hash(),
 		)
 	}
 }
@@ -1602,15 +1728,6 @@ func TestEngineStoreFailsClosedOnInvalidCommandShardAssignment(t *testing.T) {
 			name:          "missing mapping",
 			deliveryShard: 7,
 		},
-		{
-			name: "mismatched mapping",
-			mappingShard: func() *engine.ShardID {
-				shardID := engine.ShardID(7)
-				return &shardID
-			}(),
-			deliveryShard:    8,
-			wantMappingCount: 1,
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			pool := postgresPool(t)
@@ -1668,7 +1785,7 @@ func TestEngineStoreFailsClosedOnInvalidCommandShardAssignment(t *testing.T) {
 				string(action.Kind),
 				storedInput.SchemaVersion,
 				payload.Bytes(),
-				now,
+				now.UnixNano(),
 			); err != nil {
 				t.Fatalf("seed durable command without valid mapping: %v", err)
 			}
@@ -1827,9 +1944,10 @@ func TestEngineStoreBindsCompleteCommandEnvelope(t *testing.T) {
 	}
 
 	mutations := []struct {
-		name      string
-		mutate    func(*engine.InputEnvelope)
-		wantError error
+		name         string
+		mutate       func(*engine.InputEnvelope)
+		wantError    error
+		remainsReady bool
 	}{
 		{
 			name:      "schema version",
@@ -1837,9 +1955,10 @@ func TestEngineStoreBindsCompleteCommandEnvelope(t *testing.T) {
 			wantError: engine.ErrUnknownSchema,
 		},
 		{
-			name:      "shard",
-			mutate:    func(input *engine.InputEnvelope) { input.ShardID++ },
-			wantError: platformpostgres.ErrAccountShardConflict,
+			name:         "shard",
+			mutate:       func(input *engine.InputEnvelope) { input.ShardID++ },
+			wantError:    platformpostgres.ErrDeploymentShardConflict,
+			remainsReady: true,
 		},
 		{
 			name:      "kind",
@@ -1924,8 +2043,12 @@ func TestEngineStoreBindsCompleteCommandEnvelope(t *testing.T) {
 			if !errors.Is(err, wantError) {
 				t.Fatalf("ApplyTrading error = %v, want %v", err, wantError)
 			}
-			if next.Ready() {
-				t.Fatal("invalid command input did not halt the shard")
+			if next.Ready() != mutation.remainsReady {
+				t.Fatalf(
+					"invalid command readiness = %t, want %t",
+					next.Ready(),
+					mutation.remainsReady,
+				)
 			}
 			if next.NextStreamSequence() != 1 {
 				t.Fatalf(
@@ -2064,7 +2187,7 @@ func TestEngineStoreBindsRedundantCommandMetadata(t *testing.T) {
 			mutate: func(ctx context.Context, pool *pgxpool.Pool, id engine.ID) error {
 				_, err := pool.Exec(ctx, `
 					UPDATE trading.commands
-					   SET logical_time = logical_time + interval '1 second'
+					   SET logical_time = logical_time + 1000000000
 					 WHERE command_id = $1`,
 					id.String(),
 				)
@@ -2310,6 +2433,14 @@ func seedPendingCommand(
 		accountID = actionAccountID
 	}
 	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO engine.deployment_shard (shard_id)
+		VALUES ($1)
+		ON CONFLICT (singleton) DO NOTHING`,
+		int64(input.ShardID),
+	); err != nil {
+		t.Fatalf("seed command %s deployment shard: %v", input.InputID, err)
+	}
+	if _, err := pool.Exec(context.Background(), `
 		INSERT INTO engine.account_shards (account_id, shard_id)
 		VALUES ($1, $2)
 		ON CONFLICT (account_id) DO NOTHING`,
@@ -2334,7 +2465,7 @@ func seedPendingCommand(
 		string(action.Kind),
 		input.SchemaVersion,
 		input.Payload.Bytes(),
-		time.Unix(0, input.LogicalTime.UnixNano()).UTC(),
+		input.LogicalTime.UnixNano(),
 	); err != nil {
 		t.Fatalf("seed pending command %s: %v", input.InputID, err)
 	}
@@ -2399,4 +2530,8 @@ func assertRowCount(t *testing.T, pool queryRower, relation string, want int) {
 
 type queryRower interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func uint32Pointer(value uint32) *uint32 {
+	return &value
 }

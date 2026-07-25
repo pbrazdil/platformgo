@@ -39,7 +39,7 @@ func ResetDurableSchemas(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := pool.QueryRow(ctx, `SELECT current_database()`).Scan(&databaseName); err != nil {
 		return fmt.Errorf("read current PostgreSQL database: %w", err)
 	}
-	if !disposableDatabaseName.MatchString(databaseName) {
+	if !IsDisposableDatabaseName(databaseName) {
 		return fmt.Errorf("%w: current database %q", ErrUnsafeTestDatabase, databaseName)
 	}
 	if _, err := pool.Exec(
@@ -49,4 +49,9 @@ func ResetDurableSchemas(ctx context.Context, pool *pgxpool.Pool) error {
 		return fmt.Errorf("drop durable test schemas: %w", err)
 	}
 	return nil
+}
+
+// IsDisposableDatabaseName applies the independent live-database naming guard.
+func IsDisposableDatabaseName(databaseName string) bool {
+	return disposableDatabaseName.MatchString(databaseName)
 }

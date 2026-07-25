@@ -269,9 +269,9 @@ func TestCommandJournalDurablyBindsAccountToOneShard(t *testing.T) {
 	if _, err := platformpostgres.NewCommandJournal(pool).Begin(
 		context.Background(),
 		wrongShard,
-	); !errors.Is(err, platformpostgres.ErrAccountShardConflict) {
+	); !errors.Is(err, platformpostgres.ErrDeploymentShardConflict) {
 		t.Fatalf(
-			"cross-shard Begin error = %v, want ErrAccountShardConflict",
+			"cross-shard Begin error = %v, want ErrDeploymentShardConflict",
 			err,
 		)
 	}
@@ -361,7 +361,7 @@ func TestConcurrentFirstCommandShardAssignmentHasOneDurableAuthority(t *testing.
 		switch {
 		case err == nil:
 			successes++
-		case errors.Is(err, platformpostgres.ErrAccountShardConflict):
+		case errors.Is(err, platformpostgres.ErrDeploymentShardConflict):
 			conflicts++
 		default:
 			t.Fatalf("concurrent assignment leaked unclassified error: %v", err)

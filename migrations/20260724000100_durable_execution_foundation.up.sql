@@ -61,8 +61,19 @@ BEGIN
 END;
 $$;
 
+CREATE TABLE engine.deployment_shard (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    shard_id bigint NOT NULL UNIQUE CHECK (shard_id >= 0),
+    selected_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TRIGGER deployment_shard_is_immutable
+BEFORE UPDATE OR DELETE ON engine.deployment_shard
+FOR EACH ROW EXECUTE FUNCTION engine.reject_immutable_change();
+
 CREATE TABLE engine.shard_checkpoints (
-    shard_id bigint PRIMARY KEY CHECK (shard_id >= 0),
+    shard_id bigint PRIMARY KEY
+        REFERENCES engine.deployment_shard(shard_id),
     next_stream_sequence bigint NOT NULL CHECK (next_stream_sequence > 0),
     ready boolean NOT NULL,
     state_hash bytea NOT NULL CHECK (octet_length(state_hash) = 32),
@@ -71,7 +82,7 @@ CREATE TABLE engine.shard_checkpoints (
 );
 
 CREATE TABLE engine.input_receipts (
-    shard_id bigint NOT NULL CHECK (shard_id >= 0),
+    shard_id bigint NOT NULL REFERENCES engine.deployment_shard(shard_id),
     input_id uuid NOT NULL,
     stream_sequence bigint NOT NULL CHECK (stream_sequence > 0),
     schema_version integer NOT NULL CHECK (schema_version > 0),
@@ -96,7 +107,7 @@ BEFORE UPDATE OR DELETE ON engine.input_receipts
 FOR EACH ROW EXECUTE FUNCTION engine.reject_immutable_change();
 
 CREATE TABLE engine.shard_faults (
-    shard_id bigint NOT NULL CHECK (shard_id >= 0),
+    shard_id bigint NOT NULL REFERENCES engine.deployment_shard(shard_id),
     resulting_state_hash bytea NOT NULL
         CHECK (octet_length(resulting_state_hash) = 32),
     input_id uuid NOT NULL,
@@ -114,7 +125,7 @@ BEFORE UPDATE OR DELETE ON engine.shard_faults
 FOR EACH ROW EXECUTE FUNCTION engine.reject_immutable_change();
 
 CREATE TABLE engine.duplicate_delivery_receipts (
-    shard_id bigint NOT NULL CHECK (shard_id >= 0),
+    shard_id bigint NOT NULL REFERENCES engine.deployment_shard(shard_id),
     stream_sequence bigint NOT NULL CHECK (stream_sequence > 0),
     input_id uuid NOT NULL,
     input_hash bytea NOT NULL CHECK (octet_length(input_hash) = 32),
@@ -138,7 +149,7 @@ FOR EACH ROW EXECUTE FUNCTION engine.reject_immutable_change();
 
 CREATE TABLE engine.account_shards (
     account_id text PRIMARY KEY CHECK (account_id <> ''),
-    shard_id bigint NOT NULL CHECK (shard_id >= 0),
+    shard_id bigint NOT NULL REFERENCES engine.deployment_shard(shard_id),
     assigned_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
@@ -147,7 +158,7 @@ BEFORE UPDATE OR DELETE ON engine.account_shards
 FOR EACH ROW EXECUTE FUNCTION engine.reject_immutable_change();
 
 CREATE TABLE engine.shard_ownership_epochs (
-    shard_id bigint PRIMARY KEY CHECK (shard_id >= 0),
+    shard_id bigint PRIMARY KEY REFERENCES engine.deployment_shard(shard_id),
     epoch bigint NOT NULL CHECK (epoch > 0),
     acquired_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
@@ -181,7 +192,7 @@ CREATE TABLE trading.commands (
     canonical_payload jsonb NOT NULL,
     status text NOT NULL CHECK (status IN ('pending', 'accepted', 'rejected', 'completed')),
     result jsonb,
-    logical_time timestamptz NOT NULL,
+    logical_time bigint NOT NULL,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     completed_at timestamptz,
     UNIQUE (account_id, account_sequence),
@@ -236,7 +247,7 @@ CREATE TABLE trading.orders (
     limit_price numeric(38,18),
     trigger_price numeric(38,18),
     triggered boolean NOT NULL,
-    triggered_at timestamptz,
+    triggered_at bigint,
     reduce_only boolean NOT NULL,
     position_id uuid,
     bracket_id uuid,
@@ -274,7 +285,7 @@ CREATE TABLE trading.fills (
     liquidity_side text NOT NULL CHECK (liquidity_side IN ('MAKER', 'TAKER')),
     fee numeric(38,18),
     fee_currency text CHECK (fee_currency <> ''),
-    logical_time timestamptz NOT NULL,
+    logical_time bigint NOT NULL,
     UNIQUE (input_id, fill_id),
     CONSTRAINT fills_realized_pnl_pair_check CHECK (
         (realized_pnl IS NULL AND settlement_currency IS NULL)
@@ -332,7 +343,7 @@ CREATE TABLE ledger.transactions (
     transaction_id uuid PRIMARY KEY,
     business_key text NOT NULL UNIQUE CHECK (business_key <> ''),
     input_id uuid NOT NULL,
-    logical_time timestamptz NOT NULL,
+    logical_time bigint NOT NULL,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
@@ -412,6 +423,8 @@ CREATE TABLE messaging.outbox (
     payload jsonb NOT NULL,
     producer_class text NOT NULL DEFAULT 'api'
         CHECK (producer_class IN ('api', 'engine')),
+    engine_shard_id bigint,
+    engine_input_id uuid,
     attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     claimed_at timestamptz,
@@ -419,6 +432,19 @@ CREATE TABLE messaging.outbox (
     publish_sequence bigint CHECK (publish_sequence IS NULL OR publish_sequence > 0),
     last_error text,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT outbox_engine_receipt_fkey
+        FOREIGN KEY (engine_shard_id, engine_input_id)
+        REFERENCES engine.input_receipts(shard_id, input_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT outbox_producer_authority_check CHECK (
+        (producer_class = 'api'
+            AND engine_shard_id IS NULL
+            AND engine_input_id IS NULL)
+        OR
+        (producer_class = 'engine'
+            AND engine_shard_id IS NOT NULL
+            AND engine_input_id IS NOT NULL)
+    ),
     CHECK (
         (published_at IS NULL AND publish_sequence IS NULL)
         OR
@@ -447,6 +473,7 @@ REVOKE ALL ON ALL TABLES IN SCHEMA engine, trading, ledger, market, messaging
 
 GRANT USAGE ON SCHEMA engine, trading, ledger, market, messaging
     TO platformgo_api;
+GRANT SELECT, INSERT ON engine.deployment_shard TO platformgo_api;
 GRANT SELECT, INSERT ON engine.account_shards TO platformgo_api;
 GRANT SELECT, INSERT ON trading.idempotency_records TO platformgo_api;
 GRANT UPDATE (
@@ -485,6 +512,7 @@ GRANT SELECT, INSERT ON
     engine.duplicate_delivery_receipts
 TO platformgo_engine;
 GRANT SELECT ON engine.account_shards TO platformgo_engine;
+GRANT SELECT, INSERT ON engine.deployment_shard TO platformgo_engine;
 GRANT SELECT, INSERT ON engine.shard_ownership_epochs TO platformgo_engine;
 GRANT UPDATE (
     epoch,

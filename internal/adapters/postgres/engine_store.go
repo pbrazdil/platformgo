@@ -7,9 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/upcomers-org/platformgo/internal/engine"
 )
@@ -19,6 +19,9 @@ var (
 	ErrInjectedFault = errors.New("injected durable execution fault")
 	// ErrWriterConflict means another transaction currently owns the shard.
 	ErrWriterConflict = errors.New("another engine writer owns the shard")
+	// ErrDeploymentShardConflict means the initial single-shard deployment was
+	// already durably bound to a different shard.
+	ErrDeploymentShardConflict = errors.New("deployment shard configuration conflict")
 	// ErrCheckpointMismatch means caller state and PostgreSQL authority disagree.
 	ErrCheckpointMismatch = errors.New("engine checkpoint mismatch")
 	// ErrCommandInputConflict means the delivered engine input does not match
@@ -94,6 +97,9 @@ func (store *EngineStore) HaltTradingInput(
 	defer func() {
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
+	if err := ensureDeploymentShard(ctx, tx, state.ShardID()); err != nil {
+		return state, err
+	}
 	if !token.present {
 		if err := acquireOfflineShardOwnership(ctx, tx, state.ShardID()); err != nil {
 			return state, err
@@ -152,6 +158,10 @@ func (store *EngineStore) AcquireShardOwnership(
 	connection, err := store.pool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire shard %d ownership connection: %w", shardID, err)
+	}
+	if err := ensureDeploymentShard(ctx, connection, shardID); err != nil {
+		connection.Release()
+		return nil, err
 	}
 	var acquired bool
 	if err := connection.QueryRow(
@@ -322,6 +332,13 @@ func (store *EngineStore) ApplyTrading(
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
 
+	if deploymentErr := ensureDeploymentShard(
+		ctx,
+		tx,
+		state.ShardID(),
+	); deploymentErr != nil {
+		return state, engine.Decision{}, false, deploymentErr
+	}
 	if !token.present {
 		if ownershipErr := acquireOfflineShardOwnership(
 			ctx,
@@ -503,6 +520,43 @@ func isDeterministicDurableInputConflict(err error) bool {
 		errors.Is(err, ErrCommandPredecessorPending) ||
 		errors.Is(err, ErrCommandNotFound) ||
 		errors.Is(err, ErrCommandCompletionConflict)
+}
+
+type deploymentShardExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func ensureDeploymentShard(
+	ctx context.Context,
+	executor deploymentShardExecutor,
+	shardID engine.ShardID,
+) error {
+	if _, err := executor.Exec(ctx, `
+		INSERT INTO engine.deployment_shard (singleton, shard_id)
+		VALUES (true, $1)
+		ON CONFLICT (singleton) DO NOTHING`,
+		int64(shardID),
+	); err != nil {
+		return fmt.Errorf("bind deployment shard %d: %w", shardID, err)
+	}
+	var configuredShard uint64
+	if err := executor.QueryRow(ctx, `
+		SELECT shard_id
+		  FROM engine.deployment_shard
+		 WHERE singleton`,
+	).Scan(&configuredShard); err != nil {
+		return fmt.Errorf("read deployment shard %d binding: %w", shardID, err)
+	}
+	if configuredShard != uint64(shardID) {
+		return fmt.Errorf(
+			"%w: configured shard %d, requested shard %d",
+			ErrDeploymentShardConflict,
+			configuredShard,
+			shardID,
+		)
+	}
+	return nil
 }
 
 func acquireShardWriter(
@@ -997,7 +1051,7 @@ func persistCommandResult(
 	var accountID string
 	var accountSequence uint64
 	var storedPayload []byte
-	var commandLogicalTime time.Time
+	var commandLogicalTime int64
 	var outboxSubject string
 	var outboxSchemaVersion uint32
 	var outboxPayload []byte
@@ -1080,7 +1134,7 @@ func persistCommandResult(
 		schemaVersion != input.SchemaVersion ||
 		commandType != string(storedAction.Kind) ||
 		accountSequence != input.SourceSequence ||
-		commandLogicalTime.UnixNano() != input.LogicalTime.UnixNano() ||
+		commandLogicalTime != input.LogicalTime.UnixNano() ||
 		!bytes.Equal(canonicalStored, canonicalInput) {
 		return fmt.Errorf("%w: command %s", ErrCommandInputConflict, input.InputID)
 	}
@@ -1161,7 +1215,7 @@ func persistLedger(
 			transaction.TransactionID.String(),
 			transaction.BusinessKey,
 			transaction.InputID.String(),
-			transaction.LogicalTime.String(),
+			transaction.LogicalTime.UnixNano(),
 		); err != nil {
 			return fmt.Errorf(
 				"persist ledger transaction %s: %w",
@@ -1355,7 +1409,7 @@ func persistFills(
 			string(change.LiquiditySide),
 			nullableText(change.Fee),
 			nullableText(change.FeeCurrency),
-			change.LogicalTime.String(),
+			change.LogicalTime.UnixNano(),
 		); err != nil {
 			return fmt.Errorf("persist fill %s: %w", change.FillID, err)
 		}
@@ -1427,12 +1481,15 @@ func persistOutbox(
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO messaging.outbox (
-				message_id, subject, schema_version, payload, producer_class
-			) VALUES ($1,$2,$3,$4,'engine')`,
+				message_id, subject, schema_version, payload, producer_class,
+				engine_shard_id, engine_input_id
+			) VALUES ($1,$2,$3,$4,'engine',$5,$6)`,
 			event.EventID.String(),
 			"domain.v1."+event.Kind,
 			engine.CurrentSchemaVersion,
 			payload,
+			int64(input.ShardID),
+			input.InputID.String(),
 		); err != nil {
 			return fmt.Errorf("persist outbox event %s: %w", event.EventID, err)
 		}
@@ -2005,5 +2062,5 @@ func nullableLogicalTime(present bool, value engine.LogicalTime) any {
 	if !present {
 		return nil
 	}
-	return value.String()
+	return value.UnixNano()
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -51,6 +52,31 @@ func engineEventPublicationFingerprint(message OutboxMessage) [sha256.Size]byte 
 		"platformgo.postgres.engine-event-publication.v1",
 		message,
 	)
+}
+
+func engineEventAuthorityMatches(
+	message OutboxMessage,
+	producerClass string,
+	engineShardID *int64,
+	engineInputID *string,
+	receiptExists bool,
+) bool {
+	if producerClass != "engine" ||
+		engineShardID == nil ||
+		engineInputID == nil ||
+		!receiptExists ||
+		!strings.HasPrefix(message.Subject, "domain.v1.") {
+		return false
+	}
+	var envelope struct {
+		MessageID     string `json:"messageId"`
+		CorrelationID string `json:"correlationId"`
+	}
+	if err := json.Unmarshal(message.Payload, &envelope); err != nil {
+		return false
+	}
+	return envelope.MessageID == message.MessageID.String() &&
+		envelope.CorrelationID == *engineInputID
 }
 
 func publicationFingerprint(label string, message OutboxMessage) [sha256.Size]byte {
@@ -187,13 +213,21 @@ func (store *MessagingStore) RepublishOutbox(
 	var messageIDText string
 	var commandMessage bool
 	var producerClass string
+	var engineShardID *int64
+	var engineInputID *string
+	var receiptExists bool
 	if err := store.pool.QueryRow(ctx, `
 		SELECT outbox.message_id::text, outbox.subject,
 		       outbox.schema_version, outbox.payload, outbox.attempts,
-		       command.command_id IS NOT NULL, outbox.producer_class
+		       command.command_id IS NOT NULL, outbox.producer_class,
+		       outbox.engine_shard_id, outbox.engine_input_id::text,
+		       receipt.input_id IS NOT NULL
 		  FROM messaging.outbox AS outbox
 		  LEFT JOIN trading.commands AS command
 		    ON command.command_id = outbox.message_id
+		  LEFT JOIN engine.input_receipts AS receipt
+		    ON receipt.shard_id = outbox.engine_shard_id
+		   AND receipt.input_id = outbox.engine_input_id
 		 WHERE outbox.message_id = $1
 		   AND outbox.published_at IS NOT NULL`,
 		messageID.String(),
@@ -205,6 +239,9 @@ func (store *MessagingStore) RepublishOutbox(
 		&message.Attempts,
 		&commandMessage,
 		&producerClass,
+		&engineShardID,
+		&engineInputID,
+		&receiptExists,
 	); errors.Is(err, pgx.ErrNoRows) {
 		return 0, fmt.Errorf("republish outbox: published message %s not found", messageID)
 	} else if err != nil {
@@ -218,7 +255,13 @@ func (store *MessagingStore) RepublishOutbox(
 	if commandMessage && producerClass == "api" {
 		message.orderedCommandClaim = commandPublicationFingerprint(message)
 	}
-	if producerClass == "engine" {
+	if engineEventAuthorityMatches(
+		message,
+		producerClass,
+		engineShardID,
+		engineInputID,
+		receiptExists,
+	) {
 		message.engineEventClaim = engineEventPublicationFingerprint(message)
 	}
 	sequence, err := publisher.Publish(ctx, message)
@@ -248,10 +291,15 @@ func (store *MessagingStore) claimOutbox(
 	rows, err := tx.Query(ctx, `
 		SELECT outbox.message_id::text, outbox.subject,
 		       outbox.schema_version, outbox.payload, outbox.attempts,
-		       command.command_id IS NOT NULL, outbox.producer_class
+		       command.command_id IS NOT NULL, outbox.producer_class,
+		       outbox.engine_shard_id, outbox.engine_input_id::text,
+		       receipt.input_id IS NOT NULL
 		  FROM messaging.outbox AS outbox
 		  LEFT JOIN trading.commands AS command
 		    ON command.command_id = outbox.message_id
+		  LEFT JOIN engine.input_receipts AS receipt
+		    ON receipt.shard_id = outbox.engine_shard_id
+		   AND receipt.input_id = outbox.engine_input_id
 		 WHERE outbox.published_at IS NULL
 		   AND outbox.next_attempt_at <= $1
 		   AND (outbox.claimed_at IS NULL OR outbox.claimed_at <= $2)
@@ -283,6 +331,9 @@ func (store *MessagingStore) claimOutbox(
 		var messageIDText string
 		var commandMessage bool
 		var producerClass string
+		var engineShardID *int64
+		var engineInputID *string
+		var receiptExists bool
 		if scanErr := rows.Scan(
 			&messageIDText,
 			&message.Subject,
@@ -291,6 +342,9 @@ func (store *MessagingStore) claimOutbox(
 			&message.Attempts,
 			&commandMessage,
 			&producerClass,
+			&engineShardID,
+			&engineInputID,
+			&receiptExists,
 		); scanErr != nil {
 			rows.Close()
 			return nil, fmt.Errorf("claim outbox: scan: %w", scanErr)
@@ -305,7 +359,13 @@ func (store *MessagingStore) claimOutbox(
 		if commandMessage && producerClass == "api" {
 			message.orderedCommandClaim = commandPublicationFingerprint(message)
 		}
-		if producerClass == "engine" {
+		if engineEventAuthorityMatches(
+			message,
+			producerClass,
+			engineShardID,
+			engineInputID,
+			receiptExists,
+		) {
 			message.engineEventClaim = engineEventPublicationFingerprint(message)
 		}
 		messages = append(messages, message)

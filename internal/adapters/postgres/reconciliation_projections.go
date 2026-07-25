@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/upcomers-org/platformgo/internal/engine"
@@ -80,6 +79,7 @@ type durableCommand struct {
 	OutboxSubject   string
 	OutboxSchema    uint32
 	OutboxPayload   []byte
+	OutboxProducer  string
 }
 
 type expectedProjections struct {
@@ -267,7 +267,6 @@ func loadExpectedProjections(
 			}
 		}
 		for _, change := range decision.LedgerChanges {
-			change.LogicalTime = postgresLogicalTime(change.LogicalTime)
 			sort.Slice(change.Entries, func(left, right int) bool {
 				return change.Entries[left].EntryID.String() <
 					change.Entries[right].EntryID.String()
@@ -316,14 +315,15 @@ func loadExpectedProjections(
 				CanonicalAction: input.Payload.Bytes(),
 				Status:          string(decision.CommandResult.Status),
 				Result:          resultJSON,
-				LogicalTime:     postgresLogicalTime(input.LogicalTime),
+				LogicalTime:     input.LogicalTime,
 				OutboxSubject: fmt.Sprintf(
 					"engine.input.%d.command.v%d",
 					input.ShardID,
 					input.SchemaVersion,
 				),
-				OutboxSchema:  input.SchemaVersion,
-				OutboxPayload: outboxPayload,
+				OutboxSchema:   input.SchemaVersion,
+				OutboxPayload:  outboxPayload,
+				OutboxProducer: "api",
 			}
 		}
 	}
@@ -338,9 +338,6 @@ func compareInstruments(
 	tx pgx.Tx,
 	expected map[string]versionedInstrument,
 ) (uint64, error) {
-	if len(expected) == 0 {
-		return 0, nil
-	}
 	rows, err := tx.Query(ctx, `
 		SELECT instrument_id, revision, price_scale, quantity_scale,
 		       settlement_currency, settlement_currency_scale,
@@ -350,9 +347,7 @@ func compareInstruments(
 		       trim_scale(maker_fee_rate)::text,
 		       trim_scale(taker_fee_rate)::text,
 		       version
-		  FROM trading.instruments
-		 WHERE instrument_id = ANY($1::text[])`,
-		mapKeys(expected),
+		  FROM trading.instruments`,
 	)
 	if err != nil {
 		return 0, err
@@ -515,15 +510,10 @@ func compareBooks(
 	tx pgx.Tx,
 	expected map[string]sequencedBook,
 ) (uint64, error) {
-	if len(expected) == 0 {
-		return 0, nil
-	}
 	rows, err := tx.Query(ctx, `
 		SELECT instrument_id, trim_scale(mark_price)::text, bids, asks,
 		       stream_sequence
-		  FROM market.books
-		 WHERE instrument_id = ANY($1::text[])`,
-		mapKeys(expected),
+		  FROM market.books`,
 	)
 	if err != nil {
 		return 0, err
@@ -575,7 +565,7 @@ func compareOrders(
 		       COALESCE(trim_scale(trigger_price)::text, ''),
 		       triggered,
 		       COALESCE(
-				(extract(epoch FROM triggered_at) * 1000000000)::bigint,
+				triggered_at,
 				0
 		       ),
 		       reduce_only,
@@ -583,7 +573,8 @@ func compareOrders(
 		       COALESCE(bracket_id::text, '00000000-0000-0000-0000-000000000000'),
 		       COALESCE(bracket_leg, ''),
 		       bracket_leg_index, has_rested, has_slippage_band,
-		       max_slippage_bps, COALESCE(slippage_reference::text, ''),
+		       max_slippage_bps,
+		       COALESCE(trim_scale(slippage_reference)::text, ''),
 		       COALESCE(reject_reason, ''), version
 		  FROM trading.orders AS orders
 		  JOIN engine.account_shards AS assignment USING (account_id)
@@ -662,7 +653,7 @@ func compareFills(
 		       COALESCE(settlement_currency, ''), liquidity_side,
 		       COALESCE(trim_scale(fee)::text, ''),
 		       COALESCE(fee_currency, ''),
-		       (extract(epoch FROM logical_time) * 1000000000)::bigint
+		       logical_time
 		  FROM trading.fills AS fills
 		  JOIN engine.account_shards AS assignment USING (account_id)
 		 WHERE assignment.shard_id = $1`,
@@ -783,10 +774,11 @@ func compareCommands(
 		       command.account_sequence, command.command_type,
 		       command.schema_version, command.canonical_payload,
 		       command.status, COALESCE(command.result, 'null'::jsonb),
-		       (extract(epoch FROM command.logical_time) * 1000000000)::bigint,
+		       command.logical_time,
 		       COALESCE(outbox.subject, ''),
 		       COALESCE(outbox.schema_version, 0),
-		       COALESCE(outbox.payload, 'null'::jsonb)
+		       COALESCE(outbox.payload, 'null'::jsonb),
+		       COALESCE(outbox.producer_class, '')
 		  FROM trading.commands AS command
 		  JOIN engine.account_shards AS assignment USING (account_id)
 		  LEFT JOIN messaging.outbox AS outbox
@@ -816,6 +808,7 @@ func compareCommands(
 			&actual.OutboxSubject,
 			&actual.OutboxSchema,
 			&actual.OutboxPayload,
+			&actual.OutboxProducer,
 		); scanErr != nil {
 			return 0, scanErr
 		}
@@ -955,7 +948,7 @@ func compareLedger(
 	rows, err := tx.Query(ctx, `
 		SELECT transaction.transaction_id::text, transaction.business_key,
 		       transaction.input_id::text,
-		       (extract(epoch FROM transaction.logical_time) * 1000000000)::bigint,
+		       transaction.logical_time,
 		       entry.entry_id::text, entry.account_id, entry.currency,
 		       trim_scale(entry.amount)::text
 		  FROM ledger.transactions AS transaction
@@ -1048,12 +1041,12 @@ func compareDomainEvents(
 		       outbox.schema_version, outbox.payload, outbox.producer_class
 		  FROM messaging.outbox AS outbox
 		 WHERE outbox.subject LIKE 'domain.v1.%'
-		   AND EXISTS (
-				SELECT 1
-				  FROM engine.input_receipts AS receipt
-				 WHERE receipt.shard_id = $1
-				   AND receipt.input_id::text =
-				       outbox.payload ->> 'correlationId'
+		   AND (
+				outbox.engine_shard_id = $1
+				OR (
+					outbox.producer_class = 'engine'
+					AND outbox.engine_shard_id IS NULL
+				)
 		   )`,
 		int64(shardID),
 	)
@@ -1100,18 +1093,4 @@ func projectionEqual(expected, actual any) bool {
 	expectedJSON, expectedErr := json.Marshal(expected)
 	actualJSON, actualErr := json.Marshal(actual)
 	return expectedErr == nil && actualErr == nil && bytes.Equal(expectedJSON, actualJSON)
-}
-
-func postgresLogicalTime(value engine.LogicalTime) engine.LogicalTime {
-	return engine.NewLogicalTime(
-		time.Unix(0, value.UnixNano()).UTC().Truncate(time.Microsecond),
-	)
-}
-
-func mapKeys[T any](values map[string]T) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	return keys
 }

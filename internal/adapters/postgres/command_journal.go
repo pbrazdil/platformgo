@@ -150,6 +150,13 @@ func (journal *CommandJournal) Begin(
 				lockErr,
 			)
 		}
+		if shardErr := ensureDeploymentShard(
+			ctx,
+			tx,
+			input.ShardID,
+		); shardErr != nil {
+			return BeginCommandResult{}, shardErr
+		}
 		if bindErr := bindAccountShard(
 			ctx,
 			tx,
@@ -192,7 +199,7 @@ func (journal *CommandJournal) Begin(
 			request.CommandType,
 			request.SchemaVersion,
 			request.CanonicalPayload,
-			request.LogicalTime,
+			request.LogicalTime.UnixNano(),
 		); insertErr != nil {
 			return BeginCommandResult{}, fmt.Errorf("insert durable command: %w", insertErr)
 		}

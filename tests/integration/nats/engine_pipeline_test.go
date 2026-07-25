@@ -226,6 +226,13 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	if err := restarted.Close(ctx); err != nil {
 		t.Fatalf("close restarted shard 9 processor: %v", err)
 	}
+	resetDurableSchemas(t, ctx, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("Migrate duplicate probe: %v", err)
+	}
 
 	duplicateLimits := limits
 	duplicateLimits.DuplicateWindow = 100 * time.Millisecond
@@ -378,6 +385,13 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	if err := duplicateProcessor.Close(ctx); err != nil {
 		t.Fatalf("close duplicate processor: %v", err)
 	}
+	resetDurableSchemas(t, ctx, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("Migrate poison probe: %v", err)
+	}
 
 	if err := platformnats.EnsureEngineShardStream(
 		ctx,
@@ -454,6 +468,13 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	}
 	if poisonFaults != 1 {
 		t.Fatalf("poison envelope produced %d durable faults, want 1", poisonFaults)
+	}
+	resetDurableSchemas(t, ctx, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("Migrate subject mismatch probe: %v", err)
 	}
 
 	if err := platformnats.EnsureEngineShardStream(ctx, js, 15, limits); err != nil {
@@ -580,6 +601,13 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	}
 
 	for index, poisonKind := range []string{"different", "missing", "malformed"} {
+		resetDurableSchemas(t, ctx, pool)
+		if err := platformpostgres.NewMigrator(
+			pool,
+			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+		).Migrate(ctx); err != nil {
+			t.Fatalf("Migrate %s ID poison probe: %v", poisonKind, err)
+		}
 		shardID := engine.ShardID(16 + index)
 		if err := platformnats.EnsureEngineShardStream(
 			ctx,
@@ -1311,10 +1339,13 @@ func TestAPIOutboxCannotPublishNonCommandEngineInput(t *testing.T) {
 		t.Fatalf("commit forged API outbox row: %v", err)
 	}
 
-	published, err := platformpostgres.NewMessagingStore(pool).PublishOutboxBatch(
+	publishNow := time.Now().UTC().Add(time.Second)
+	messagingStore := platformpostgres.NewMessagingStore(pool)
+	publisher := platformnats.NewPublisher(js)
+	published, err := messagingStore.PublishOutboxBatch(
 		ctx,
-		platformnats.NewPublisher(js),
-		time.Now().UTC().Add(time.Second),
+		publisher,
+		publishNow,
 		1,
 		time.Minute,
 		time.Second,
@@ -1441,10 +1472,13 @@ func TestAPIOutboxCannotPublishDomainEvent(t *testing.T) {
 		t.Fatalf("commit forged API domain event: %v", err)
 	}
 
-	published, err := platformpostgres.NewMessagingStore(pool).PublishOutboxBatch(
+	publishNow := time.Now().UTC().Add(time.Second)
+	messagingStore := platformpostgres.NewMessagingStore(pool)
+	publisher := platformnats.NewPublisher(js)
+	published, err := messagingStore.PublishOutboxBatch(
 		ctx,
-		platformnats.NewPublisher(js),
-		time.Now().UTC().Add(time.Second),
+		publisher,
+		publishNow,
 		1,
 		time.Minute,
 		time.Second,
@@ -1464,6 +1498,59 @@ func TestAPIOutboxCannotPublishDomainEvent(t *testing.T) {
 	if info.State.Msgs != 0 {
 		t.Fatalf("forged domain stream messages = %d, want 0", info.State.Msgs)
 	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE messaging.outbox
+		   SET next_attempt_at = clock_timestamp() + interval '1 hour'
+		 WHERE message_id = $1`,
+		messageID.String(),
+	); err != nil {
+		t.Fatalf("defer API event retry: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		ALTER TABLE messaging.outbox
+			DROP CONSTRAINT outbox_engine_receipt_fkey`,
+	); err != nil {
+		t.Fatalf("prepare unbound engine-event corruption: %v", err)
+	}
+	unboundMessageID := engine.IDFromSequence(engine.ID{}, 234)
+	unboundInputID := engine.IDFromSequence(engine.ID{}, 235)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO messaging.outbox (
+			message_id, subject, schema_version, payload, producer_class,
+			engine_shard_id, engine_input_id
+		) VALUES (
+			$1, 'domain.v1.order.filled', 1,
+			jsonb_build_object(
+				'messageId', $1::uuid::text,
+				'correlationId', $2::uuid::text
+			),
+			'engine', 99, $2
+		)`,
+		unboundMessageID.String(),
+		unboundInputID.String(),
+	); err != nil {
+		t.Fatalf("insert unbound engine-event corruption: %v", err)
+	}
+	published, err = messagingStore.PublishOutboxBatch(
+		ctx,
+		publisher,
+		publishNow.Add(2*time.Second),
+		1,
+		time.Minute,
+		time.Second,
+	)
+	if published != 0 ||
+		!errors.Is(err, platformnats.ErrUnauthorizedDomainEventPublication) {
+		t.Fatalf("unbound engine domain publish = %d, error %v", published, err)
+	}
+	info, err = stream.Info(ctx)
+	if err != nil {
+		t.Fatalf("inspect domain stream after unbound event: %v", err)
+	}
+	if info.State.Msgs != 0 {
+		t.Fatalf("unbound engine event published %d messages", info.State.Msgs)
+	}
 }
 
 func TestMalformedTransportInputsRemainDurablyHaltedAfterRestart(t *testing.T) {
@@ -1479,13 +1566,6 @@ func TestMalformedTransportInputsRemainDurablyHaltedAfterRestart(t *testing.T) {
 		t.Fatalf("open PostgreSQL pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	resetDurableSchemas(t, ctx, pool)
-	if err := platformpostgres.NewMigrator(
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
 	actionPayload, err := engine.EncodeTradingAction(engine.TradingAction{
 		Kind: engine.TradingActionConfigureAccount,
 		ConfigureAccount: &engine.ConfigureAccount{
@@ -1571,6 +1651,13 @@ func TestMalformedTransportInputsRemainDurablyHaltedAfterRestart(t *testing.T) {
 	store := platformpostgres.NewEngineStore(pool)
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			resetDurableSchemas(t, ctx, pool)
+			if err := platformpostgres.NewMigrator(
+				pool,
+				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			).Migrate(ctx); err != nil {
+				t.Fatalf("Migrate: %v", err)
+			}
 			shardID := engine.ShardID(40 + index)
 			inputID := engine.IDFromSequence(engine.ID{}, uint64(400+index))
 			message := engine.InputMessage{

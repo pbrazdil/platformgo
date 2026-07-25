@@ -32,6 +32,7 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 
 	for _, relation := range []string{
 		"engine.schema_migrations",
+		"engine.deployment_shard",
 		"engine.account_shards",
 		"engine.shard_ownership_epochs",
 		"engine.shard_checkpoints",
@@ -64,6 +65,7 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 	}
 
 	assertReceiptIdentityConstraints(t, pool)
+	assertOutboxProducerAuthorityConstraints(t, pool)
 	assertSingleBaselineMigration(t, pool)
 	assertLedgerBalanceConstraint(t, pool)
 	assertImmutableLedgerFacts(t, pool)
@@ -81,6 +83,7 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 	}
 
 	_, err := pool.Exec(context.Background(), `
+		INSERT INTO engine.deployment_shard (shard_id) VALUES (7);
 		INSERT INTO trading.instruments (
 			instrument_id, revision, price_scale, quantity_scale,
 			settlement_currency, settlement_currency_scale,
@@ -93,7 +96,7 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 		INSERT INTO trading.accounts (account_id, oms_mode)
 		VALUES ('account-netting', 'NETTING'), ('account-hedging', 'HEDGING');
 		INSERT INTO engine.account_shards (account_id, shard_id)
-		VALUES ('account-netting', 7), ('account-hedging', 8);
+		VALUES ('account-netting', 7), ('account-hedging', 7);
 		INSERT INTO trading.risk_configs (
 			account_id, instrument_id, margin_mode, leverage
 		) VALUES
@@ -126,14 +129,14 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 			 'account-netting', 'BTC-USDC', 'BUY', 100.00, 1.000,
 			 '019f9460-4b36-4e9b-8f44-682611f70031', 'OPEN',
 			 0.00, 'USDC', 'MAKER', -0.01, 'USDC',
-			 '2026-07-24T12:00:00Z'),
+			 1784894400000000000),
 			('019f9460-4b36-4e9b-8f44-682611f70012',
 			 '019f9460-4b36-4e9b-8f44-682611f70002',
 			 '019f9460-4b36-4e9b-8f44-682611f70022',
 			 'account-hedging', 'BTC-USDC', 'SELL', 101.00, 1.000,
 			 '019f9460-4b36-4e9b-8f44-682611f70032', 'OPEN',
 			 NULL, NULL, 'TAKER', NULL, NULL,
-			 '2026-07-24T12:00:01Z');
+			 1784894401000000000);
 		INSERT INTO trading.positions (
 			position_id, account_id, instrument_id, side, status,
 			signed_quantity, average_open_price, realized_pnl,
@@ -153,7 +156,7 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 		) VALUES (
 			'019f9460-4b36-4e9b-8f44-682611f70041',
 			'baseline-balanced', '019f9460-4b36-4e9b-8f44-682611f70021',
-			'2026-07-24T12:00:00Z'
+			1784894400000000000
 		);
 		INSERT INTO ledger.entries (
 			entry_id, transaction_id, account_id, currency, amount
@@ -173,8 +176,7 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 		INSERT INTO engine.shard_checkpoints (
 			shard_id, next_stream_sequence, ready, state_hash, state_snapshot
 		) VALUES
-			(7, 3, true, decode(repeat('11', 32), 'hex'), '{}'),
-			(8, 2, false, decode(repeat('12', 32), 'hex'), '{}');
+			(7, 5, false, decode(repeat('11', 32), 'hex'), '{}');
 		INSERT INTO engine.input_receipts (
 			shard_id, input_id, stream_sequence, schema_version,
 			input_hash_version, input_hash, decision_hash_version,
@@ -191,7 +193,7 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 			 decode(repeat('32', 32), 'hex'), 1,
 			 decode(repeat('42', 32), 'hex'),
 			 decode(repeat('52', 32), 'hex'), '{}', '{}'),
-			(8, '019f9460-4b36-4e9b-8f44-682611f70023', 1, 1,
+			(7, '019f9460-4b36-4e9b-8f44-682611f70023', 3, 1,
 			 1, decode(repeat('23', 32), 'hex'), 1,
 			 decode(repeat('33', 32), 'hex'), 1,
 			 decode(repeat('43', 32), 'hex'),
@@ -200,8 +202,8 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 			shard_id, resulting_state_hash, input_id, stream_sequence,
 			error_kind, error_detail, envelope, supplied_action
 		) VALUES (
-			8, decode(repeat('61', 32), 'hex'),
-			'019f9460-4b36-4e9b-8f44-682611f70024', 2,
+			7, decode(repeat('61', 32), 'hex'),
+			'019f9460-4b36-4e9b-8f44-682611f70024', 4,
 			'durable_conflict', 'fixture', '{}', decode('00', 'hex')
 		);
 		INSERT INTO engine.duplicate_delivery_receipts (
@@ -229,7 +231,7 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 		) VALUES (
 			'019f9460-4b36-4e9b-8f44-682611f70051',
 			'account-netting', 1, 'adjust_balance', 1, '{}',
-			'pending', '2026-07-24T12:00:00Z'
+			'pending', 1784894400000000000
 		);
 		INSERT INTO messaging.outbox (
 			message_id, subject, schema_version, payload,
@@ -249,8 +251,9 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 
 	for relation, want := range map[string]int{
 		"engine.account_shards":              2,
+		"engine.deployment_shard":            1,
 		"engine.input_receipts":              3,
-		"engine.shard_checkpoints":           2,
+		"engine.shard_checkpoints":           1,
 		"engine.shard_faults":                1,
 		"engine.duplicate_delivery_receipts": 1,
 		"trading.accounts":                   2,
@@ -298,6 +301,7 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 		"SET LOCAL ROLE platformgo_api",
 	); err == nil {
 		_, err = apiTransaction.Exec(context.Background(), `
+			INSERT INTO engine.deployment_shard (shard_id) VALUES (9);
 			INSERT INTO engine.account_shards (account_id, shard_id)
 			VALUES ('role-account', 9);
 			INSERT INTO trading.idempotency_records (
@@ -315,7 +319,7 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 			) VALUES (
 				'019f9460-4b36-4e9b-8f44-682611f70101',
 				'role-account', 1, 'adjust_balance', 1, '{}',
-				'pending', '2026-07-24T12:00:00Z'
+				'pending', 1784894400000000000
 			);
 			INSERT INTO messaging.outbox (
 				message_id, subject, schema_version, payload
@@ -844,6 +848,8 @@ func TestMigratorFinalBaselineRerunPreservesPopulatedData(t *testing.T) {
 		t.Fatalf("apply final baseline: %v", err)
 	}
 	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO engine.deployment_shard (shard_id)
+		VALUES (41);
 		INSERT INTO engine.account_shards (account_id, shard_id)
 		VALUES ('account-rerun', 41)`); err != nil {
 		t.Fatalf("seed final baseline: %v", err)
@@ -914,6 +920,8 @@ func TestMigratorRejectsDisposableEightFileHistoryWithoutChangingData(t *testing
 		t.Fatalf("apply stale eight-file history: %v", err)
 	}
 	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO engine.deployment_shard (shard_id)
+		VALUES (17);
 		INSERT INTO engine.account_shards (account_id, shard_id)
 		VALUES ('stale-account', 17)`); err != nil {
 		t.Fatalf("seed stale history: %v", err)
@@ -1076,6 +1084,11 @@ func dropDurableSchemas(t *testing.T, pool *pgxpool.Pool) {
 func assertReceiptIdentityConstraints(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO engine.deployment_shard (shard_id)
+		VALUES (7)`); err != nil {
+		t.Fatalf("bind receipt test deployment shard: %v", err)
+	}
 	const insertReceipt = `
 		INSERT INTO engine.input_receipts (
 			shard_id, input_id, stream_sequence, schema_version,
@@ -1109,7 +1122,7 @@ func assertLedgerBalanceConstraint(t *testing.T, pool *pgxpool.Pool) {
 	_, err = tx.Exec(
 		context.Background(),
 		`INSERT INTO ledger.transactions (transaction_id, business_key, input_id, logical_time)
-		 VALUES ($1, 'unbalanced', $2, '2026-07-24T10:00:00Z')`,
+		 VALUES ($1, 'unbalanced', $2, 1784887200000000000)`,
 		"019f9460-4b36-4e9b-8f44-682611f7ee10",
 		"019f9460-4b36-4e9b-8f44-682611f7ee01",
 	)
@@ -1132,6 +1145,45 @@ func assertLedgerBalanceConstraint(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
+func assertOutboxProducerAuthorityConstraints(
+	t *testing.T,
+	pool *pgxpool.Pool,
+) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO messaging.outbox (
+			message_id, subject, schema_version, payload, producer_class
+		) VALUES (
+			'019f9460-4b36-4e9b-8f44-682611f7ee31',
+			'domain.v1.probe', 1, '{}'::jsonb, 'engine'
+		)`); !isPostgresCode(err, "23514") {
+		t.Fatalf("engine outbox without receipt authority error = %v, want 23514", err)
+	}
+
+	tx, err := pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin unknown engine receipt probe: %v", err)
+	}
+	if _, err = tx.Exec(context.Background(), `
+		INSERT INTO messaging.outbox (
+			message_id, subject, schema_version, payload, producer_class,
+			engine_shard_id, engine_input_id
+		) VALUES (
+			'019f9460-4b36-4e9b-8f44-682611f7ee32',
+			'domain.v1.probe', 1,
+			'{"messageId":"019f9460-4b36-4e9b-8f44-682611f7ee32",
+			  "correlationId":"019f9460-4b36-4e9b-8f44-682611f7ee33"}'::jsonb,
+			'engine', 7, '019f9460-4b36-4e9b-8f44-682611f7ee33'
+		)`); err != nil {
+		_ = tx.Rollback(context.Background())
+		t.Fatalf("insert deferred unknown engine receipt probe: %v", err)
+	}
+	err = tx.Commit(context.Background())
+	if !isPostgresCode(err, "23503") {
+		t.Fatalf("unknown engine receipt commit error = %v, want 23503", err)
+	}
+}
+
 func assertImmutableLedgerFacts(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 
@@ -1139,7 +1191,7 @@ func assertImmutableLedgerFacts(t *testing.T, pool *pgxpool.Pool) {
 	_, err := pool.Exec(
 		context.Background(),
 		`INSERT INTO ledger.transactions (transaction_id, business_key, input_id, logical_time)
-		 VALUES ($1, 'balanced', $2, '2026-07-24T10:00:00Z')`,
+		 VALUES ($1, 'balanced', $2, 1784887200000000000)`,
 		transactionID,
 		"019f9460-4b36-4e9b-8f44-682611f7ee01",
 	)
@@ -1176,6 +1228,10 @@ func assertImmutableLedgerFacts(t *testing.T, pool *pgxpool.Pool) {
 }
 
 func isUniqueViolation(err error) bool {
+	return isPostgresCode(err, "23505")
+}
+
+func isPostgresCode(err error, code string) bool {
 	var postgresError *pgconn.PgError
-	return errors.As(err, &postgresError) && postgresError.Code == "23505"
+	return errors.As(err, &postgresError) && postgresError.Code == code
 }
