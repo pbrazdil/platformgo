@@ -331,6 +331,18 @@ func (state State) OpenPositions(accountID string) []PositionSnapshot {
 	return positions
 }
 
+// Positions returns stable position-ID-sorted snapshots for reconciliation.
+func (state State) Positions() []PositionSnapshot {
+	positions := make([]PositionSnapshot, 0, len(state.trading.positions))
+	for _, position := range state.trading.positions {
+		positions = append(positions, position.snapshot())
+	}
+	sort.Slice(positions, func(left, right int) bool {
+		return positions[left].PositionID.String() < positions[right].PositionID.String()
+	})
+	return positions
+}
+
 func (order orderRecord) snapshot() OrderSnapshot {
 	snapshot := OrderSnapshot{
 		OrderID:         order.orderID,

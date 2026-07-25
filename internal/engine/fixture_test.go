@@ -15,9 +15,10 @@ type engineFixture struct {
 func newEngineFixture(t *testing.T, shardID ShardID) *engineFixture {
 	t.Helper()
 
+	root := mustID(t, "019f9460-4b36-4e9b-8f44-682611f7ee01")
 	return &engineFixture{
 		state:     NewState(shardID),
-		namespace: mustID(t, "019f9460-4b36-4e9b-8f44-682611f7ee01"),
+		namespace: IDFromSequence(root, uint64(shardID)),
 		nextID:    1,
 		nextTime:  NewLogicalTime(time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)),
 	}
@@ -39,7 +40,7 @@ func (fixture *engineFixture) apply(t *testing.T, payload string) Decision {
 		LogicalTime:          fixture.nextTime,
 		ConfigurationVersion: 1,
 		InstrumentVersion:    1,
-		Payload:              []byte(payload),
+		Payload:              canonicalPayloadFromTrustedBytes([]byte(payload)),
 	}
 	fixture.nextID++
 	fixture.nextTime += LogicalTime(time.Second)

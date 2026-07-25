@@ -8,9 +8,9 @@ func FuzzApplyDuplicateAndReplay(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, firstPayload []byte, secondPayload []byte) {
 		first := testInput(t, 1)
-		first.Payload = append([]byte(nil), firstPayload...)
+		first.Payload = canonicalPayloadFromTrustedBytes(firstPayload)
 		second := testInput(t, 2)
-		second.Payload = append([]byte(nil), secondPayload...)
+		second.Payload = canonicalPayloadFromTrustedBytes(secondPayload)
 
 		state, firstDecision, err := Apply(NewState(7), first)
 		if err != nil {

@@ -415,9 +415,20 @@ func (fixture *tradingFixture) applyDecision(t *testing.T, action TradingAction)
 		t.Fatalf("EncodeTradingAction: %v", err)
 	}
 	kind := InputKindCommand
-	if action.Kind == TradingActionUpdateBook {
+	switch action.Kind {
+	case TradingActionUpdateBook:
 		kind = InputKindMarket
 		fixture.marketSequence++
+	case TradingActionSettleFunding, TradingActionLiquidateAccount:
+		kind = InputKindTimer
+	case TradingActionConfigureInstrument,
+		TradingActionConfigureAccount,
+		TradingActionConfigureRisk,
+		TradingActionAdjustBalance,
+		TradingActionSubmitOrder,
+		TradingActionPlaceBracket,
+		TradingActionAmendOrder,
+		TradingActionCancelOrder:
 	}
 	input := InputEnvelope{
 		InputID:              fixture.id(1_000 + fixture.sequence),

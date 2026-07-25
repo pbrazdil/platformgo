@@ -7,6 +7,83 @@ import (
 )
 
 func hashInput(input InputEnvelope) Hash {
+	result, engineError := hashInputAtVersion(input, CurrentInputHashVersion)
+	if engineError != nil {
+		return Hash{}
+	}
+	return result
+}
+
+// InputHash fingerprints the complete delivered envelope, including its
+// JetStream-assigned stream sequence.
+func InputHash(input InputEnvelope) Hash {
+	return hashInput(input)
+}
+
+// BusinessInputHash fingerprints the stable producer input while excluding
+// the JetStream-assigned delivery sequence.
+func BusinessInputHash(input InputEnvelope) Hash {
+	return hashBusinessInput(input)
+}
+
+// BusinessInputHashAtVersion verifies a historical stable-input fingerprint.
+func BusinessInputHashAtVersion(
+	input InputEnvelope,
+	version uint32,
+) (Hash, error) {
+	result, engineError := businessInputHashAtVersion(input, version)
+	if engineError != nil {
+		return Hash{}, engineError
+	}
+	return result, nil
+}
+
+func hashBusinessInput(input InputEnvelope) Hash {
+	result, engineError := businessInputHashAtVersion(
+		input,
+		CurrentBusinessHashVersion,
+	)
+	if engineError != nil {
+		return Hash{}
+	}
+	return result
+}
+
+func businessInputHashAtVersion(
+	input InputEnvelope,
+	version uint32,
+) (Hash, *Error) {
+	if version != CurrentBusinessHashVersion {
+		return Hash{}, &Error{
+			Kind:     ErrUnknownHashVersion,
+			Sequence: input.StreamSequence,
+			Detail:   "business input hash version is not supported",
+		}
+	}
+	return finishHash(func(hasher hash.Hash) {
+		writeString(hasher, "platformgo.engine.business-input.v1")
+		writeBytes(hasher, input.InputID[:])
+		writeUint32(hasher, input.SchemaVersion)
+		writeUint32(hasher, uint32(input.ShardID))
+		writeUint8(hasher, uint8(input.Kind))
+		writeString(hasher, input.SourceID)
+		writeUint64(hasher, input.SourceSequence)
+		writeUint64(hasher, input.MarketSequence)
+		writeInt64(hasher, input.LogicalTime.UnixNano())
+		writeUint64(hasher, input.ConfigurationVersion)
+		writeUint64(hasher, input.InstrumentVersion)
+		writeBytes(hasher, input.Payload.value)
+	}), nil
+}
+
+func hashInputAtVersion(input InputEnvelope, version uint32) (Hash, *Error) {
+	if version != CurrentInputHashVersion {
+		return Hash{}, &Error{
+			Kind:     ErrUnknownHashVersion,
+			Sequence: input.StreamSequence,
+			Detail:   "input hash version is not supported",
+		}
+	}
 	return finishHash(func(hasher hash.Hash) {
 		writeString(hasher, "platformgo.engine.input.v1")
 		writeBytes(hasher, input.InputID[:])
@@ -20,23 +97,25 @@ func hashInput(input InputEnvelope) Hash {
 		writeInt64(hasher, input.LogicalTime.UnixNano())
 		writeUint64(hasher, input.ConfigurationVersion)
 		writeUint64(hasher, input.InstrumentVersion)
-		writeBytes(hasher, input.Payload)
+		writeBytes(hasher, input.Payload.value)
+	}), nil
+}
+
+func hashDecision(previousStateHash Hash, inputHash Hash, effectsHash Hash) Hash {
+	return finishHash(func(hasher hash.Hash) {
+		writeString(hasher, "platformgo.engine.decision.v2")
+		writeBytes(hasher, previousStateHash[:])
+		writeBytes(hasher, inputHash[:])
+		writeBytes(hasher, effectsHash[:])
 	})
 }
 
-func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
+func hashEffects(decision Decision) Hash {
 	return finishHash(func(hasher hash.Hash) {
-		writeString(hasher, "platformgo.engine.decision.v1")
-		writeBytes(hasher, input.InputID[:])
-		writeUint64(hasher, input.SourceSequence)
-		writeUint64(hasher, input.StreamSequence)
-		writeUint64(hasher, input.MarketSequence)
-		writeInt64(hasher, input.LogicalTime.UnixNano())
-		writeUint64(hasher, input.ConfigurationVersion)
-		writeUint64(hasher, input.InstrumentVersion)
-		writeBytes(hasher, inputHash[:])
+		writeString(hasher, "platformgo.engine.effects.v1")
 		writeString(hasher, string(decision.CommandResult.Status))
 		writeString(hasher, string(decision.CommandResult.Reason))
+		writeBytes(hasher, decision.DuplicateOfDecisionHash[:])
 		writeUint64(hasher, uint64(len(decision.InstrumentChanges)))
 		for _, instrument := range decision.InstrumentChanges {
 			writeString(hasher, instrument.InstrumentID)
@@ -71,6 +150,20 @@ func hashDecision(input InputEnvelope, inputHash Hash, decision Decision) Hash {
 			writeString(hasher, balance.Used)
 			writeString(hasher, balance.Free)
 			writeString(hasher, balance.Equity)
+		}
+		writeUint64(hasher, uint64(len(decision.LedgerChanges)))
+		for _, transaction := range decision.LedgerChanges {
+			writeBytes(hasher, transaction.TransactionID[:])
+			writeString(hasher, transaction.BusinessKey)
+			writeBytes(hasher, transaction.InputID[:])
+			writeInt64(hasher, transaction.LogicalTime.UnixNano())
+			writeUint64(hasher, uint64(len(transaction.Entries)))
+			for _, entry := range transaction.Entries {
+				writeBytes(hasher, entry.EntryID[:])
+				writeString(hasher, entry.AccountID)
+				writeString(hasher, entry.Currency)
+				writeString(hasher, entry.Amount)
+			}
 		}
 		writeUint64(hasher, uint64(len(decision.FundingChanges)))
 		for _, funding := range decision.FundingChanges {
@@ -190,7 +283,7 @@ func hashInitialState(shardID ShardID) Hash {
 
 func hashAcceptedState(previous Hash, inputHash Hash, decisionHash Hash, nextSequence uint64) Hash {
 	return finishHash(func(hasher hash.Hash) {
-		writeString(hasher, "platformgo.engine.state.accepted.v1")
+		writeString(hasher, "platformgo.engine.state.accepted.v2")
 		writeBytes(hasher, previous[:])
 		writeBytes(hasher, inputHash[:])
 		writeBytes(hasher, decisionHash[:])

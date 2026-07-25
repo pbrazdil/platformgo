@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 )
 
 // TradingActionKind identifies one deterministic trading state transition.
@@ -222,6 +224,50 @@ type TradingAction struct {
 	CancelOrder         *CancelOrder         `json:"cancelOrder,omitempty"`
 }
 
+// TradingActionAccountID returns the single account lane owned by an
+// account-scoped action. System-wide actions return false.
+func TradingActionAccountID(action TradingAction) (string, bool) {
+	switch action.Kind {
+	case TradingActionConfigureAccount:
+		if action.ConfigureAccount != nil {
+			return action.ConfigureAccount.AccountID, true
+		}
+	case TradingActionConfigureRisk:
+		if action.ConfigureRisk != nil {
+			return action.ConfigureRisk.AccountID, true
+		}
+	case TradingActionAdjustBalance:
+		if action.AdjustBalance != nil {
+			return action.AdjustBalance.AccountID, true
+		}
+	case TradingActionLiquidateAccount:
+		if action.LiquidateAccount != nil {
+			return action.LiquidateAccount.AccountID, true
+		}
+	case TradingActionSubmitOrder:
+		if action.SubmitOrder != nil {
+			return action.SubmitOrder.AccountID, true
+		}
+	case TradingActionPlaceBracket:
+		if action.PlaceBracket != nil {
+			return action.PlaceBracket.AccountID, true
+		}
+	case TradingActionAmendOrder:
+		if action.AmendOrder != nil {
+			return action.AmendOrder.AccountID, true
+		}
+	case TradingActionCancelOrder:
+		if action.CancelOrder != nil {
+			return action.CancelOrder.AccountID, true
+		}
+	case TradingActionConfigureInstrument,
+		TradingActionSettleFunding,
+		TradingActionUpdateBook:
+		return "", false
+	}
+	return "", false
+}
+
 // ConfigureInstrument installs one immutable instrument revision.
 type ConfigureInstrument struct {
 	InstrumentID            string `json:"instrumentId"`
@@ -343,12 +389,53 @@ type CancelOrder struct {
 }
 
 // EncodeTradingAction returns the canonical bytes bound into InputEnvelope.
-func EncodeTradingAction(action TradingAction) ([]byte, error) {
-	payload, err := json.Marshal(action)
+func EncodeTradingAction(action TradingAction) (CanonicalPayload, error) {
+	payload, err := NewCanonicalJSONPayload(action)
 	if err != nil {
-		return nil, fmt.Errorf("encode trading action: %w", err)
+		return CanonicalPayload{}, fmt.Errorf("encode trading action: %w", err)
 	}
 	return payload, nil
+}
+
+// DecodeTradingActionPayload restores a persisted canonical action while
+// rejecting unknown fields, trailing values, and non-canonical encodings.
+func DecodeTradingActionPayload(
+	encoded []byte,
+) (TradingAction, CanonicalPayload, error) {
+	var action TradingAction
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&action); err != nil {
+		return TradingAction{}, CanonicalPayload{}, fmt.Errorf(
+			"decode trading action: %w",
+			err,
+		)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return TradingAction{}, CanonicalPayload{}, err
+	}
+	canonical, err := EncodeTradingAction(action)
+	if err != nil {
+		return TradingAction{}, CanonicalPayload{}, err
+	}
+	if !bytes.Equal(encoded, canonical.value) {
+		return TradingAction{}, CanonicalPayload{}, fmt.Errorf(
+			"decode trading action: payload is not canonical",
+		)
+	}
+	return action, canonical, nil
+}
+
+func requireJSONEOF(decoder *json.Decoder) error {
+	var trailing any
+	err := decoder.Decode(&trailing)
+	if err == io.EOF {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("decode trading action trailing data: %w", err)
+	}
+	return fmt.Errorf("decode trading action: multiple JSON values")
 }
 
 // InstrumentSnapshot is the externally inspectable configured revision.
@@ -388,6 +475,28 @@ type BalanceSnapshot struct {
 	Used      string
 	Free      string
 	Equity    string
+}
+
+// SystemClearingAccount is the counterparty for externally introduced or
+// removed account currency. Every ledger transaction remains zero-sum.
+const SystemClearingAccount = "system:clearing"
+
+// LedgerEntrySnapshot is one exact immutable debit or credit.
+type LedgerEntrySnapshot struct {
+	EntryID   ID
+	AccountID string
+	Currency  string
+	Amount    string
+}
+
+// LedgerTransactionSnapshot is one balanced economic effect decided by the
+// deterministic core. Adapters persist it without deriving money behavior.
+type LedgerTransactionSnapshot struct {
+	TransactionID ID
+	BusinessKey   string
+	InputID       ID
+	LogicalTime   LogicalTime
+	Entries       []LedgerEntrySnapshot
 }
 
 // FundingSnapshot is one append-only position funding effect.

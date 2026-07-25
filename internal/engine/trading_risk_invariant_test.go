@@ -2,6 +2,53 @@ package engine
 
 import "testing"
 
+func TestBalanceDecisionCarriesStableBalancedLedgerEffect(t *testing.T) {
+	fixture := newTradingFixture(t)
+	decision := fixture.apply(t, TradingAction{
+		Kind: TradingActionAdjustBalance,
+		AdjustBalance: &AdjustBalance{
+			AccountID:     "account-1",
+			Currency:      "USDC",
+			CurrencyScale: 8,
+			Operation:     BalanceOperationDeposit,
+			Amount:        "10",
+		},
+	})
+
+	if len(decision.LedgerChanges) != 1 {
+		t.Fatalf("ledger changes = %d, want 1", len(decision.LedgerChanges))
+	}
+	transaction := decision.LedgerChanges[0]
+	if transaction.InputID != fixture.lastInput.InputID ||
+		transaction.LogicalTime != fixture.lastInput.LogicalTime ||
+		len(transaction.Entries) != 2 {
+		t.Fatalf("ledger transaction = %+v", transaction)
+	}
+	if transaction.Entries[0].AccountID != "account-1" ||
+		transaction.Entries[0].Currency != "USDC" ||
+		transaction.Entries[0].Amount != "10" {
+		t.Fatalf("account ledger entry = %+v", transaction.Entries[0])
+	}
+	if transaction.Entries[1].AccountID != SystemClearingAccount ||
+		transaction.Entries[1].Currency != "USDC" ||
+		transaction.Entries[1].Amount != "-10" {
+		t.Fatalf("clearing ledger entry = %+v", transaction.Entries[1])
+	}
+
+	_, duplicate, err := ApplyTrading(
+		fixture.state,
+		fixture.lastInput,
+		fixture.lastAction,
+	)
+	if err != nil {
+		t.Fatalf("duplicate balance input: %v", err)
+	}
+	if len(duplicate.LedgerChanges) != 1 ||
+		duplicate.LedgerChanges[0].TransactionID != transaction.TransactionID {
+		t.Fatal("duplicate did not return the stable recorded ledger effect")
+	}
+}
+
 func TestTradingDuplicateBalanceInputDoesNotMoveMoneyTwice(t *testing.T) {
 	fixture := newTradingFixture(t)
 	fixture.setBalance(t, "account-1", "0", BalanceOperationSet)
