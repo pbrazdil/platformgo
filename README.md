@@ -6,7 +6,7 @@ PostgreSQL 17 or newer, NATS with JetStream, Centrifugo, and Hyperliquid first.
 
 ## Current status
 
-Last updated: 2026-07-25
+Last updated: 2026-07-26
 
 Current delivery stage: **Phase 3 — compatibility edges, in progress**.
 
@@ -29,12 +29,14 @@ realtime inventories; selected REST, gRPC, client and broker authentication
 flows; reviewed JWT signing and verification; trusted-proxy client-address
 derivation; least-privilege runtime PostgreSQL role enforcement; exact command
 replay; runtime readiness/drain behavior; a forward-only identity authority
-cutover guard; and direct Centrifugo contract proof.
+cutover guard; direct Centrifugo contract proof; and a candidate committed
+PostgreSQL-to-Centrifugo realtime publication path with stable event identity,
+per-channel ordering, bounded claims, retry, and crash recovery.
 
 Phase 3 is not complete. The runtime must still:
 
-- add a durable committed-event-to-Centrifugo projection with recovery,
-  ordering, deduplication, and gap behavior;
+- finish independent review and hosted exact-SHA acceptance for the durable
+  committed-event-to-Centrifugo projection and its governance evidence;
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
   broker, gRPC, realtime, and deployment-role contracts;
 - obtain green hosted exact-SHA PostgreSQL 17, NATS, Centrifugo,
@@ -57,7 +59,7 @@ This repository is not yet a production-capable replacement.
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
 | 2 — Durable execution | Complete | PostgreSQL 17 authority, immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
-| 3 — Compatibility edges | In progress | The first runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, and focused live evidence. Durable realtime projection, full frozen surface coverage, independent ledger acceptance, and exact-SHA hosted evidence remain. |
+| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, and a candidate durable realtime projection. Full frozen surface coverage, independent realtime review and ledger acceptance, and exact-SHA hosted evidence remain. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
@@ -66,11 +68,12 @@ This repository is not yet a production-capable replacement.
 The first Phase 3 slice has passed repository-wide formatting, lint, unit,
 race, repeat, vulnerability, module-consistency, and policy checks in local
 development, plus focused live tests against disposable PostgreSQL 17, NATS,
-and Centrifugo. The first hosted candidate exposed missing compatibility-test
-role provisioning and a runner-dependent connection-pool budget; both are
-corrected locally but still require a new immutable candidate SHA with all
-hosted checks green. These results are foundation evidence only and do not
-complete the remaining Phase 3 scope.
+and Centrifugo. The landed foundation SHA is green in hosted CI. The current
+realtime candidate has focused live PostgreSQL 17 commit/order/retry evidence,
+a simulated Centrifugo outage proof, and a real Centrifugo history proof. Its
+full repository gates are green locally, including race and
+deterministic-repeat checks. Independent review and hosted exact-SHA evidence
+are still pending. These results do not complete the remaining Phase 3 scope.
 
 ## Next milestone
 

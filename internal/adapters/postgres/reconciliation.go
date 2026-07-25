@@ -30,6 +30,8 @@ type ReconciliationReport struct {
 	ConfigurationMismatchCount uint64
 	MarketMismatchCount        uint64
 	MessagingMismatchCount     uint64
+	RealtimeMismatchCount      uint64
+	RealtimeQuarantinedCount   uint64
 	PendingOutboxMessages      uint64
 }
 
@@ -482,6 +484,56 @@ func (store *EngineStore) ReconcileShard(
 			err,
 		)
 	}
+	if err := tx.QueryRow(ctx, `
+		WITH publication_stats AS (
+			SELECT
+				channel,
+				count(*) AS publication_count,
+				min(sequence) AS minimum_sequence,
+				max(sequence) AS maximum_sequence
+			  FROM realtime.publications
+			 GROUP BY channel
+		),
+		channel_mismatches AS (
+			SELECT COALESCE(sequence.channel, publication.channel) AS channel
+			  FROM realtime.channel_sequences AS sequence
+			  FULL OUTER JOIN publication_stats AS publication
+			    ON publication.channel = sequence.channel
+			 WHERE sequence.channel IS NULL
+			    OR publication.channel IS NULL
+			    OR publication.minimum_sequence <> 1
+			    OR publication.maximum_sequence <> publication.publication_count
+			    OR sequence.last_sequence <> publication.maximum_sequence
+		),
+		state_mismatches AS (
+			SELECT channel
+			  FROM realtime.publications
+			 WHERE (
+				published_at IS NOT NULL
+				AND (
+					quarantined_at IS NOT NULL
+					OR last_error IS NOT NULL
+					OR failure_class IS NOT NULL
+				)
+			 ) OR claimed_at > clock_timestamp()
+		)
+		SELECT
+			(SELECT count(*) FROM channel_mismatches) +
+			(SELECT count(*) FROM state_mismatches),
+			(SELECT count(*)
+			   FROM realtime.publications
+			  WHERE published_at IS NULL
+			    AND quarantined_at IS NOT NULL)`,
+	).Scan(
+		&report.RealtimeMismatchCount,
+		&report.RealtimeQuarantinedCount,
+	); err != nil {
+		return ReconciliationReport{}, fmt.Errorf(
+			"reconcile shard %d realtime projection: %w",
+			shardID,
+			err,
+		)
+	}
 	if report.DeliveryMismatchCount != 0 ||
 		report.UnbalancedGroupCount != 0 ||
 		report.LedgerMismatchCount != 0 ||
@@ -492,9 +544,11 @@ func (store *EngineStore) ReconcileShard(
 		report.FundingMismatchCount != 0 ||
 		report.ConfigurationMismatchCount != 0 ||
 		report.MarketMismatchCount != 0 ||
-		report.MessagingMismatchCount != 0 {
+		report.MessagingMismatchCount != 0 ||
+		report.RealtimeMismatchCount != 0 ||
+		report.RealtimeQuarantinedCount != 0 {
 		mismatch := fmt.Errorf(
-			"%w: shard %d has delivery=%d ledger=%d balance=%d order_fill=%d position=%d command=%d protection=%d funding=%d configuration=%d market=%d messaging=%d mismatches",
+			"%w: shard %d has delivery=%d ledger=%d balance=%d order_fill=%d position=%d command=%d protection=%d funding=%d configuration=%d market=%d messaging=%d realtime=%d realtime_quarantined=%d mismatches",
 			ErrReconciliationMismatch,
 			shardID,
 			report.DeliveryMismatchCount,
@@ -508,6 +562,8 @@ func (store *EngineStore) ReconcileShard(
 			report.ConfigurationMismatchCount,
 			report.MarketMismatchCount,
 			report.MessagingMismatchCount,
+			report.RealtimeMismatchCount,
+			report.RealtimeQuarantinedCount,
 		)
 		if recovered.Ready() {
 			payload, payloadErr := engine.EncodeTradingAction(engine.TradingAction{})

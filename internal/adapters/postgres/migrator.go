@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/upcomers-org/platformgo/internal/engine"
 )
@@ -23,6 +24,9 @@ var (
 	// ErrDatabaseSchemaAhead means the database contains an applied migration
 	// unknown to this binary.
 	ErrDatabaseSchemaAhead = errors.New("database schema is ahead of this binary")
+	// ErrDatabaseSchemaBehind means this binary expects a migration that the
+	// database has not applied yet.
+	ErrDatabaseSchemaBehind = errors.New("database schema is behind this binary")
 	// ErrUnsupportedPostgresVersion means the server is older than the
 	// repository's supported PostgreSQL floor.
 	ErrUnsupportedPostgresVersion = errors.New("unsupported PostgreSQL version")
@@ -45,7 +49,9 @@ BEGIN
         'platformgo_api',
         'platformgo_engine',
         'platformgo_outbox',
-        'platformgo_projector'
+        'platformgo_projector',
+        'platformgo_realtime',
+        'platformgo_realtime_repair'
     ]
     LOOP
         IF NOT EXISTS (
@@ -180,7 +186,8 @@ func (migrator *Migrator) Migrate(ctx context.Context) error {
 	for _, file := range files {
 		available[file.name] = file
 	}
-	for name, checksum := range applied {
+	for _, name := range sortedMigrationNames(applied) {
+		checksum := applied[name]
 		file, ok := available[name]
 		if !ok {
 			return fmt.Errorf("%w: applied migration %s is unavailable", ErrDatabaseSchemaAhead, name)
@@ -242,6 +249,115 @@ func (migrator *Migrator) Migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// VerifyCurrent refuses to run against a database whose immutable migration
+// set differs in either direction from the migrations embedded in this binary.
+func (migrator *Migrator) VerifyCurrent(ctx context.Context) error {
+	if migrator == nil || migrator.pool == nil {
+		return errors.New("verify migrations: PostgreSQL pool is required")
+	}
+	if migrator.migrations == nil {
+		return errors.New("verify migrations: migration filesystem is required")
+	}
+	files, err := readMigrationFiles(migrator.migrations)
+	if err != nil {
+		return err
+	}
+	connection, err := migrator.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("verify migrations: acquire PostgreSQL connection: %w", err)
+	}
+	defer connection.Release()
+
+	var postgresVersionNumber int
+	if versionReadErr := connection.QueryRow(
+		ctx,
+		"SELECT current_setting('server_version_num')::integer",
+	).Scan(&postgresVersionNumber); versionReadErr != nil {
+		return fmt.Errorf(
+			"verify migrations: read PostgreSQL server version: %w",
+			versionReadErr,
+		)
+	}
+	if versionErr := validatePostgresVersionNumber(
+		postgresVersionNumber,
+	); versionErr != nil {
+		return fmt.Errorf("verify migrations: %w", versionErr)
+	}
+	applied, err := loadRuntimeAppliedMigrations(ctx, connection)
+	if err != nil {
+		return fmt.Errorf("verify migrations: %w", err)
+	}
+	available := make(map[string]migrationFile, len(files))
+	for _, file := range files {
+		available[file.name] = file
+	}
+	for _, name := range sortedMigrationNames(applied) {
+		checksum := applied[name]
+		file, ok := available[name]
+		if !ok {
+			return fmt.Errorf(
+				"%w: applied migration %s is unavailable",
+				ErrDatabaseSchemaAhead,
+				name,
+			)
+		}
+		if !bytes.Equal(checksum, file.checksum[:]) {
+			return fmt.Errorf("%w: %s", ErrMigrationChecksumMismatch, name)
+		}
+	}
+	for _, file := range files {
+		if _, ok := applied[file.name]; !ok {
+			return fmt.Errorf("%w: %s", ErrDatabaseSchemaBehind, file.name)
+		}
+	}
+	return nil
+}
+
+func sortedMigrationNames(applied map[string][]byte) []string {
+	names := make([]string, 0, len(applied))
+	for name := range applied {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+func loadRuntimeAppliedMigrations(
+	ctx context.Context,
+	connection *pgxpool.Conn,
+) (map[string][]byte, error) {
+	rows, err := connection.Query(
+		ctx,
+		`SELECT filename, checksum
+		   FROM engine.runtime_schema_migrations()`,
+	)
+	if err != nil {
+		var postgresErr *pgconn.PgError
+		if errors.As(err, &postgresErr) &&
+			(postgresErr.Code == "3F000" || postgresErr.Code == "42883") {
+			return nil, fmt.Errorf(
+				"%w: runtime migration manifest is unavailable",
+				ErrDatabaseSchemaBehind,
+			)
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	applied := make(map[string][]byte)
+	for rows.Next() {
+		var name string
+		var checksum []byte
+		if err := rows.Scan(&name, &checksum); err != nil {
+			return nil, err
+		}
+		applied[name] = append([]byte(nil), checksum...)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return applied, nil
 }
 
 func validatePostgresVersionNumber(versionNumber int) error {

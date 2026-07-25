@@ -28,17 +28,25 @@ import (
 )
 
 const (
-	outboxBatchSize = 100
-	outboxLease     = 30 * time.Second
-	outboxRetry     = time.Second
+	outboxBatchSize         = 100
+	outboxLease             = 30 * time.Second
+	outboxRetry             = time.Second
+	realtimeBatchSize       = 1
+	realtimeLease           = 30 * time.Second
+	realtimeRetry           = time.Second
+	realtimeMaxAttempts     = uint32(10)
+	realtimeFinalizeTimeout = 5 * time.Second
+	runtimeSchemaRevision   = "20260725001100_phase3_committed_realtime_outbox"
 )
 
 type databaseRuntimeRole string
 
 const (
-	databaseRoleAPI    databaseRuntimeRole = "platformgo_api"
-	databaseRoleEngine databaseRuntimeRole = "platformgo_engine"
-	databaseRoleOutbox databaseRuntimeRole = "platformgo_outbox"
+	databaseRoleAPI       databaseRuntimeRole = "platformgo_api"
+	databaseRoleEngine    databaseRuntimeRole = "platformgo_engine"
+	databaseRoleOutbox    databaseRuntimeRole = "platformgo_outbox"
+	databaseRoleProjector databaseRuntimeRole = "platformgo_projector"
+	databaseRoleRealtime  databaseRuntimeRole = "platformgo_realtime"
 )
 
 // Migrate applies immutable forward migrations and provisions the configured
@@ -236,15 +244,13 @@ func RunWorkers(
 	config Config,
 	handlerNames []string,
 ) error {
-	if err := config.ValidateFor("worker"); err != nil {
-		return err
-	}
 	handlers := normalizeHandlers(handlerNames)
 	if len(handlers) == 0 {
 		return errors.New("worker: at least one --handlers value is required")
 	}
 	for _, name := range handlers {
 		if name != "outbox-publisher" &&
+			name != "realtime-publisher" &&
 			name != "event-consumer" &&
 			!strings.HasPrefix(name, "event-consumer:") {
 			return fmt.Errorf("worker: unsupported handler %q", name)
@@ -254,23 +260,37 @@ func RunWorkers(
 	if err != nil {
 		return err
 	}
+	needsNATS := workerNeedsNATS(handlers)
+	if needsNATS {
+		if validationErr := config.ValidateFor("worker"); validationErr != nil {
+			return validationErr
+		}
+	} else if validationErr := validateRealtimeWorkerConfig(config); validationErr != nil {
+		return validationErr
+	}
 	pool, err := openPostgres(ctx, config.DatabaseURL, databaseRole)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	natsConnection, js, err := openNATS(config.NATSURL)
-	if err != nil {
-		return err
-	}
-	defer natsConnection.Close()
-	if streamsErr := ensureStreams(
-		ctx,
-		js,
-		config.ShardID,
-		config.NATSStreamLimits,
-	); streamsErr != nil {
-		return streamsErr
+	var (
+		natsConnection *gonats.Conn
+		js             jetstream.JetStream
+	)
+	if needsNATS {
+		natsConnection, js, err = openNATS(config.NATSURL)
+		if err != nil {
+			return err
+		}
+		defer natsConnection.Close()
+		if streamsErr := ensureStreams(
+			ctx,
+			js,
+			config.ShardID,
+			config.NATSStreamLimits,
+		); streamsErr != nil {
+			return streamsErr
+		}
 	}
 
 	// Parent cancellation initiates draining, but it does not reach handler
@@ -284,6 +304,8 @@ func RunWorkers(
 		switch {
 		case name == "outbox-publisher":
 			worker, err = prepareOutboxWorker(ctx, pool, js)
+		case name == "realtime-publisher":
+			worker, err = prepareRealtimeWorker(ctx, pool, config)
 		case name == "event-consumer" || strings.HasPrefix(name, "event-consumer:"):
 			worker, err = prepareEngineWorker(
 				ctx,
@@ -308,11 +330,18 @@ func RunWorkers(
 		return fmt.Errorf("worker health listen: %w", err)
 	}
 	var workerReady atomic.Bool
+	readinessChecks := make([]func(context.Context) error, 0, len(prepared))
+	for index := range prepared {
+		if prepared[index].check != nil {
+			readinessChecks = append(readinessChecks, prepared[index].check)
+		}
+	}
 	healthServer := &http.Server{
 		Handler: workerHealthHandler(
 			&workerReady,
 			pool,
 			natsConnection,
+			readinessChecks,
 		),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -353,6 +382,9 @@ func RunWorkers(
 	}
 	workerReady.Store(false)
 	for index := range prepared {
+		if prepared[index].readiness == nil {
+			continue
+		}
 		if readyErr := prepared[index].readiness.Close(
 			context.WithoutCancel(ctx),
 		); readyErr != nil && result == nil {
@@ -389,6 +421,7 @@ func workerHealthHandler(
 	ready *atomic.Bool,
 	pool *pgxpool.Pool,
 	natsConnection *gonats.Conn,
+	checks []func(context.Context) error,
 ) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
@@ -399,9 +432,16 @@ func workerHealthHandler(
 		case "/readyz":
 			if !ready.Load() ||
 				pool.Ping(request.Context()) != nil ||
-				flushNATS(request.Context(), natsConnection) != nil {
+				(natsConnection != nil &&
+					flushNATS(request.Context(), natsConnection) != nil) {
 				http.Error(writer, "not ready", http.StatusServiceUnavailable)
 				return
+			}
+			for _, check := range checks {
+				if check(request.Context()) != nil {
+					http.Error(writer, "not ready", http.StatusServiceUnavailable)
+					return
+				}
 			}
 			writer.Header().Set("content-type", "text/plain; charset=utf-8")
 			writer.WriteHeader(http.StatusOK)
@@ -412,10 +452,43 @@ func workerHealthHandler(
 	})
 }
 
+func workerNeedsNATS(handlers []string) bool {
+	for _, handler := range handlers {
+		if handler != "realtime-publisher" {
+			return true
+		}
+	}
+	return false
+}
+
+func validateRealtimeWorkerConfig(config Config) error {
+	missing := make([]string, 0, 4)
+	if config.DatabaseURL == "" {
+		missing = append(missing, "UZO_DATABASE_URL")
+	}
+	if config.HealthAddress == "" {
+		missing = append(missing, "UZO_HTTP_HEALTH_ADDR")
+	}
+	if config.CentrifugoAPIURL == "" {
+		missing = append(missing, "UZO_REALTIME_API_URL")
+	}
+	if config.CentrifugoAPIKey == "" {
+		missing = append(missing, "UZO_REALTIME_API_KEY")
+	}
+	if len(missing) != 0 {
+		return fmt.Errorf(
+			"missing required environment keys: %s",
+			strings.Join(missing, ", "),
+		)
+	}
+	return nil
+}
+
 type preparedWorker struct {
 	run       func(context.Context) error
 	readiness *platformpostgres.RoleLease
 	close     func(context.Context) error
+	check     func(context.Context) error
 }
 
 func prepareOutboxWorker(
@@ -476,6 +549,217 @@ func runOutbox(
 	}
 }
 
+func prepareRealtimeWorker(
+	_ context.Context,
+	pool *pgxpool.Pool,
+	config Config,
+) (preparedWorker, error) {
+	if config.CentrifugoAPIURL == "" {
+		return preparedWorker{}, errors.New(
+			"realtime publisher: UZO_REALTIME_API_URL is required",
+		)
+	}
+	if config.CentrifugoAPIKey == "" {
+		return preparedWorker{}, errors.New(
+			"realtime publisher: UZO_REALTIME_API_KEY is required",
+		)
+	}
+	gateway, err := centrifugo.NewPublisher(centrifugo.Config{
+		APIURL: config.CentrifugoAPIURL, APIKey: config.CentrifugoAPIKey,
+	})
+	if err != nil {
+		return preparedWorker{}, err
+	}
+	store := platformpostgres.NewRealtimeStore(pool)
+	return preparedWorker{
+		run: func(runContext context.Context) error {
+			return runRealtimePublisher(runContext, store, gateway)
+		},
+		close: func(context.Context) error { return nil },
+		check: func(checkContext context.Context) error {
+			if err := gateway.Healthy(checkContext); err != nil {
+				return err
+			}
+			return store.Ready(checkContext)
+		},
+	}, nil
+}
+
+type realtimeFinalizationError struct {
+	publication platformpostgres.RealtimePublication
+	err         error
+}
+
+func (failure *realtimeFinalizationError) Error() string {
+	return failure.err.Error()
+}
+
+func (failure *realtimeFinalizationError) Unwrap() error {
+	return failure.err
+}
+
+func runRealtimePublisher(
+	ctx context.Context,
+	store *platformpostgres.RealtimeStore,
+	gateway *centrifugo.Gateway,
+) error {
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-timer.C:
+			operationContext, cancel := context.WithTimeout(
+				context.WithoutCancel(ctx),
+				realtimeLease,
+			)
+			publishErr := publishRealtimeBatch(
+				operationContext,
+				store,
+				gateway,
+			)
+			cancel()
+			var finalizationErr *realtimeFinalizationError
+			if errors.As(publishErr, &finalizationErr) {
+				return publishErr
+			}
+			if publishErr != nil && ctx.Err() == nil {
+				slog.Error("realtime batch failed", "error", publishErr)
+			}
+			timer.Reset(100 * time.Millisecond)
+		}
+	}
+}
+
+func publishRealtimeBatch(
+	ctx context.Context,
+	store *platformpostgres.RealtimeStore,
+	gateway *centrifugo.Gateway,
+) error {
+	publications, err := store.ClaimRealtimeBatch(
+		ctx,
+		realtimeBatchSize,
+		realtimeLease,
+	)
+	if err != nil {
+		return err
+	}
+	return publishRealtimePublications(ctx, store, gateway, publications)
+}
+
+func publishRealtimePublications(
+	ctx context.Context,
+	store *platformpostgres.RealtimeStore,
+	gateway *centrifugo.Gateway,
+	publications []platformpostgres.RealtimePublication,
+) error {
+	var (
+		firstErr             error
+		firstFinalizationErr error
+	)
+	for _, publication := range publications {
+		envelope := centrifugo.Envelope{
+			Type: publication.EventType, AccountID: publication.AccountID,
+			Timestamp: publication.Timestamp, Data: publication.Data,
+			EventID: publication.EventID, SchemaVersion: publication.SchemaVersion,
+			Sequence: publication.Sequence,
+		}
+		if publishErr := gateway.Publish(
+			ctx,
+			publication.Channel,
+			envelope,
+		); publishErr != nil {
+			retryable := centrifugo.IsRetryablePublishError(publishErr)
+			cycleAttempts := publication.Attempts - publication.RetryAttemptBase
+			failureClass := platformpostgres.RealtimeFailureTransient
+			quarantine := false
+			if !retryable {
+				failureClass = platformpostgres.RealtimeFailurePermanent
+				quarantine = true
+			} else if cycleAttempts >= realtimeMaxAttempts {
+				failureClass = platformpostgres.RealtimeFailureRetryExhausted
+				quarantine = true
+			}
+			finalizeContext, cancel := context.WithTimeout(
+				context.WithoutCancel(ctx),
+				realtimeFinalizeTimeout,
+			)
+			markErr := store.MarkRealtimeFailed(
+				finalizeContext,
+				publication,
+				realtimeRetryDelay(cycleAttempts),
+				failureClass,
+				quarantine,
+				publishErr,
+			)
+			cancel()
+			if markErr != nil && firstFinalizationErr == nil {
+				firstFinalizationErr = &realtimeFinalizationError{
+					publication: publication,
+					err:         markErr,
+				}
+			}
+			if firstErr == nil {
+				firstErr = publishErr
+			}
+			continue
+		}
+		finalizeContext, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			realtimeFinalizeTimeout,
+		)
+		markErr := store.MarkRealtimePublished(finalizeContext, publication)
+		cancel()
+		if markErr != nil {
+			cycleAttempts := publication.Attempts - publication.RetryAttemptBase
+			failureClass := platformpostgres.RealtimeFailureTransient
+			quarantine := false
+			if cycleAttempts >= realtimeMaxAttempts {
+				failureClass = platformpostgres.RealtimeFailureRetryExhausted
+				quarantine = true
+			}
+			ambiguousErr := fmt.Errorf(
+				"centrifugo accepted publication but durable acknowledgment failed: %w",
+				markErr,
+			)
+			fallbackContext, fallbackCancel := context.WithTimeout(
+				context.WithoutCancel(ctx),
+				realtimeFinalizeTimeout,
+			)
+			fallbackErr := store.MarkRealtimeFailed(
+				fallbackContext,
+				publication,
+				realtimeRetryDelay(cycleAttempts),
+				failureClass,
+				quarantine,
+				ambiguousErr,
+			)
+			fallbackCancel()
+			if fallbackErr != nil && firstFinalizationErr == nil {
+				firstFinalizationErr = &realtimeFinalizationError{
+					publication: publication,
+					err:         errors.Join(markErr, fallbackErr),
+				}
+			} else if firstErr == nil {
+				firstErr = ambiguousErr
+			}
+		}
+	}
+	if firstFinalizationErr != nil {
+		return firstFinalizationErr
+	}
+	return firstErr
+}
+
+func realtimeRetryDelay(attempts uint32) time.Duration {
+	if attempts == 0 {
+		return realtimeRetry
+	}
+	exponent := min(attempts-1, uint32(6))
+	return realtimeRetry * (time.Duration(1) << exponent)
+}
+
 func prepareEngineWorker(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -533,7 +817,9 @@ func closePreparedWorkers(
 	workers []preparedWorker,
 ) {
 	for index := len(workers) - 1; index >= 0; index-- {
-		_ = workers[index].readiness.Close(context.WithoutCancel(ctx))
+		if workers[index].readiness != nil {
+			_ = workers[index].readiness.Close(context.WithoutCancel(ctx))
+		}
 		_ = workers[index].close(context.WithoutCancel(ctx))
 	}
 }
@@ -556,8 +842,11 @@ func databaseRoleForHandlers(
 	var selected databaseRuntimeRole
 	for _, handler := range handlers {
 		role := databaseRoleEngine
-		if handler == "outbox-publisher" {
+		switch handler {
+		case "outbox-publisher":
 			role = databaseRoleOutbox
+		case "realtime-publisher":
+			role = databaseRoleRealtime
 		}
 		if selected != "" && selected != role {
 			return "", errors.New(
@@ -614,6 +903,13 @@ func openPostgres(
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("connect PostgreSQL: %w", err)
+	}
+	if err := platformpostgres.NewMigrator(
+		pool,
+		migrations.Files,
+	).VerifyCurrent(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("verify PostgreSQL schema: %w", err)
 	}
 	return pool, nil
 }
@@ -729,6 +1025,15 @@ func enforceRuntimeDatabaseRole(
 			expected,
 		)
 	}
+	if expected == databaseRoleEngine {
+		if _, err := connection.Exec(
+			ctx,
+			"SELECT set_config('platformgo.runtime_schema_revision', $1, false)",
+			runtimeSchemaRevision,
+		); err != nil {
+			return fmt.Errorf("runtime PostgreSQL schema revision binding: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -740,6 +1045,10 @@ func setRoleStatement(role databaseRuntimeRole) (string, error) {
 		return "SET ROLE platformgo_engine", nil
 	case databaseRoleOutbox:
 		return "SET ROLE platformgo_outbox", nil
+	case databaseRoleProjector:
+		return "SET ROLE platformgo_projector", nil
+	case databaseRoleRealtime:
+		return "SET ROLE platformgo_realtime", nil
 	default:
 		return "", fmt.Errorf("unsupported runtime PostgreSQL role %q", role)
 	}

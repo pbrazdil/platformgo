@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -100,6 +101,55 @@ func TestRealtimeGatewayJSONEventPublishAndToken(t *testing.T) {
 		!reflect.DeepEqual(claims.Channels, token.Channels) {
 		t.Fatalf("claims = %#v", claims)
 	}
+	if _, err := gateway.IssueClientToken(context.Background(), edge.Principal{
+		Subject: "urn:xb:user:tenant:user-7", Audience: edge.AudienceClient,
+	}); err == nil {
+		t.Fatal("non-injective nested user subject received realtime token")
+	}
+}
+
+func TestUserChannelEnforcesCentrifugoASCIIAndLengthBoundary(t *testing.T) {
+	validSuffix := strings.Repeat("a", 250)
+	if got := UserChannel("urn:xb:user:" + validSuffix); got != "user:"+validSuffix {
+		t.Fatalf("250-byte user channel = %q", got)
+	}
+	for _, subject := range []string{
+		"urn:xb:user:",
+		"urn:xb:user:nested:value",
+		"urn:xb:user:někdo",
+		"urn:xb:user:user/7",
+		"urn:xb:user:" + strings.Repeat("a", 251),
+	} {
+		if got := UserChannel(subject); got != "" {
+			t.Fatalf("invalid subject %q mapped to %q", subject, got)
+		}
+	}
+}
+
+func TestPublisherOnlyGatewayCannotIssueClientTokens(t *testing.T) {
+	gateway, err := NewPublisher(Config{APIURL: "http://centrifugo:8000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateway.IssueClientToken(context.Background(), edge.Principal{
+		Subject:  "urn:xb:user:user-7",
+		Audience: edge.AudienceClient,
+	}); err == nil {
+		t.Fatal("publisher-only gateway issued a client token")
+	}
+}
+
+func TestCentrifugoApplicationErrorClassificationIsPinned(t *testing.T) {
+	for _, code := range []int{100, 111, 113} {
+		if !retryableApplicationCode(code) {
+			t.Fatalf("temporary Centrifugo code %d classified permanent", code)
+		}
+	}
+	for _, code := range []int{102, 104, 107, 108, 999} {
+		if retryableApplicationCode(code) {
+			t.Fatalf("permanent/unknown Centrifugo code %d classified retryable", code)
+		}
+	}
 }
 
 func TestEnvelopeRejectsInternalNamesAndInvalidSequences(t *testing.T) {
@@ -142,7 +192,8 @@ func TestDuplicatePublicationKeepsStableBusinessIdentity(t *testing.T) {
 		}
 		_ = json.NewDecoder(request.Body).Decode(&body)
 		eventIDs = append(eventIDs, body.Data.EventID)
-		writer.WriteHeader(http.StatusOK)
+		writer.Header().Set("content-type", "application/json")
+		_, _ = writer.Write([]byte(`{"result":{}}`))
 	}))
 	defer server.Close()
 	gateway, err := New(Config{
@@ -165,6 +216,50 @@ func TestDuplicatePublicationKeepsStableBusinessIdentity(t *testing.T) {
 	}
 	if !reflect.DeepEqual(eventIDs, []string{"event-1", "event-1"}) {
 		t.Fatalf("event IDs = %v", eventIDs)
+	}
+}
+
+func TestPublishRejectsInvalidCentrifugoAcknowledgmentOnHTTP200(t *testing.T) {
+	for name, responseBody := range map[string]string{
+		"application error": `{"error":{"code":102,"message":"unknown channel"}}`,
+		"malformed JSON":    `{`,
+		"missing result":    `{}`,
+		"wrong result type": `{"result":true}`,
+		"trailing value":    `{"result":{}} {}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(
+				writer http.ResponseWriter,
+				_ *http.Request,
+			) {
+				writer.Header().Set("content-type", "application/json")
+				_, _ = writer.Write([]byte(responseBody))
+			}))
+			defer server.Close()
+			gateway, err := New(Config{
+				APIURL: server.URL,
+				TokenSecret: []byte(
+					"0123456789abcdef0123456789abcdef",
+				),
+				TokenTTL:   time.Hour,
+				HTTPClient: server.Client(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			event := Envelope{
+				Type: "order.updated", AccountID: "urn:xb:account:a",
+				Data:    json.RawMessage(`{"status":"working"}`),
+				EventID: "event-1", SchemaVersion: 1, Sequence: 1,
+			}
+			if err := gateway.Publish(
+				context.Background(),
+				"user:u",
+				event,
+			); err == nil {
+				t.Fatalf("HTTP 200 response %s was acknowledged", responseBody)
+			}
+		})
 	}
 }
 

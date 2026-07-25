@@ -43,6 +43,7 @@
   ],
   "implementedWorkerHandlers": [
     "outbox-publisher",
+    "realtime-publisher",
     "event-consumer",
     "event-consumer:<pattern>"
   ],

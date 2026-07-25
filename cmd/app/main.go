@@ -106,5 +106,6 @@ const helpText = `Usage:
 
 Worker roles:
   outbox-publisher
+  realtime-publisher
   event-consumer
 `

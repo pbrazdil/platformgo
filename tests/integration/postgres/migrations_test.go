@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -57,6 +58,9 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 		"identity.idempotency_responses",
 		"identity.account_profiles",
 		"trading.order_intents",
+		"realtime.channel_sequences",
+		"realtime.publications",
+		"realtime.publication_requeues",
 	} {
 		var exists bool
 		if err := pool.QueryRow(
@@ -79,6 +83,7 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 	assertImmutableLedgerFacts(t, pool)
 	assertAPIRoleCannotMutateEconomicTables(t, pool)
 	assertAPIRoleIdentityBoundary(t, pool)
+	assertRealtimeRoleBoundary(t, pool)
 }
 
 func TestCommandIdempotencyAuthorityMigrationUpgradesPopulatedBaseline(t *testing.T) {
@@ -363,6 +368,305 @@ func TestEngineIdentitySchemaAccessUpgradePreservesIntentBeforeCutoverGuard(
 		t.Fatalf("cutover guard error=%v, want SQLSTATE 55000", err)
 	}
 }
+
+func TestRealtimeMigrationRejectsNonInjectiveExistingUserIDs(t *testing.T) {
+	for name, userID := range map[string]string{
+		"nested":     "urn:xb:user:tenant-a:alice",
+		"non-ASCII":  "urn:xb:user:někdo",
+		"reserved":   "urn:xb:user:alice/bob",
+		"overlength": "urn:xb:user:" + strings.Repeat("a", 251),
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertRealtimeMigrationRejectsExistingUserID(t, userID)
+		})
+	}
+}
+
+func assertRealtimeMigrationRejectsExistingUserID(t *testing.T, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	migrationDirectory := filepath.Join("..", "..", "..", "migrations")
+	previousFiles := fstest.MapFS{}
+	for _, name := range []string{
+		"20260724000100_durable_execution_foundation.up.sql",
+		"20260725000100_command_idempotency_authority.up.sql",
+		"20260725000200_phase3_identity_compatibility.up.sql",
+		"20260725000300_phase3_broker_mutation_compatibility.up.sql",
+		"20260725000400_phase3_authority_and_replay_hardening.up.sql",
+		"20260725000500_phase3_broker_user_conflict_target.up.sql",
+		"20260725000600_phase3_completion_authority_and_candidate_guard.up.sql",
+		"20260725000700_phase3_engine_identity_schema_access.up.sql",
+		"20260725000800_phase3_identity_authority_cutover_guard.up.sql",
+		"20260725000900_phase3_api_readiness_probe.up.sql",
+		"20260725001000_phase3_api_revision_lock.up.sql",
+	} {
+		raw, err := os.ReadFile(filepath.Join(migrationDirectory, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		previousFiles[name] = &fstest.MapFile{Data: raw}
+	}
+	if err := platformpostgres.NewMigrator(pool, previousFiles).
+		MigrateAndProvision(ctx, 7); err != nil {
+		t.Fatalf("apply pre-realtime schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO identity.users (user_id, login, normalized_login)
+		VALUES ($1, 'invalid-realtime-user', 'invalid-realtime-user')`,
+		userID,
+	); err != nil {
+		t.Fatalf("seed invalid realtime user ID: %v", err)
+	}
+	err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(migrationDirectory),
+	).Migrate(ctx)
+	if err == nil {
+		t.Fatal("realtime migration accepted a non-injective existing user ID")
+	}
+	var (
+		lastMigration  string
+		userCount      int
+		realtimeExists bool
+	)
+	if scanErr := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			(SELECT count(*) FROM identity.users
+			  WHERE user_id = $1),
+			to_regnamespace('realtime') IS NOT NULL`,
+		userID,
+	).Scan(&lastMigration, &userCount, &realtimeExists); scanErr != nil {
+		t.Fatalf("inspect rejected realtime migration: %v", scanErr)
+	}
+	if lastMigration != "20260725001000_phase3_api_revision_lock.up.sql" ||
+		userCount != 1 ||
+		realtimeExists {
+		t.Fatalf(
+			"rejected migration state = last %q users %d realtime %t",
+			lastMigration,
+			userCount,
+			realtimeExists,
+		)
+	}
+}
+
+func TestRealtimeMigrationUpgradesPopulatedPreviousSchema(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260725001000_phase3_api_revision_lock.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 27); err != nil {
+		t.Fatalf("apply previous schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:upgrade-realtime', 'NETTING');
+		INSERT INTO identity.users (user_id, login, normalized_login)
+		VALUES (
+			'urn:xb:user:upgrade.realtime-1',
+			'upgrade-realtime',
+			'upgrade-realtime'
+		);
+		INSERT INTO identity.user_accounts (user_id, account_id)
+		VALUES (
+			'urn:xb:user:upgrade.realtime-1',
+			'urn:xb:account:upgrade-realtime'
+		)`,
+	); err != nil {
+		t.Fatalf("seed previous schema: %v", err)
+	}
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("upgrade populated previous schema: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify upgraded schema: %v", err)
+	}
+	var preserved bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM identity.user_accounts
+			 WHERE user_id = 'urn:xb:user:upgrade.realtime-1'
+			   AND account_id = 'urn:xb:account:upgrade-realtime'
+		)`,
+	).Scan(&preserved); err != nil {
+		t.Fatal(err)
+	}
+	if !preserved {
+		t.Fatal("populated previous-schema account mapping was not preserved")
+	}
+}
+
+func TestRuntimeMigrationVerificationIsExactAndOldEngineIsFenced(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260725001000_phase3_api_revision_lock.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 31); err != nil {
+		t.Fatalf("apply previous schema: %v", err)
+	}
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	if err := current.VerifyCurrent(ctx); !errors.Is(
+		err,
+		platformpostgres.ErrDatabaseSchemaBehind,
+	) {
+		t.Fatalf("previous schema verification error = %v, want behind", err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("upgrade current schema: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("current schema verification: %v", err)
+	}
+
+	oldPrivilegedEngine, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = oldPrivilegedEngine.Exec(ctx, testInputReceiptInsertSQL, 31, 1)
+	if err == nil {
+		_ = oldPrivilegedEngine.Rollback(ctx)
+		t.Fatal("privileged old engine without runtime revision committed a receipt")
+	}
+	var postgresErr *pgconn.PgError
+	if !errors.As(err, &postgresErr) || postgresErr.Code != "55000" {
+		_ = oldPrivilegedEngine.Rollback(ctx)
+		t.Fatalf("privileged old-engine fence error = %v, want SQLSTATE 55000", err)
+	}
+	_ = oldPrivilegedEngine.Rollback(ctx)
+
+	const oldEngineLogin = "platformgo_old_engine_test"
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE ROLE %s LOGIN PASSWORD 'old-engine-test-password'
+			NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+		GRANT platformgo_engine TO %s`,
+		pgx.Identifier{oldEngineLogin}.Sanitize(),
+		pgx.Identifier{oldEngineLogin}.Sanitize(),
+	)); err != nil {
+		t.Fatalf("create inherited old-engine login: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(
+			context.Background(),
+			fmt.Sprintf(
+				"DROP ROLE IF EXISTS %s",
+				pgx.Identifier{oldEngineLogin}.Sanitize(),
+			),
+		)
+	})
+	oldEngineConfig, err := pgxpool.ParseConfig(
+		os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldEngineConfig.ConnConfig.User = oldEngineLogin
+	oldEngineConfig.ConnConfig.Password = "old-engine-test-password"
+	oldEnginePool, err := pgxpool.NewWithConfig(ctx, oldEngineConfig)
+	if err != nil {
+		t.Fatalf("open inherited old-engine login: %v", err)
+	}
+	oldEngine, err := oldEnginePool.Begin(ctx)
+	if err != nil {
+		oldEnginePool.Close()
+		t.Fatalf("begin inherited old-engine transaction: %v", err)
+	}
+	_, err = oldEngine.Exec(ctx, testInputReceiptInsertSQL, 31, 1)
+	if err == nil {
+		_ = oldEngine.Rollback(ctx)
+		oldEnginePool.Close()
+		t.Fatal("inherited old-engine login committed a receipt")
+	}
+	if !errors.As(err, &postgresErr) || postgresErr.Code != "55000" {
+		_ = oldEngine.Rollback(ctx)
+		oldEnginePool.Close()
+		t.Fatalf("inherited old-engine fence error = %v, want SQLSTATE 55000", err)
+	}
+	_ = oldEngine.Rollback(ctx)
+	oldEnginePool.Close()
+
+	currentEngine, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = currentEngine.Exec(ctx, "SET LOCAL ROLE platformgo_engine"); err == nil {
+		_, err = currentEngine.Exec(ctx, `
+			SELECT set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				true
+			)`)
+	}
+	if err == nil {
+		_, err = currentEngine.Exec(ctx, testInputReceiptInsertSQL, 31, 2)
+	}
+	if err != nil {
+		_ = currentEngine.Rollback(ctx)
+		t.Fatalf("current engine receipt: %v", err)
+	}
+	if err := currentEngine.Commit(ctx); err != nil {
+		t.Fatalf("commit current engine receipt: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO engine.schema_migrations (filename, checksum)
+		VALUES (
+			'99999999999999_unknown_future.up.sql',
+			decode(repeat('01', 32), 'hex')
+		)`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.VerifyCurrent(ctx); !errors.Is(
+		err,
+		platformpostgres.ErrDatabaseSchemaAhead,
+	) {
+		t.Fatalf("future schema verification error = %v, want ahead", err)
+	}
+}
+
+const testInputReceiptInsertSQL = `
+	INSERT INTO engine.input_receipts (
+		shard_id, input_id, stream_sequence, schema_version,
+		input_hash_version, input_hash, decision_hash_version, decision_hash,
+		resulting_state_hash, envelope, decision, business_input_hash,
+		business_input_hash_version
+	) VALUES (
+		$1,
+		CASE $2::bigint
+			WHEN 1 THEN '019f9460-4b36-4e9b-8f44-682611f73101'::uuid
+			ELSE '019f9460-4b36-4e9b-8f44-682611f73102'::uuid
+		END,
+		$2::bigint,
+		1,
+		1,
+		decode(repeat('00', 32), 'hex'),
+		1,
+		decode(repeat('01', 32), 'hex'),
+		decode(repeat('02', 32), 'hex'),
+		'{}',
+		'{}',
+		decode(repeat('03', 32), 'hex'),
+		1
+	)`
 
 func TestPhase3UpgradeRejectsAmbiguousCandidateIdentityData(t *testing.T) {
 	ctx := context.Background()
@@ -772,7 +1076,20 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 
-	_, err := pool.Exec(context.Background(), `
+	connection, err := pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire baseline population connection: %v", err)
+	}
+	defer connection.Release()
+	if _, err := connection.Exec(context.Background(), `
+		SELECT set_config(
+			'platformgo.runtime_schema_revision',
+			'20260725001100_phase3_committed_realtime_outbox',
+			false
+		)`); err != nil {
+		t.Fatalf("bind baseline runtime schema revision: %v", err)
+	}
+	_, err = connection.Exec(context.Background(), `
 		INSERT INTO engine.deployment_shard (shard_id) VALUES (7);
 		INSERT INTO trading.instruments (
 			instrument_id, revision, price_scale, quantity_scale,
@@ -1049,6 +1366,14 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 		context.Background(),
 		"SET LOCAL ROLE platformgo_engine",
 	); err == nil {
+		_, err = engineTransaction.Exec(context.Background(), `
+			SELECT set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				true
+			)`)
+	}
+	if err == nil {
 		_, err = engineTransaction.Exec(context.Background(), `
 			INSERT INTO engine.shard_checkpoints (
 				shard_id, next_stream_sequence, ready, state_hash, state_snapshot
@@ -1649,9 +1974,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 11 ||
+	if count != 12 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260725001000_phase3_api_revision_lock.up.sql" {
+		last != "20260725001100_phase3_committed_realtime_outbox.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,
@@ -1659,6 +1984,252 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 			last,
 		)
 	}
+}
+
+func assertRealtimeRoleBoundary(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:role-realtime', 'NETTING');
+		INSERT INTO identity.users (user_id, login, normalized_login)
+		VALUES ('urn:xb:user:role-realtime', 'role-realtime', 'role-realtime');
+		INSERT INTO identity.user_accounts (user_id, account_id)
+		VALUES (
+			'urn:xb:user:role-realtime',
+			'urn:xb:account:role-realtime'
+		)`,
+	); err != nil {
+		t.Fatalf("seed realtime role boundary: %v", err)
+	}
+	engineTransaction, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = engineTransaction.Exec(ctx, "SET LOCAL ROLE platformgo_engine"); err == nil {
+		_, err = engineTransaction.Exec(ctx, `
+			SELECT realtime.allocate_channel_sequence('user:role-realtime');
+			INSERT INTO realtime.publications (
+				channel, event_id, sequence, schema_version, event_type,
+				account_id, logical_time, data
+			) VALUES (
+				'user:role-realtime',
+				'019f9460-4b36-4e9b-8f44-682611f71101',
+				1,
+				1,
+				'order.updated',
+				'urn:xb:account:role-realtime',
+				1,
+				'{"status":"working"}'
+			)`)
+	}
+	if err != nil {
+		_ = engineTransaction.Rollback(ctx)
+		t.Fatalf("engine realtime insert: %v", err)
+	}
+	if err := engineTransaction.Commit(ctx); err != nil {
+		t.Fatalf("commit engine realtime insert: %v", err)
+	}
+
+	realtimeTransaction, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = realtimeTransaction.Exec(
+		ctx,
+		"SET LOCAL ROLE platformgo_realtime",
+	); err == nil {
+		_, err = realtimeTransaction.Exec(ctx, `
+			UPDATE realtime.publications
+			   SET attempts = attempts + 1,
+			       claimed_at = clock_timestamp()
+			 WHERE channel = 'user:role-realtime'
+			   AND event_id = '019f9460-4b36-4e9b-8f44-682611f71101'`)
+	}
+	if err != nil {
+		_ = realtimeTransaction.Rollback(ctx)
+		t.Fatalf("realtime role claim: %v", err)
+	}
+	if err := realtimeTransaction.Commit(ctx); err != nil {
+		t.Fatalf("commit realtime role claim: %v", err)
+	}
+
+	assertRoleStatementDenied(t, pool, "platformgo_realtime", `
+		UPDATE realtime.publications
+		   SET data = '{"status":"tampered"}'
+		 WHERE channel = 'user:role-realtime'`)
+	assertRoleStatementDenied(t, pool, "platformgo_realtime", `
+		INSERT INTO messaging.inbox (consumer, message_id)
+		VALUES ('realtime-cross-authority', gen_random_uuid())`)
+	assertRoleStatementDenied(t, pool, "platformgo_projector", `
+		SELECT channel FROM realtime.publications`)
+	if _, err := pool.Exec(ctx, `
+		UPDATE realtime.publications
+		   SET claimed_at = NULL,
+		       last_error = 'invalid permanent failure',
+		       failure_class = 'permanent',
+		       quarantined_at = NULL
+		 WHERE channel = 'user:role-realtime'`); err == nil {
+		t.Fatal("invalid realtime failure/quarantine state was accepted")
+	} else {
+		var postgresErr *pgconn.PgError
+		if !errors.As(err, &postgresErr) || postgresErr.Code != "23514" {
+			t.Fatalf(
+				"invalid realtime failure state error=%v, want SQLSTATE 23514",
+				err,
+			)
+		}
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE realtime.publications
+		   SET claimed_at = NULL,
+		       last_error = 'permanent failure',
+		       failure_class = 'permanent',
+		       quarantined_at = clock_timestamp()
+		 WHERE channel = 'user:role-realtime'`); err != nil {
+		t.Fatalf("seed realtime quarantine: %v", err)
+	}
+	realtimeLogin := runtimeRoleLoginPool(
+		t,
+		pool,
+		"platformgo_realtime_member_test",
+		"platformgo_realtime",
+	)
+	if _, err := realtimeLogin.Exec(ctx, `
+		UPDATE realtime.publications
+		   SET quarantined_at = NULL
+		 WHERE channel = 'user:role-realtime'`); err == nil {
+		t.Fatal("inherited realtime login bypassed audited quarantine repair")
+	} else {
+		var postgresErr *pgconn.PgError
+		if !errors.As(err, &postgresErr) || postgresErr.Code != "42501" {
+			t.Fatalf(
+				"inherited realtime quarantine error=%v, want SQLSTATE 42501",
+				err,
+			)
+		}
+	}
+	assertRoleStatementDenied(t, pool, "platformgo_realtime", `
+		UPDATE realtime.publications
+		   SET quarantined_at = NULL
+		 WHERE channel = 'user:role-realtime'`)
+	assertRoleStatementDenied(t, pool, "platformgo_realtime_repair", `
+		UPDATE realtime.publications
+		   SET quarantined_at = NULL
+		 WHERE channel = 'user:role-realtime'`)
+	assertRoleStatementDenied(t, pool, "platformgo_realtime_repair", `
+		UPDATE realtime.publications
+		   SET data = '{"status":"tampered"}'
+		 WHERE channel = 'user:role-realtime'`)
+	repairLogin := runtimeRoleLoginPool(
+		t,
+		pool,
+		"platformgo_realtime_repair_test",
+		"platformgo_realtime_repair",
+	)
+	var repairWait sync.WaitGroup
+	repairErrors := make(chan error, 2)
+	repairStart := make(chan struct{})
+	for range 2 {
+		repairWait.Add(1)
+		go func() {
+			defer repairWait.Done()
+			<-repairStart
+			_, repairErr := repairLogin.Exec(ctx, `
+				SELECT realtime.requeue_publication(
+					'019f9460-4b36-4e9b-8f44-682611f71102',
+					'user:role-realtime',
+					'019f9460-4b36-4e9b-8f44-682611f71101',
+					'operator@example.test',
+					'verified Centrifugo configuration repair'
+				)`)
+			repairErrors <- repairErr
+		}()
+	}
+	close(repairStart)
+	repairWait.Wait()
+	close(repairErrors)
+	for repairErr := range repairErrors {
+		if repairErr != nil {
+			t.Fatalf("concurrent audited realtime repair: %v", repairErr)
+		}
+	}
+	if _, err := repairLogin.Exec(ctx, `
+		SELECT realtime.requeue_publication(
+			'019f9460-4b36-4e9b-8f44-682611f71102',
+			'user:role-realtime',
+			'019f9460-4b36-4e9b-8f44-682611f71101',
+			'operator@example.test',
+			'verified Centrifugo configuration repair'
+		)`); err != nil {
+		t.Fatalf("replay identical realtime repair: %v", err)
+	}
+	if _, err := repairLogin.Exec(ctx, `
+		SELECT realtime.requeue_publication(
+			'019f9460-4b36-4e9b-8f44-682611f71102',
+			'user:role-realtime',
+			'019f9460-4b36-4e9b-8f44-682611f71101',
+			'other-operator@example.test',
+			'changed request'
+		)`); err == nil {
+		t.Fatal("conflicting realtime repair request identity was accepted")
+	}
+	var (
+		repairAuditCount      int
+		repairAuthenticatedBy string
+		repairClaimedActor    string
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), min(authenticated_actor), min(claimed_actor)
+		  FROM realtime.publication_requeues
+		 WHERE request_id = '019f9460-4b36-4e9b-8f44-682611f71102'`,
+	).Scan(
+		&repairAuditCount,
+		&repairAuthenticatedBy,
+		&repairClaimedActor,
+	); err != nil ||
+		repairAuditCount != 1 ||
+		repairAuthenticatedBy != "platformgo_realtime_repair_test" ||
+		repairClaimedActor != "operator@example.test" {
+		t.Fatalf(
+			"realtime repair audit count=%d authenticated=%q claimed=%q error=%v",
+			repairAuditCount,
+			repairAuthenticatedBy,
+			repairClaimedActor,
+			err,
+		)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE realtime.publications
+		   SET claimed_at = clock_timestamp(),
+		       published_at = clock_timestamp(),
+		       last_error = NULL,
+		       failure_class = NULL
+		 WHERE channel = 'user:role-realtime'`); err != nil {
+		t.Fatalf("seed immutable published delivery: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE realtime.publications
+		   SET attempts = attempts + 1
+		 WHERE channel = 'user:role-realtime'`); err == nil {
+		t.Fatal("published realtime delivery state was mutable")
+	} else {
+		var postgresErr *pgconn.PgError
+		if !errors.As(err, &postgresErr) || postgresErr.Code != "55000" {
+			t.Fatalf(
+				"published realtime immutability error=%v, want SQLSTATE 55000",
+				err,
+			)
+		}
+	}
+	assertRoleStatementDenied(t, pool, "platformgo_engine", `
+		UPDATE realtime.channel_sequences
+		   SET last_sequence = 999
+		 WHERE channel = 'user:role-realtime'`)
+	assertRoleStatementDenied(t, pool, "platformgo_api", `
+		SELECT * FROM realtime.publications`)
+	assertRoleStatementDenied(t, pool, "platformgo_outbox", `
+		UPDATE realtime.publications SET attempts = attempts + 1`)
 }
 
 func assertCommandIdempotencyAuthorityConstraints(
@@ -1994,6 +2565,50 @@ func postgresPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+func runtimeRoleLoginPool(
+	t *testing.T,
+	admin *pgxpool.Pool,
+	login string,
+	runtimeRole string,
+) *pgxpool.Pool {
+	t.Helper()
+	ctx := context.Background()
+	loginIdentifier := pgx.Identifier{login}.Sanitize()
+	roleIdentifier := pgx.Identifier{runtimeRole}.Sanitize()
+	const password = "platformgo-test-password"
+	if _, err := admin.Exec(ctx, fmt.Sprintf(`
+		CREATE ROLE %s LOGIN PASSWORD '%s'
+			NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+		GRANT %s TO %s`,
+		loginIdentifier,
+		password,
+		roleIdentifier,
+		loginIdentifier,
+	)); err != nil {
+		t.Fatalf("create %s login: %v", runtimeRole, err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(
+			context.Background(),
+			fmt.Sprintf("DROP ROLE IF EXISTS %s", loginIdentifier),
+		)
+	})
+	config, err := pgxpool.ParseConfig(
+		os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConnConfig.User = login
+	config.ConnConfig.Password = password
+	loginPool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open %s login: %v", runtimeRole, err)
+	}
+	t.Cleanup(loginPool.Close)
+	return loginPool
+}
+
 func resetDurableSchemas(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 
@@ -2022,6 +2637,17 @@ func resetDurableSchemas(t *testing.T, pool *pgxpool.Pool) {
 			) THEN
 				CREATE ROLE platformgo_projector NOLOGIN;
 			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_realtime'
+			) THEN
+				CREATE ROLE platformgo_realtime NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles
+				 WHERE rolname = 'platformgo_realtime_repair'
+			) THEN
+				CREATE ROLE platformgo_realtime_repair NOLOGIN;
+			END IF;
 		END;
 		$$`,
 	)
@@ -2042,10 +2668,42 @@ func dropDurableSchemas(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
+func migrationFilesThrough(t *testing.T, last string) fstest.MapFS {
+	t.Helper()
+	directory := filepath.Join("..", "..", "..", "migrations")
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := fstest.MapFS{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || filepath.Ext(name) != ".sql" || name > last {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(directory, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[name] = &fstest.MapFile{Data: raw}
+	}
+	return files
+}
+
 func assertReceiptIdentityConstraints(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 
-	if _, err := pool.Exec(context.Background(), `
+	connection, err := pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire receipt test connection: %v", err)
+	}
+	defer connection.Release()
+	if _, err := connection.Exec(context.Background(), `
+		SELECT set_config(
+			'platformgo.runtime_schema_revision',
+			'20260725001100_phase3_committed_realtime_outbox',
+			false
+		);
 		INSERT INTO engine.deployment_shard (shard_id)
 		VALUES (7)`); err != nil {
 		t.Fatalf("bind receipt test deployment shard: %v", err)
@@ -2061,14 +2719,29 @@ func assertReceiptIdentityConstraints(t *testing.T, pool *pgxpool.Pool) {
 		          decode(repeat('02', 32), 'hex'), decode(repeat('03', 32), 'hex'),
 		          '{}'::jsonb, '{}'::jsonb)`
 	inputID := "019f9460-4b36-4e9b-8f44-682611f7ee01"
-	if _, err := pool.Exec(context.Background(), insertReceipt, inputID, 1); err != nil {
+	if _, err := connection.Exec(
+		context.Background(),
+		insertReceipt,
+		inputID,
+		1,
+	); err != nil {
 		t.Fatalf("insert first receipt: %v", err)
 	}
-	if _, err := pool.Exec(context.Background(), insertReceipt, inputID, 2); !isUniqueViolation(err) {
+	if _, err := connection.Exec(
+		context.Background(),
+		insertReceipt,
+		inputID,
+		2,
+	); !isUniqueViolation(err) {
 		t.Fatalf("duplicate input ID error = %v, want unique violation", err)
 	}
 	otherID := "019f9460-4b36-4e9b-8f44-682611f7ee02"
-	if _, err := pool.Exec(context.Background(), insertReceipt, otherID, 1); !isUniqueViolation(err) {
+	if _, err := connection.Exec(
+		context.Background(),
+		insertReceipt,
+		otherID,
+		1,
+	); !isUniqueViolation(err) {
 		t.Fatalf("duplicate stream sequence error = %v, want unique violation", err)
 	}
 }

@@ -106,11 +106,14 @@ func TestWorkerRequiresCompleteExplicitJetStreamPolicy(t *testing.T) {
 }
 
 func TestWorkerHandlersCannotUnionPostgreSQLAuthority(t *testing.T) {
-	if _, err := databaseRoleForHandlers([]string{
-		"outbox-publisher",
-		"event-consumer",
-	}); err == nil {
-		t.Fatal("mixed outbox and engine handlers accepted")
+	for _, handlers := range [][]string{
+		{"outbox-publisher", "event-consumer"},
+		{"outbox-publisher", "realtime-publisher"},
+		{"event-consumer", "realtime-publisher"},
+	} {
+		if _, err := databaseRoleForHandlers(handlers); err == nil {
+			t.Fatalf("mixed-authority handlers %v accepted", handlers)
+		}
 	}
 	for _, test := range []struct {
 		handlers []string
@@ -124,6 +127,10 @@ func TestWorkerHandlersCannotUnionPostgreSQLAuthority(t *testing.T) {
 			handlers: []string{"event-consumer", "event-consumer:orders"},
 			want:     databaseRoleEngine,
 		},
+		{
+			handlers: []string{"realtime-publisher"},
+			want:     databaseRoleRealtime,
+		},
 	} {
 		got, err := databaseRoleForHandlers(test.handlers)
 		if err != nil {
@@ -132,6 +139,25 @@ func TestWorkerHandlersCannotUnionPostgreSQLAuthority(t *testing.T) {
 		if got != test.want {
 			t.Fatalf("handlers %v role = %q, want %q", test.handlers, got, test.want)
 		}
+	}
+}
+
+func TestRealtimePublisherDoesNotDependOnNATS(t *testing.T) {
+	if workerNeedsNATS([]string{"realtime-publisher"}) {
+		t.Fatal("realtime-only publisher unexpectedly requires NATS")
+	}
+	if !workerNeedsNATS([]string{"outbox-publisher"}) ||
+		!workerNeedsNATS([]string{"event-consumer"}) {
+		t.Fatal("NATS-backed worker did not require NATS")
+	}
+	config := Config{
+		DatabaseURL:      "postgres://example",
+		HealthAddress:    "127.0.0.1:8081",
+		CentrifugoAPIURL: "http://centrifugo:8000",
+		CentrifugoAPIKey: "api-key",
+	}
+	if err := validateRealtimeWorkerConfig(config); err != nil {
+		t.Fatalf("realtime-only config without NATS: %v", err)
 	}
 }
 

@@ -34,6 +34,27 @@ var eventTypes = map[string]struct{}{
 	"trade.created":            {},
 }
 
+// PublishError classifies whether a failed committed publication can be
+// retried without operator intervention.
+type PublishError struct {
+	err       error
+	retryable bool
+}
+
+func (publishErr *PublishError) Error() string { return publishErr.err.Error() }
+func (publishErr *PublishError) Unwrap() error { return publishErr.err }
+
+// IsRetryablePublishError reports only failures explicitly classified as
+// transient or ambiguous after a request may have reached Centrifugo.
+func IsRetryablePublishError(err error) bool {
+	var publishErr *PublishError
+	return errors.As(err, &publishErr) && publishErr.retryable
+}
+
+func classifiedPublishError(retryable bool, err error) error {
+	return &PublishError{err: err, retryable: retryable}
+}
+
 // Clock makes token expiry explicit at the delivery edge.
 type Clock interface {
 	Now() time.Time
@@ -66,15 +87,27 @@ type Gateway struct {
 
 // New validates and constructs the delivery adapter.
 func New(config Config) (*Gateway, error) {
-	parsed, err := url.Parse(config.APIURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return nil, errors.New("centrifugo: absolute API URL is required")
-	}
 	if len(config.TokenSecret) < 32 {
 		return nil, errors.New("centrifugo: token secret must contain at least 32 bytes")
 	}
 	if config.TokenTTL <= 0 {
 		return nil, errors.New("centrifugo: positive token TTL is required")
+	}
+	gateway, err := NewPublisher(config)
+	if err != nil {
+		return nil, err
+	}
+	gateway.tokenSecret = append([]byte(nil), config.TokenSecret...)
+	gateway.tokenTTL = config.TokenTTL
+	return gateway, nil
+}
+
+// NewPublisher constructs the publish/health-only adapter without loading
+// connection-token signing authority into a delivery worker.
+func NewPublisher(config Config) (*Gateway, error) {
+	parsed, err := url.Parse(config.APIURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, errors.New("centrifugo: absolute API URL is required")
 	}
 	if config.HTTPClient == nil {
 		config.HTTPClient = &http.Client{Timeout: 5 * time.Second}
@@ -83,12 +116,10 @@ func New(config Config) (*Gateway, error) {
 		config.Clock = wallClock{}
 	}
 	return &Gateway{
-		apiURL:      strings.TrimRight(config.APIURL, "/"),
-		apiKey:      config.APIKey,
-		tokenSecret: append([]byte(nil), config.TokenSecret...),
-		tokenTTL:    config.TokenTTL,
-		httpClient:  config.HTTPClient,
-		clock:       config.Clock,
+		apiURL:     strings.TrimRight(config.APIURL, "/"),
+		apiKey:     config.APIKey,
+		httpClient: config.HTTPClient,
+		clock:      config.Clock,
 	}, nil
 }
 
@@ -137,20 +168,26 @@ func (gateway *Gateway) Publish(
 	envelope Envelope,
 ) error {
 	if gateway == nil {
-		return errors.New("centrifugo: gateway is nil")
+		return classifiedPublishError(false, errors.New("centrifugo: gateway is nil"))
 	}
 	if channel == "" || strings.Count(channel, ":") != 1 {
-		return errors.New("centrifugo: canonical channel is required")
+		return classifiedPublishError(
+			false,
+			errors.New("centrifugo: canonical channel is required"),
+		)
 	}
 	if err := envelope.Validate(); err != nil {
-		return err
+		return classifiedPublishError(false, err)
 	}
 	body, err := json.Marshal(struct {
 		Channel string   `json:"channel"`
 		Data    Envelope `json:"data"`
 	}{Channel: channel, Data: envelope})
 	if err != nil {
-		return fmt.Errorf("centrifugo: encode publication: %w", err)
+		return classifiedPublishError(
+			false,
+			fmt.Errorf("centrifugo: encode publication: %w", err),
+		)
 	}
 	request, err := http.NewRequestWithContext(
 		ctx,
@@ -159,7 +196,10 @@ func (gateway *Gateway) Publish(
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		return fmt.Errorf("centrifugo: build publish request: %w", err)
+		return classifiedPublishError(
+			false,
+			fmt.Errorf("centrifugo: build publish request: %w", err),
+		)
 	}
 	request.Header.Set("content-type", "application/json")
 	if gateway.apiKey != "" {
@@ -167,18 +207,72 @@ func (gateway *Gateway) Publish(
 	}
 	response, err := gateway.httpClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("centrifugo: publish: %w", err)
+		return classifiedPublishError(
+			true,
+			fmt.Errorf("centrifugo: publish: %w", err),
+		)
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf(
-			"centrifugo: publish HTTP %d: %s",
-			response.StatusCode,
-			strings.TrimSpace(string(detail)),
+		retryable := response.StatusCode == http.StatusRequestTimeout ||
+			response.StatusCode == http.StatusTooManyRequests ||
+			response.StatusCode >= http.StatusInternalServerError
+		return classifiedPublishError(
+			retryable,
+			fmt.Errorf(
+				"centrifugo: publish HTTP %d: %s",
+				response.StatusCode,
+				strings.TrimSpace(string(detail)),
+			),
+		)
+	}
+	detail, err := io.ReadAll(io.LimitReader(response.Body, 4096))
+	if err != nil {
+		return classifiedPublishError(
+			true,
+			fmt.Errorf("centrifugo: read publish response: %w", err),
+		)
+	}
+	var acknowledgment struct {
+		Result map[string]json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(detail, &acknowledgment); err != nil {
+		return classifiedPublishError(
+			true,
+			fmt.Errorf("centrifugo: decode publish response: %w", err),
+		)
+	}
+	if acknowledgment.Error != nil {
+		return classifiedPublishError(
+			retryableApplicationCode(acknowledgment.Error.Code),
+			fmt.Errorf(
+				"centrifugo: publish error %d: %s",
+				acknowledgment.Error.Code,
+				acknowledgment.Error.Message,
+			),
+		)
+	}
+	if acknowledgment.Result == nil {
+		return classifiedPublishError(
+			true,
+			errors.New("centrifugo: publish response omitted result"),
 		)
 	}
 	return nil
+}
+
+func retryableApplicationCode(code int) bool {
+	switch code {
+	case 100, 111, 113:
+		return true
+	default:
+		return false
+	}
 }
 
 // Healthy checks the public Centrifugo health endpoint.
@@ -214,10 +308,18 @@ func (gateway *Gateway) IssueClientToken(
 	if gateway == nil {
 		return edge.RealtimeToken{}, errors.New("centrifugo: gateway is nil")
 	}
+	if len(gateway.tokenSecret) < 32 || gateway.tokenTTL <= 0 {
+		return edge.RealtimeToken{}, errors.New(
+			"centrifugo: token issuer is not configured",
+		)
+	}
 	if principal.Audience != edge.AudienceClient || principal.Subject == "" {
 		return edge.RealtimeToken{}, edge.ErrUnauthorized
 	}
 	channel := UserChannel(principal.Subject)
+	if channel == "" {
+		return edge.RealtimeToken{}, edge.ErrUnauthorized
+	}
 	channels := []string{channel}
 	claims := connectionClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -244,8 +346,32 @@ type connectionClaims struct {
 
 // UserChannel preserves the legacy namespace:id shape and strips a URN prefix.
 func UserChannel(subject string) string {
-	parts := strings.Split(subject, ":")
-	return "user:" + parts[len(parts)-1]
+	const prefix = "urn:xb:user:"
+	if !strings.HasPrefix(subject, prefix) ||
+		!validUserChannelSuffix(subject[len(prefix):]) {
+		return ""
+	}
+	return "user:" + subject[len(prefix):]
+}
+
+func validUserChannelSuffix(value string) bool {
+	if len(value) == 0 || len(value) > 250 {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			character == '.' ||
+			character == '_' ||
+			character == '~' ||
+			character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // NeedsSnapshot reports a sequence gap that must reload authoritative state.

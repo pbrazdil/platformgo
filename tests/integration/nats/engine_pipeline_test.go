@@ -1826,6 +1826,17 @@ func resetDurableSchemas(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 			) THEN
 				CREATE ROLE platformgo_projector NOLOGIN;
 			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_realtime'
+			) THEN
+				CREATE ROLE platformgo_realtime NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles
+				 WHERE rolname = 'platformgo_realtime_repair'
+			) THEN
+				CREATE ROLE platformgo_realtime_repair NOLOGIN;
+			END IF;
 		END;
 		$$`,
 	); err != nil {
