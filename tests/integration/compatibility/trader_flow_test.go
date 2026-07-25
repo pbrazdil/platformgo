@@ -55,6 +55,9 @@ func TestTraderTradingFlowTransportAgainstPostgreSQL(t *testing.T) {
 		) VALUES (
 			'urn:xb:user:trader-7', 'trader7', 'trader7',
 			'trader7@example.com', 'trader7@example.com', $1
+		), (
+			'urn:xb:user:trader-8', 'trader8', 'trader8',
+			'trader8@example.com', 'trader8@example.com', $1
 		)`,
 		passwordHash,
 	); err != nil {
@@ -71,14 +74,18 @@ func TestTraderTradingFlowTransportAgainstPostgreSQL(t *testing.T) {
 			0.1, 0.05, 10, -0.0001, 0.0005
 		);
 		INSERT INTO trading.accounts (account_id, oms_mode)
-		VALUES ('urn:xb:account:acct-7', 'NETTING');
+		VALUES
+			('urn:xb:account:acct-7', 'NETTING'),
+			('urn:xb:account:acct-8', 'NETTING');
 		INSERT INTO identity.user_accounts (user_id, account_id)
-		VALUES ('urn:xb:user:trader-7', 'urn:xb:account:acct-7');
+		VALUES
+			('urn:xb:user:trader-7', 'urn:xb:account:acct-7'),
+			('urn:xb:user:trader-8', 'urn:xb:account:acct-8');
 		INSERT INTO ledger.balances (
 			account_id, currency, total, used, free, equity, ledger_sequence
-		) VALUES (
-			'urn:xb:account:acct-7', 'USDC', 1000, 0, 1000, 1000, 0
-		)`,
+		) VALUES
+			('urn:xb:account:acct-7', 'USDC', 1000, 0, 1000, 1000, 0),
+			('urn:xb:account:acct-8', 'USDC', 1000, 0, 1000, 1000, 0)`,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -173,6 +180,7 @@ func TestTraderTradingFlowTransportAgainstPostgreSQL(t *testing.T) {
 		len(pending) != 1 ||
 		pending[0].OrderID != accepted.OrderID ||
 		pending[0].IntentID != "intent-7" ||
+		pending[0].Symbol != "BTC-PERP" ||
 		pending[0].Status != "pending" {
 		t.Fatalf("orders status=%d body=%#v", orders.StatusCode, pending)
 	}
@@ -214,13 +222,19 @@ func TestTraderTradingFlowTransportAgainstPostgreSQL(t *testing.T) {
 		{
 			name:    "foreign account",
 			method:  http.MethodPost,
-			path:    "/v1/accounts/urn:xb:account:foreign/orders",
+			path:    "/v1/accounts/urn:xb:account:acct-8/orders",
 			body:    submitBody,
 			headers: submitHeaders,
 			want:    http.StatusForbidden,
 		},
 		{
-			name:   "anonymous",
+			name:   "anonymous positions",
+			method: http.MethodGet,
+			path:   "/v1/accounts/urn:xb:account:acct-7/positions",
+			want:   http.StatusUnauthorized,
+		},
+		{
+			name:   "anonymous order",
 			method: http.MethodPost,
 			path:   "/v1/accounts/urn:xb:account:acct-7/orders",
 			body:   submitBody,
