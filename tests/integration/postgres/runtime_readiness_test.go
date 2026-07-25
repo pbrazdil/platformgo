@@ -18,7 +18,8 @@ import (
 )
 
 func TestRuntimeReadinessRequiresPostRecoveryAndPreDrainLeases(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
 	if err := platformpostgres.NewMigrator(

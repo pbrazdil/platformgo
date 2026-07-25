@@ -34,7 +34,7 @@ func TestRuntimeCompositionRejectsPrivilegedAndWrongDatabaseLogins(
 		t.Fatal(err)
 	}
 	defer admin.Close()
-	if err := postgresfixture.ResetDurableSchemas(ctx, admin); err != nil {
+	if err := resetCompatibilityDatabase(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
 	if err := platformpostgres.NewMigrator(
@@ -106,6 +106,43 @@ func TestRuntimeCompositionRejectsPrivilegedAndWrongDatabaseLogins(
 	); err == nil || !strings.Contains(err.Error(), "must belong only") {
 		t.Fatalf("outbox under API login error = %v", err)
 	}
+}
+
+func resetCompatibilityDatabase(
+	ctx context.Context,
+	admin *pgxpool.Pool,
+) error {
+	if err := postgresfixture.ResetDurableSchemas(ctx, admin); err != nil {
+		return err
+	}
+	if _, err := admin.Exec(ctx, `
+		DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_api'
+			) THEN
+				CREATE ROLE platformgo_api NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_engine'
+			) THEN
+				CREATE ROLE platformgo_engine NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_outbox'
+			) THEN
+				CREATE ROLE platformgo_outbox NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_projector'
+			) THEN
+				CREATE ROLE platformgo_projector NOLOGIN;
+			END IF;
+		END;
+		$$`); err != nil {
+		return fmt.Errorf("provision test runtime roles: %w", err)
+	}
+	return nil
 }
 
 func provisionRuntimeLogin(

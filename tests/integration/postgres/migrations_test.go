@@ -1975,7 +1975,14 @@ func postgresPool(t *testing.T) *pgxpool.Pool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, dsn)
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse PostgreSQL pool config: %v", err)
+	}
+	// Readiness tests hold separate ownership and drain leases concurrently.
+	// Pin the test capacity so their behavior does not depend on runner CPU count.
+	config.MaxConns = 8
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatalf("open PostgreSQL pool: %v", err)
 	}

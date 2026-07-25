@@ -26,7 +26,6 @@ import (
 	"github.com/upcomers-org/platformgo/internal/edge"
 	"github.com/upcomers-org/platformgo/internal/engine"
 	platformruntime "github.com/upcomers-org/platformgo/internal/runtime"
-	"github.com/upcomers-org/platformgo/internal/testsupport/postgresfixture"
 	"github.com/upcomers-org/platformgo/migrations"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -52,7 +51,7 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := postgresfixture.ResetDurableSchemas(ctx, pool); err != nil {
+	if err := resetCompatibilityDatabase(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	if err := platformpostgres.NewMigrator(

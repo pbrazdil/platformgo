@@ -17,7 +17,6 @@ import (
 	platformnats "github.com/upcomers-org/platformgo/internal/adapters/nats"
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	platformruntime "github.com/upcomers-org/platformgo/internal/runtime"
-	"github.com/upcomers-org/platformgo/internal/testsupport/postgresfixture"
 	"github.com/upcomers-org/platformgo/migrations"
 )
 
@@ -58,7 +57,7 @@ func runOutboxWorkerProof(
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := postgresfixture.ResetDurableSchemas(ctx, pool); err != nil {
+	if err := resetCompatibilityDatabase(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	if err := platformpostgres.NewMigrator(
