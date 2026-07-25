@@ -138,6 +138,17 @@ func resetCompatibilityDatabase(
 			) THEN
 				CREATE ROLE platformgo_projector NOLOGIN;
 			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_realtime'
+			) THEN
+				CREATE ROLE platformgo_realtime NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles
+				 WHERE rolname = 'platformgo_realtime_repair'
+			) THEN
+				CREATE ROLE platformgo_realtime_repair NOLOGIN;
+			END IF;
 		END;
 		$$`); err != nil {
 		return fmt.Errorf("provision test runtime roles: %w", err)
@@ -155,7 +166,9 @@ func provisionRuntimeLogin(
 	t.Helper()
 	for _, membership := range memberships {
 		switch membership {
-		case "platformgo_api", "platformgo_engine", "platformgo_outbox":
+		case "platformgo_api", "platformgo_engine", "platformgo_outbox",
+			"platformgo_projector", "platformgo_realtime",
+			"platformgo_realtime_repair":
 		default:
 			t.Fatalf("unsupported test membership %q", membership)
 		}

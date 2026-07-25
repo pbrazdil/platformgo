@@ -64,7 +64,8 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 		t.Fatal("UZO_TRUSTED_PROXY_CIDRS missing from compatibility manifest")
 	}
 	if !reflect.DeepEqual(manifest.ImplementedWorkers, []string{
-		"outbox-publisher", "event-consumer", "event-consumer:<pattern>",
+		"outbox-publisher", "realtime-publisher",
+		"event-consumer", "event-consumer:<pattern>",
 	}) {
 		t.Fatalf("implemented workers = %v", manifest.ImplementedWorkers)
 	}

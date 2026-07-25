@@ -296,7 +296,20 @@ func TestOutboxRuntimeRoleExecutesProductionClaimAndRepublish(t *testing.T) {
 	}
 	eventID := engine.IDFromSequence(engine.ID{}, 302)
 	inputID := engine.IDFromSequence(engine.ID{}, 303)
-	if _, err := adminPool.Exec(context.Background(), `
+	engineSeed, err := adminPool.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire engine seed connection: %v", err)
+	}
+	defer engineSeed.Release()
+	if _, err := engineSeed.Exec(context.Background(), `
+		SELECT set_config(
+			'platformgo.runtime_schema_revision',
+			'20260725001100_phase3_committed_realtime_outbox',
+			false
+		)`); err != nil {
+		t.Fatalf("bind engine seed schema revision: %v", err)
+	}
+	if _, err := engineSeed.Exec(context.Background(), `
 		INSERT INTO engine.input_receipts (
 			shard_id, input_id, stream_sequence, schema_version,
 			input_hash_version, input_hash, decision_hash_version,

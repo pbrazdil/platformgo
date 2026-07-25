@@ -41,6 +41,7 @@ const (
 	FailpointAfterPersistBeforeCommit = "postgres.after_persist_before_commit"
 	engineWriterLockNamespace         = 0x50474f45
 	engineOwnerLockNamespace          = 0x50474f4f
+	engineRuntimeSchemaRevision       = "20260725001100_phase3_committed_realtime_outbox"
 )
 
 type faultSet interface {
@@ -616,6 +617,12 @@ func (store *EngineStore) beginEngineTx(
 	options := pgx.TxOptions{IsoLevel: pgx.Serializable}
 	if ownership == nil {
 		tx, err := store.pool.BeginTx(ctx, options)
+		if err == nil {
+			err = bindEngineRuntimeSchemaRevision(ctx, tx)
+		}
+		if err != nil && tx != nil {
+			_ = tx.Rollback(context.WithoutCancel(ctx))
+		}
 		return tx, ownershipToken{}, func() {}, err
 	}
 	ownership.mu.Lock()
@@ -637,12 +644,28 @@ func (store *EngineStore) beginEngineTx(
 			err,
 		)
 	}
+	if err := bindEngineRuntimeSchemaRevision(ctx, tx); err != nil {
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+		ownership.mu.Unlock()
+		return nil, ownershipToken{}, func() {}, err
+	}
 	token := ownershipToken{
 		shardID: ownership.shardID,
 		epoch:   ownership.epoch,
 		present: true,
 	}
 	return tx, token, ownership.mu.Unlock, nil
+}
+
+func bindEngineRuntimeSchemaRevision(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(
+		ctx,
+		"SELECT set_config('platformgo.runtime_schema_revision', $1, true)",
+		engineRuntimeSchemaRevision,
+	); err != nil {
+		return fmt.Errorf("bind engine runtime schema revision: %w", err)
+	}
+	return nil
 }
 
 func verifyOwnershipEpoch(
@@ -1010,6 +1033,9 @@ func persistDecision(
 	if err := persistBooks(ctx, tx, input, decision.BookChanges); err != nil {
 		return err
 	}
+	if err := persistRealtime(ctx, tx, action, decision); err != nil {
+		return err
+	}
 	if err := persistOrders(ctx, tx, decision.OrderChanges); err != nil {
 		return err
 	}
@@ -1019,7 +1045,10 @@ func persistDecision(
 	if err := persistPositions(ctx, tx, decision.PositionChanges); err != nil {
 		return err
 	}
-	return persistOutbox(ctx, tx, input, decision.Events)
+	if err := persistOutbox(ctx, tx, input, decision.Events); err != nil {
+		return err
+	}
+	return nil
 }
 
 func persistAccountProvisioning(
