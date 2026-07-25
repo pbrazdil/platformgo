@@ -37,8 +37,8 @@ Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
   broker, gRPC, realtime, and deployment-role contracts;
-- add PostgreSQL query-plan and migration-lock evidence for the hot realtime
-  outbox paths and upgrade boundary;
+- obtain hosted exact-SHA acceptance for the current PostgreSQL realtime
+  query-plan and migration-lock evidence candidate;
 - obtain separate independent port-ledger acceptance for the source behaviors
   proven by the implementation.
 
@@ -57,7 +57,7 @@ This repository is not yet a production-capable replacement.
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
 | 2 — Durable execution | Complete | PostgreSQL 17 authority, immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
-| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, and a landed durable realtime projection. Full frozen surface coverage, PostgreSQL plan/upgrade evidence, and independent port-ledger acceptance remain. |
+| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, and a landed durable realtime projection. A locally green candidate adds PostgreSQL 17 query-plan and migration-lock evidence. Full frozen surface coverage, hosted acceptance for that candidate, and independent port-ledger acceptance remain. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
@@ -68,13 +68,16 @@ race, repeat, vulnerability, module-consistency, and policy checks, plus live
 tests against disposable PostgreSQL 17, NATS, and Centrifugo. Their exact SHAs
 are green in hosted CI. The realtime path additionally has live PostgreSQL 17
 commit/order/retry evidence, a simulated Centrifugo outage proof, a real
-Centrifugo history proof, and independent determinism and money review. These
-results do not complete the remaining Phase 3 scope.
+Centrifugo history proof, and independent determinism and money review. The
+current evidence candidate additionally passes the full PostgreSQL integration
+suite on PostgreSQL 17, including an indexed representative-backlog claim plan
+and migration 011 bounded-lock rollback/retry proof. Its hosted exact-SHA
+checks are pending. These results do not complete the remaining Phase 3 scope.
 
 ## Next milestone
 
-Add PostgreSQL plan and upgrade evidence for the durable realtime path, then
-complete the remaining frozen compatibility operations and worker roles
+Land the PostgreSQL plan and upgrade evidence for the durable realtime path,
+then complete the remaining frozen compatibility operations and worker roles
 through vertically narrow changes. Phase 4 begins only after the Phase 3
 charter and release gates are fully satisfied.
 
