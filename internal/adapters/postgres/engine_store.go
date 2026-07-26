@@ -1951,6 +1951,7 @@ func recoverTradingState(
 ) (engine.State, error) {
 	rows, err := querier.Query(ctx, `
 		SELECT receipt_kind, envelope, decision_hash, resulting_state_hash,
+		       decision_hash_version,
 		       business_input_hash_version, business_input_hash
 		  FROM (
 			SELECT
@@ -1958,6 +1959,7 @@ func recoverTradingState(
 				envelope,
 				decision_hash,
 				resulting_state_hash,
+				decision_hash_version,
 				business_input_hash_version,
 				business_input_hash,
 				stream_sequence
@@ -1969,6 +1971,10 @@ func recoverTradingState(
 				envelope,
 				decision_hash,
 				resulting_state_hash,
+				COALESCE(
+					(decision ->> 'DecisionHashVersion')::integer,
+					2
+				) AS decision_hash_version,
 				NULL::integer AS business_input_hash_version,
 				NULL::bytea AS business_input_hash,
 				stream_sequence
@@ -1990,6 +1996,7 @@ func recoverTradingState(
 		var envelopeJSON []byte
 		var storedDecisionHash []byte
 		var storedStateHash []byte
+		var storedDecisionHashVersion uint32
 		var storedBusinessHashVersion *uint32
 		var storedBusinessHash []byte
 		if scanErr := rows.Scan(
@@ -1997,6 +2004,7 @@ func recoverTradingState(
 			&envelopeJSON,
 			&storedDecisionHash,
 			&storedStateHash,
+			&storedDecisionHashVersion,
 			&storedBusinessHashVersion,
 			&storedBusinessHash,
 		); scanErr != nil {
@@ -2011,12 +2019,14 @@ func recoverTradingState(
 		var applyErr error
 		switch receiptKind {
 		case "business":
-			next, decision, applyErr = engine.ApplyTradingWithReceipts(
-				state,
-				input,
-				action,
-				receipts,
-			)
+			next, decision, applyErr =
+				engine.ApplyTradingWithReceiptsAtDecisionHashVersion(
+					state,
+					input,
+					action,
+					receipts,
+					storedDecisionHashVersion,
+				)
 		case "duplicate":
 			original, found := receipts.LookupByInputID(input.InputID)
 			if !found {
@@ -2027,11 +2037,13 @@ func recoverTradingState(
 					input.StreamSequence,
 				)
 			}
-			next, decision, applyErr = engine.ApplyDuplicateDelivery(
-				state,
-				input,
-				original,
-			)
+			next, decision, applyErr =
+				engine.ApplyDuplicateDeliveryAtDecisionHashVersion(
+					state,
+					input,
+					original,
+					storedDecisionHashVersion,
+				)
 		default:
 			return engine.State{}, fmt.Errorf(
 				"unknown durable receipt kind %q",

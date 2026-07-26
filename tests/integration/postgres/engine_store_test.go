@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -2829,6 +2830,174 @@ func TestEngineStoreDurablyHaltsNonCommandReuseOfCommandID(t *testing.T) {
 	}
 	if recovered.Ready() || recovered.Hash() != next.Hash() {
 		t.Fatalf("recovered state = %+v, want halted hash %s", recovered, next.Hash())
+	}
+}
+
+func TestEngineStoreRecoversDecisionHashV2AndExtendsTheChainWithV3(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("migrate mixed decision history database: %v", err)
+	}
+
+	store := platformpostgres.NewEngineStore(pool)
+	initial := engine.NewState(8)
+	ids := testkit.NewShardIDSequence(8)
+	clock := testkit.NewManualClock(
+		engine.NewLogicalTime(time.Date(2026, time.July, 26, 15, 0, 0, 0, time.UTC)),
+	)
+	legacyAction := engine.TradingAction{
+		Kind: engine.TradingActionConfigureInstrument,
+		ConfigureInstrument: &engine.ConfigureInstrument{
+			InstrumentID:            "BTC-PERP",
+			Revision:                1,
+			PriceScale:              2,
+			QuantityScale:           3,
+			SettlementCurrency:      "USDC",
+			SettlementCurrencyScale: 2,
+			InitialMarginRate:       "0.1",
+			MaintenanceMarginRate:   "0.05",
+			MaxLeverage:             "10",
+			MakerFeeRate:            "0",
+			TakerFeeRate:            "0",
+		},
+	}
+	legacyInput := nextStoredInput(t, initial, ids, clock, legacyAction)
+	_, currentDecision, _, _ := applyStoredInput(
+		t,
+		pool,
+		store,
+		initial,
+		legacyInput,
+		legacyAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if currentDecision.DecisionHashVersion != 3 {
+		t.Fatalf(
+			"initial persisted decision version = %d, want 3",
+			currentDecision.DecisionHashVersion,
+		)
+	}
+	legacyState, legacyDecision, err :=
+		engine.ApplyTradingWithReceiptsAtDecisionHashVersion(
+			initial,
+			legacyInput,
+			legacyAction,
+			nil,
+			2,
+		)
+	if err != nil {
+		t.Fatalf("derive legacy decision: %v", err)
+	}
+	legacyDecisionJSON, err := json.Marshal(legacyDecision)
+	if err != nil {
+		t.Fatalf("encode legacy decision: %v", err)
+	}
+	legacyDecisionHash := legacyDecision.DecisionHash
+	legacyStateHash := legacyState.Hash()
+
+	connection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire legacy-history connection: %v", err)
+	}
+	if _, err := connection.Exec(
+		ctx,
+		"ALTER TABLE engine.input_receipts DISABLE TRIGGER USER",
+	); err != nil {
+		connection.Release()
+		t.Fatalf("disable immutable receipt triggers: %v", err)
+	}
+	defer func() {
+		_, _ = pool.Exec(
+			context.Background(),
+			"ALTER TABLE engine.input_receipts ENABLE TRIGGER USER",
+		)
+	}()
+	if _, err := connection.Exec(ctx, `
+		UPDATE engine.input_receipts
+		   SET decision_hash_version = 2,
+		       decision_hash = $1,
+		       resulting_state_hash = $2,
+		       decision = $3
+		 WHERE shard_id = 8
+		   AND input_id = $4`,
+		legacyDecisionHash[:],
+		legacyStateHash[:],
+		legacyDecisionJSON,
+		legacyInput.InputID.String(),
+	); err != nil {
+		connection.Release()
+		t.Fatalf("install immutable legacy receipt fixture: %v", err)
+	}
+	if _, err := connection.Exec(ctx, `
+		UPDATE engine.shard_checkpoints
+		   SET state_hash = $1
+		 WHERE shard_id = 8`,
+		legacyStateHash[:],
+	); err != nil {
+		connection.Release()
+		t.Fatalf("install legacy checkpoint fixture: %v", err)
+	}
+	if _, err := connection.Exec(
+		ctx,
+		"ALTER TABLE engine.input_receipts ENABLE TRIGGER USER",
+	); err != nil {
+		connection.Release()
+		t.Fatalf("reenable immutable receipt triggers: %v", err)
+	}
+	connection.Release()
+
+	recovered, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover v2 history: %v", err)
+	}
+	if recovered.Hash() != legacyState.Hash() || !recovered.Ready() {
+		t.Fatalf(
+			"recovered v2 history ready=%t hash=%s, want %s",
+			recovered.Ready(),
+			recovered.Hash(),
+			legacyState.Hash(),
+		)
+	}
+	next, v3Decision, _, _ := applyStoredTrading(
+		t,
+		pool,
+		store,
+		recovered,
+		ids,
+		clock,
+		engine.TradingAction{
+			Kind: engine.TradingActionConfigureAccount,
+			ConfigureAccount: &engine.ConfigureAccount{
+				AccountID: "mixed-version-account",
+				OmsMode:   engine.OmsModeNetting,
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	if v3Decision.DecisionHashVersion != 3 {
+		t.Fatalf(
+			"new decision version = %d, want 3",
+			v3Decision.DecisionHashVersion,
+		)
+	}
+	recoveredMixed, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover mixed v2/v3 history: %v", err)
+	}
+	if recoveredMixed.Hash() != next.Hash() || !recoveredMixed.Ready() {
+		t.Fatalf(
+			"mixed recovery ready=%t hash=%s, want %s",
+			recoveredMixed.Ready(),
+			recoveredMixed.Hash(),
+			next.Hash(),
+		)
 	}
 }
 

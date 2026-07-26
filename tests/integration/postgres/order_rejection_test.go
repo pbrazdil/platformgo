@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -35,8 +36,12 @@ import (
 //     or rewrite its reason.
 //
 // Strengthening:
-//   - Restart recovery must reproduce the ready canonical engine state before
-//     terminal no-rewrite behavior is checked.
+//   - The exact working-order margin reservation and terminal release must
+//     commit with their order transitions.
+//   - Pre-commit failure must roll back the reservation, and duplicate
+//     delivery must replay it without applying it twice.
+//   - Restart recovery and reconciliation must reproduce the ready canonical
+//     engine and PostgreSQL projections before terminal no-rewrite is checked.
 //   - The durable order version must also remain unchanged after the later
 //     market input.
 //   - The frozen external order contract remains unchanged.
@@ -117,7 +122,7 @@ func TestRejectedOrderPersistsReason(t *testing.T) {
 
 	maxSlippageBPS := uint32(50)
 	orderID := engine.IDFromSequence(engine.ID{}, 1029)
-	submitted := apply(engine.TradingAction{
+	submitAction := engine.TradingAction{
 		Kind: engine.TradingActionSubmitOrder,
 		SubmitOrder: &engine.SubmitOrder{
 			OrderID:        orderID,
@@ -130,15 +135,134 @@ func TestRejectedOrderPersistsReason(t *testing.T) {
 			TriggerPrice:   "110",
 			MaxSlippageBPS: &maxSlippageBPS,
 		},
-	})
+	}
+	initialBalance, ok := state.Balance("account-rejection", "USDC")
+	if !ok || initialBalance.Used != "0" || initialBalance.Free != "1000" {
+		t.Fatalf("initial engine balance = %#v", initialBalance)
+	}
+	assertPersistedBalanceMatches(t, pool, initialBalance)
+
+	submitInput := nextStoredInput(t, state, ids, clock, submitAction)
+	seedPendingCommand(t, pool, submitInput, submitAction)
+	beforeSubmitHash := state.Hash()
+	faultedState, _, _, err := store.ApplyTrading(
+		ctx,
+		state,
+		submitInput,
+		submitAction,
+		platformpostgres.ApplyOptions{
+			Faults: testkit.NewFaults(
+				platformpostgres.FailpointAfterPersistBeforeCommit,
+			),
+		},
+	)
+	if !errors.Is(err, platformpostgres.ErrInjectedFault) {
+		t.Fatalf("faulted submit error = %v, want ErrInjectedFault", err)
+	}
+	if faultedState.Hash() != beforeSubmitHash {
+		t.Fatalf(
+			"faulted submit state hash = %s, want %s",
+			faultedState.Hash(),
+			beforeSubmitHash,
+		)
+	}
+	var faultedOrderCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM trading.orders
+		 WHERE order_id = $1`,
+		orderID.String(),
+	).Scan(&faultedOrderCount); err != nil {
+		t.Fatalf("count rolled-back order: %v", err)
+	}
+	if faultedOrderCount != 0 {
+		t.Fatalf("rolled-back order count = %d, want 0", faultedOrderCount)
+	}
+	assertPersistedBalanceMatches(t, pool, initialBalance)
+
+	var submitted engine.Decision
+	var duplicate bool
+	state, submitted, _, duplicate = applyStoredInput(
+		t,
+		pool,
+		store,
+		state,
+		submitInput,
+		submitAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if duplicate {
+		t.Fatal("successful retry was classified as duplicate")
+	}
 	if submitted.CommandResult.Status != engine.CommandStatusAccepted {
 		t.Fatalf("submit result = %+v, want accepted pending order", submitted.CommandResult)
+	}
+	if len(submitted.BalanceChanges) != 1 ||
+		submitted.BalanceChanges[0].Used != "1.1" ||
+		submitted.BalanceChanges[0].Free != "998.9" {
+		t.Fatalf("submit balance changes = %#v", submitted.BalanceChanges)
 	}
 
 	before := singlePersistedOrder(t, pool, orderID)
 	if before.status != string(engine.OrderStatusWorking) || before.rejectReason != "" {
 		t.Fatalf("before rejection = %#v, want working without reason", before)
 	}
+	beforeBalance, ok := state.Balance("account-rejection", "USDC")
+	if !ok || beforeBalance.Used != "1.1" || beforeBalance.Free != "998.9" {
+		t.Fatalf("engine balance before rejection = %#v", beforeBalance)
+	}
+	assertPersistedBalanceMatches(t, pool, beforeBalance)
+
+	workingStore := platformpostgres.NewEngineStore(pool)
+	workingState, err := workingStore.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover working order state: %v", err)
+	}
+	if !workingState.Ready() || workingState.Hash() != state.Hash() {
+		t.Fatalf(
+			"recovered working state ready=%t hash=%s, want ready hash=%s",
+			workingState.Ready(),
+			workingState.Hash(),
+			state.Hash(),
+		)
+	}
+	workingBalance, ok := workingState.Balance("account-rejection", "USDC")
+	if !ok || workingBalance != beforeBalance {
+		t.Fatalf(
+			"recovered working balance = %#v, want %#v",
+			workingBalance,
+			beforeBalance,
+		)
+	}
+	assertPersistedBalanceMatches(t, pool, workingBalance)
+	report, err := workingStore.ReconcileShard(ctx, 8)
+	if err != nil || !report.Ready {
+		t.Fatalf("working-order reconciliation = %+v, error %v", report, err)
+	}
+
+	duplicateState, duplicateDecision, duplicate, err := workingStore.ApplyTrading(
+		ctx,
+		workingState,
+		submitInput,
+		submitAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if err != nil || !duplicate || duplicateState.Hash() != workingState.Hash() {
+		t.Fatalf(
+			"duplicate submit = duplicate %t hash %s want %s error %v",
+			duplicate,
+			duplicateState.Hash(),
+			workingState.Hash(),
+			err,
+		)
+	}
+	if len(duplicateDecision.BalanceChanges) != 1 ||
+		duplicateDecision.BalanceChanges[0] != workingBalance {
+		t.Fatalf("duplicate balance replay = %#v", duplicateDecision.BalanceChanges)
+	}
+	assertPersistedBalanceMatches(t, pool, workingBalance)
+	state = duplicateState
+	store = workingStore
 
 	rejected := apply(engine.TradingAction{
 		Kind: engine.TradingActionUpdateBook,
@@ -154,11 +278,21 @@ func TestRejectedOrderPersistsReason(t *testing.T) {
 		rejected.OrderChanges[0].RejectReason != engine.RejectionSlippageExceeded {
 		t.Fatalf("rejection decision = %+v", rejected)
 	}
+	if len(rejected.BalanceChanges) != 1 ||
+		rejected.BalanceChanges[0].Used != "0" ||
+		rejected.BalanceChanges[0].Free != "1000" {
+		t.Fatalf("rejection balance changes = %#v", rejected.BalanceChanges)
+	}
 	after := singlePersistedOrder(t, pool, orderID)
 	if after.status != string(engine.OrderStatusRejected) ||
 		after.rejectReason != string(engine.RejectionSlippageExceeded) {
 		t.Fatalf("after rejection = %#v", after)
 	}
+	afterBalance, ok := state.Balance("account-rejection", "USDC")
+	if !ok || afterBalance.Used != "0" || afterBalance.Free != "1000" {
+		t.Fatalf("engine balance after rejection = %#v", afterBalance)
+	}
+	assertPersistedBalanceMatches(t, pool, afterBalance)
 
 	var persistedReason string
 	var persistedVersion uint64
@@ -244,4 +378,37 @@ func singlePersistedOrder(
 		t.Fatalf("read persisted order: %v", err)
 	}
 	return order
+}
+
+func assertPersistedBalanceMatches(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	want engine.BalanceSnapshot,
+) {
+	t.Helper()
+	var got engine.BalanceSnapshot
+	if err := pool.QueryRow(context.Background(), `
+		SELECT account_id, currency,
+		       trim_scale(total)::text,
+		       trim_scale(used)::text,
+		       trim_scale(free)::text,
+		       trim_scale(equity)::text
+		  FROM ledger.balances
+		 WHERE account_id = $1
+		   AND currency = $2`,
+		want.AccountID,
+		want.Currency,
+	).Scan(
+		&got.AccountID,
+		&got.Currency,
+		&got.Total,
+		&got.Used,
+		&got.Free,
+		&got.Equity,
+	); err != nil {
+		t.Fatalf("read persisted balance: %v", err)
+	}
+	if got != want {
+		t.Fatalf("persisted balance = %#v, want engine %#v", got, want)
+	}
 }

@@ -217,6 +217,34 @@ command, and monetary history. Once post-migration traffic has been accepted,
 prefer forward repair; restoring the old boundary discards all later durable
 facts and requires the normal disaster-recovery decision.
 
+### Phase 3 balance-projection hash-v3 cutover
+
+Migration `20260726000800_phase3_balance_projection_hash_v3.up.sql` establishes
+decision hash generation 3 for exact derived balance projections.
+
+Before applying it:
+
+1. halt every engine writer and take a restore-verified complete backup;
+2. run reconciliation and retain its report with the candidate digest;
+3. inspect the migration guard result;
+4. if any pre-v3 order receipt exists, do not bypass the guard or edit immutable
+   receipts—use an owner-reviewed compensating forward repair or restore/reset.
+
+The migration takes a metadata lock only long enough to install its insert
+trigger, uses a two-second lock timeout and a thirty-second statement timeout,
+and rolls back completely on contention or guard refusal. Retry only after the
+blocking transaction or historical-receipt decision is resolved.
+
+Decision hash v2 non-order history remains replayable and may be followed by
+v3 history. Once a v3 decision is committed, an older binary is not a valid
+rollback target: it cannot reproduce the v3 state chain, and the database
+trigger rejects every new v2 decision it tries to append, including
+market-only decisions. Keep writers halted
+and deploy a forward fix. A full rollback requires restoring the complete
+pre-migration backup and accepting loss of all later facts through the normal
+disaster-recovery decision; selective receipt, checkpoint, order, or balance
+restores are forbidden.
+
 ## 8. Release gates
 
 Continuous and release reconciliation follows `RECONCILIATION.md`.

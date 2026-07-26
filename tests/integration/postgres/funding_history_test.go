@@ -344,7 +344,7 @@ func seedFundingHistory(
 			1,
 			1,
 			decode(repeat(lpad(stream_sequence::text, 2, '0'), 32), 'hex'),
-			2,
+			3,
 			decode(repeat(lpad((stream_sequence + 10)::text, 2, '0'), 32), 'hex'),
 			decode(repeat(lpad((stream_sequence + 20)::text, 2, '0'), 32), 'hex'),
 			jsonb_build_object('LogicalTime', logical_time),

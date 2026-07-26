@@ -26,10 +26,50 @@ func ApplyTradingWithReceipts(
 	action TradingAction,
 	receipts ReceiptLookup,
 ) (State, Decision, error) {
+	return applyTradingWithReceiptsAtDecisionHashVersion(
+		state,
+		input,
+		action,
+		receipts,
+		CurrentDecisionHashVersion,
+	)
+}
+
+// ApplyTradingWithReceiptsAtDecisionHashVersion replays a durable historical
+// receipt using the decision semantics recorded with that receipt.
+func ApplyTradingWithReceiptsAtDecisionHashVersion(
+	state State,
+	input InputEnvelope,
+	action TradingAction,
+	receipts ReceiptLookup,
+	decisionHashVersion uint32,
+) (State, Decision, error) {
+	return applyTradingWithReceiptsAtDecisionHashVersion(
+		state,
+		input,
+		action,
+		receipts,
+		decisionHashVersion,
+	)
+}
+
+func applyTradingWithReceiptsAtDecisionHashVersion(
+	state State,
+	input InputEnvelope,
+	action TradingAction,
+	receipts ReceiptLookup,
+	decisionHashVersion uint32,
+) (State, Decision, error) {
 	if _, found, conflict := lookupReceipt(state, receipts, input); found || conflict != nil {
-		return applyWithReceipts(state, input, receipts, func(state State) (State, Decision) {
-			return state, Decision{}
-		})
+		return applyWithReceiptsAtDecisionHashVersion(
+			state,
+			input,
+			receipts,
+			func(state State) (State, Decision) {
+				return state, Decision{}
+			},
+			decisionHashVersion,
+		)
 	}
 	payload, err := EncodeTradingAction(action)
 	if err != nil {
@@ -67,9 +107,15 @@ func ApplyTradingWithReceipts(
 			),
 		})
 	}
-	return applyWithReceipts(state, input, receipts, func(state State) (State, Decision) {
-		return applyTradingAction(state, input, action)
-	})
+	return applyWithReceiptsAtDecisionHashVersion(
+		state,
+		input,
+		receipts,
+		func(state State) (State, Decision) {
+			return applyTradingAction(state, input, action)
+		},
+		decisionHashVersion,
+	)
 }
 
 // TradingActionAllowedForInputKind enforces producer authority at the

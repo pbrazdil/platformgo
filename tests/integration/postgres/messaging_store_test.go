@@ -317,7 +317,7 @@ func TestOutboxRuntimeRoleExecutesProductionClaimAndRepublish(t *testing.T) {
 			business_input_hash, business_input_hash_version
 		) VALUES (
 			7, $1, 1, 1,
-			1, decode(repeat('11', 32), 'hex'), 1,
+			1, decode(repeat('11', 32), 'hex'), 3,
 			decode(repeat('12', 32), 'hex'),
 			decode(repeat('13', 32), 'hex'), '{}', '{}',
 			decode(repeat('14', 32), 'hex'), 1

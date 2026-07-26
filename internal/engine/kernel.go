@@ -77,6 +77,22 @@ func ApplyDuplicateDelivery(
 	input InputEnvelope,
 	original Receipt,
 ) (State, Decision, error) {
+	return ApplyDuplicateDeliveryAtDecisionHashVersion(
+		state,
+		input,
+		original,
+		CurrentDecisionHashVersion,
+	)
+}
+
+// ApplyDuplicateDeliveryAtDecisionHashVersion replays one historical decision
+// hash generation while preserving its original state-chain semantics.
+func ApplyDuplicateDeliveryAtDecisionHashVersion(
+	state State,
+	input InputEnvelope,
+	original Receipt,
+	decisionHashVersion uint32,
+) (State, Decision, error) {
 	inputHash := hashInput(input)
 	if !state.ready {
 		return state, Decision{}, &Error{
@@ -129,18 +145,24 @@ func ApplyDuplicateDelivery(
 		ConfigurationVersion:    input.ConfigurationVersion,
 		InstrumentVersion:       input.InstrumentVersion,
 		InputHashVersion:        CurrentInputHashVersion,
-		DecisionHashVersion:     CurrentDecisionHashVersion,
+		DecisionHashVersion:     decisionHashVersion,
 		PreviousStateHash:       previousStateHash,
 		InputHash:               inputHash,
 		DuplicateOfDecisionHash: original.Decision.DecisionHash,
 		CommandResult:           original.Decision.CommandResult,
 	}
 	decision.EffectsHash = hashEffects(decision)
-	decision.DecisionHash = hashDecision(
+	decisionHash, decisionHashErr := hashDecisionAtVersion(
 		previousStateHash,
 		inputHash,
 		decision.EffectsHash,
+		decisionHashVersion,
 	)
+	if decisionHashErr != nil {
+		decisionHashErr.Sequence = input.StreamSequence
+		return halt(state, inputHash, decisionHashErr)
+	}
+	decision.DecisionHash = decisionHash
 	nextSequence := state.nextStreamSequence + 1
 	decision.NextStateHash = hashAcceptedState(
 		previousStateHash,
@@ -166,12 +188,29 @@ func applyWithReceipts(
 	receipts ReceiptLookup,
 	transition transition,
 ) (State, Decision, error) {
-	return applyWithSchemaVersion(
+	return applyWithReceiptsAtDecisionHashVersion(
+		state,
+		input,
+		receipts,
+		transition,
+		CurrentDecisionHashVersion,
+	)
+}
+
+func applyWithReceiptsAtDecisionHashVersion(
+	state State,
+	input InputEnvelope,
+	receipts ReceiptLookup,
+	transition transition,
+	decisionHashVersion uint32,
+) (State, Decision, error) {
+	return applyWithSchemaAndDecisionHashVersion(
 		state,
 		input,
 		receipts,
 		CurrentSchemaVersion,
 		transition,
+		decisionHashVersion,
 	)
 }
 
@@ -181,6 +220,24 @@ func applyWithSchemaVersion(
 	receipts ReceiptLookup,
 	currentSchemaVersion uint32,
 	transition transition,
+) (State, Decision, error) {
+	return applyWithSchemaAndDecisionHashVersion(
+		state,
+		input,
+		receipts,
+		currentSchemaVersion,
+		transition,
+		CurrentDecisionHashVersion,
+	)
+}
+
+func applyWithSchemaAndDecisionHashVersion(
+	state State,
+	input InputEnvelope,
+	receipts ReceiptLookup,
+	currentSchemaVersion uint32,
+	transition transition,
+	decisionHashVersion uint32,
 ) (State, Decision, error) {
 	recorded, found, conflict := lookupReceipt(state, receipts, input)
 	if conflict != nil {
@@ -258,6 +315,13 @@ func applyWithSchemaVersion(
 	previousState := state
 	previousStateHash := state.hash
 	state, decision := transition(state)
+	if decisionHashVersion >= 3 {
+		decision.BalanceChanges = completeBalanceProjectionChanges(
+			previousState,
+			state,
+			decision.BalanceChanges,
+		)
+	}
 	ledgerChanges, ledgerError := deriveLedgerChanges(
 		previousState,
 		input,
@@ -275,11 +339,20 @@ func applyWithSchemaVersion(
 	decision.ConfigurationVersion = input.ConfigurationVersion
 	decision.InstrumentVersion = input.InstrumentVersion
 	decision.InputHashVersion = CurrentInputHashVersion
-	decision.DecisionHashVersion = CurrentDecisionHashVersion
+	decision.DecisionHashVersion = decisionHashVersion
 	decision.PreviousStateHash = previousStateHash
 	decision.InputHash = inputHash
 	decision.EffectsHash = hashEffects(decision)
-	decisionHash := hashDecision(previousStateHash, inputHash, decision.EffectsHash)
+	decisionHash, decisionHashErr := hashDecisionAtVersion(
+		previousStateHash,
+		inputHash,
+		decision.EffectsHash,
+		decisionHashVersion,
+	)
+	if decisionHashErr != nil {
+		decisionHashErr.Sequence = input.StreamSequence
+		return halt(previousState, inputHash, decisionHashErr)
+	}
 	nextSequence := state.nextStreamSequence + 1
 	nextStateHash := hashAcceptedState(previousStateHash, inputHash, decisionHash, nextSequence)
 	decision.DecisionHash = decisionHash
@@ -431,6 +504,58 @@ func cloneDecision(decision Decision) Decision {
 	decision.PositionChanges = append([]PositionSnapshot(nil), decision.PositionChanges...)
 	decision.Events = append([]DomainEvent(nil), decision.Events...)
 	return decision
+}
+
+// completeBalanceProjectionChanges ensures every accepted input durably
+// projects every computable change to exact used, free, and equity state, even
+// when account total is unchanged. A missing mark leaves the last projection
+// intact while the risk boundary remains fail closed. Transition-specific
+// balance effects are preserved in their original order; a final snapshot is
+// appended only when none records the resulting projection.
+func completeBalanceProjectionChanges(
+	previous State,
+	next State,
+	changes []BalanceSnapshot,
+) []BalanceSnapshot {
+	for _, balance := range next.trading.balances {
+		accountID := balance.accountID
+		currency := balance.total.Currency().Code()
+		nextSnapshot, ok := next.Balance(accountID, currency)
+		if !ok {
+			continue
+		}
+		existed := false
+		for _, balance := range previous.trading.balances {
+			if balance.accountID == accountID &&
+				balance.total.Currency().Code() == currency {
+				existed = true
+				break
+			}
+		}
+		previousSnapshot, projected := previous.Balance(accountID, currency)
+		if existed && projected && previousSnapshot == nextSnapshot {
+			continue
+		}
+		if lastBalanceChange(changes, accountID, currency) == nextSnapshot {
+			continue
+		}
+		changes = append(changes, nextSnapshot)
+	}
+	return changes
+}
+
+func lastBalanceChange(
+	changes []BalanceSnapshot,
+	accountID string,
+	currency string,
+) BalanceSnapshot {
+	for index := len(changes) - 1; index >= 0; index-- {
+		if changes[index].AccountID == accountID &&
+			changes[index].Currency == currency {
+			return changes[index]
+		}
+	}
+	return BalanceSnapshot{}
 }
 
 func deriveLedgerChanges(

@@ -63,7 +63,7 @@ func TestFundingHistoryQueriesUseKeysetIndexes(t *testing.T) {
 			1,
 			1,
 			decode(repeat('01', 32), 'hex'),
-			2,
+			3,
 			decode(repeat('02', 32), 'hex'),
 			decode(repeat('03', 32), 'hex'),
 			jsonb_build_object(

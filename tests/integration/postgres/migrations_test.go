@@ -1295,7 +1295,7 @@ const testInputReceiptInsertSQL = `
 		1,
 		1,
 		decode(repeat('00', 32), 'hex'),
-		1,
+		3,
 		decode(repeat('01', 32), 'hex'),
 		decode(repeat('02', 32), 'hex'),
 		'{}',
@@ -1827,17 +1827,17 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 			resulting_state_hash, envelope, decision
 		) VALUES
 			(7, '019f9460-4b36-4e9b-8f44-682611f70021', 1, 1,
-			 1, decode(repeat('21', 32), 'hex'), 1,
+			 1, decode(repeat('21', 32), 'hex'), 3,
 			 decode(repeat('31', 32), 'hex'), 1,
 			 decode(repeat('41', 32), 'hex'),
 			 decode(repeat('51', 32), 'hex'), '{}', '{}'),
 			(7, '019f9460-4b36-4e9b-8f44-682611f70022', 2, 1,
-			 1, decode(repeat('22', 32), 'hex'), 1,
+			 1, decode(repeat('22', 32), 'hex'), 3,
 			 decode(repeat('32', 32), 'hex'), 1,
 			 decode(repeat('42', 32), 'hex'),
 			 decode(repeat('52', 32), 'hex'), '{}', '{}'),
 			(7, '019f9460-4b36-4e9b-8f44-682611f70023', 3, 1,
-			 1, decode(repeat('23', 32), 'hex'), 1,
+			 1, decode(repeat('23', 32), 'hex'), 3,
 			 decode(repeat('33', 32), 'hex'), 1,
 			 decode(repeat('43', 32), 'hex'),
 			 decode(repeat('53', 32), 'hex'), '{}', '{}');
@@ -2023,7 +2023,7 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 				business_input_hash, resulting_state_hash, envelope, decision
 			) VALUES (
 				9, '019f9460-4b36-4e9b-8f44-682611f70101', 1, 1,
-				1, decode(repeat('93', 32), 'hex'), 1,
+				1, decode(repeat('93', 32), 'hex'), 3,
 				decode(repeat('94', 32), 'hex'), 1,
 				decode(repeat('95', 32), 'hex'),
 				decode(repeat('92', 32), 'hex'), '{}', '{}'
@@ -3528,6 +3528,223 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 	}
 }
 
+func TestBalanceProjectionHashV3MigrationGuardsHistoricalOrderReceipts(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	execReceipt := func(query string) error {
+		connection, err := pool.Acquire(ctx)
+		if err != nil {
+			return err
+		}
+		defer connection.Release()
+		if _, err := connection.Exec(ctx, `
+			SELECT set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				false
+			)`); err != nil {
+			return err
+		}
+		_, err = connection.Exec(ctx, query)
+		return err
+	}
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("apply pre-v3 schema: %v", err)
+	}
+	if err := execReceipt(`
+		INSERT INTO engine.input_receipts (
+			shard_id, input_id, stream_sequence, schema_version,
+			input_hash_version, input_hash, decision_hash_version,
+			decision_hash, resulting_state_hash, envelope, decision,
+			business_input_hash, business_input_hash_version
+		) VALUES (
+			8,
+			'00000000-0000-4000-8000-000000000801',
+			1,
+			1,
+			1,
+			decode(repeat('01', 32), 'hex'),
+			2,
+			decode(repeat('02', 32), 'hex'),
+			decode(repeat('03', 32), 'hex'),
+			'{}',
+			'{"OrderChanges":[{"OrderID":"legacy-order"}]}',
+			decode(repeat('04', 32), 'hex'),
+			1
+		)`); err != nil {
+		t.Fatalf("seed pre-v3 order receipt: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	err := current.Migrate(ctx)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("pre-v3 order receipt migration error = %v, want 55000", err)
+	}
+	var (
+		lastMigration string
+		receiptCount  int
+		triggerExists bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			(SELECT count(*) FROM engine.input_receipts),
+			EXISTS (
+				SELECT 1
+				  FROM pg_trigger
+				 WHERE tgname =
+				       'input_receipts_require_balance_projection_hash_v3'
+				   AND NOT tgisinternal
+			)`,
+	).Scan(&lastMigration, &receiptCount, &triggerExists); err != nil {
+		t.Fatalf("inspect guarded migration rollback: %v", err)
+	}
+	if lastMigration != "20260726000700_phase3_user_api_keys.up.sql" ||
+		receiptCount != 1 ||
+		triggerExists {
+		t.Fatalf(
+			"guarded migration state = last %q receipts %d trigger %t",
+			lastMigration,
+			receiptCount,
+			triggerExists,
+		)
+	}
+
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("reapply pre-v3 schema: %v", err)
+	}
+	if err := execReceipt(`
+		INSERT INTO engine.input_receipts (
+			shard_id, input_id, stream_sequence, schema_version,
+			input_hash_version, input_hash, decision_hash_version,
+			decision_hash, resulting_state_hash, envelope, decision,
+			business_input_hash, business_input_hash_version
+		) VALUES (
+			8,
+			'00000000-0000-4000-8000-000000000802',
+			1,
+			1,
+			1,
+			decode(repeat('11', 32), 'hex'),
+			2,
+			decode(repeat('12', 32), 'hex'),
+			decode(repeat('13', 32), 'hex'),
+			'{}',
+			'{"OrderChanges":[]}',
+			decode(repeat('14', 32), 'hex'),
+			1
+		)`); err != nil {
+		t.Fatalf("seed safe pre-v3 receipt: %v", err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("migrate safe pre-v3 history: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify v3 authority migration: %v", err)
+	}
+	err = execReceipt(`
+		INSERT INTO engine.input_receipts (
+			shard_id, input_id, stream_sequence, schema_version,
+			input_hash_version, input_hash, decision_hash_version,
+			decision_hash, resulting_state_hash, envelope, decision,
+			business_input_hash, business_input_hash_version
+		) VALUES (
+			8,
+			'00000000-0000-4000-8000-000000000803',
+			2,
+			1,
+			1,
+			decode(repeat('21', 32), 'hex'),
+			2,
+			decode(repeat('22', 32), 'hex'),
+			decode(repeat('23', 32), 'hex'),
+			'{}',
+			'{"OrderChanges":[]}',
+			decode(repeat('24', 32), 'hex'),
+			1
+		)`)
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("old writer error = %v, want 55000", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
+func TestBalanceProjectionHashV3MigrationUsesBoundedLockAndRetries(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("apply pre-v3 schema: %v", err)
+	}
+	lockingTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin receipt lock: %v", err)
+	}
+	defer func() { _ = lockingTx.Rollback(context.Background()) }()
+	if _, err := lockingTx.Exec(
+		ctx,
+		"LOCK TABLE engine.input_receipts IN ROW EXCLUSIVE MODE",
+	); err != nil {
+		t.Fatalf("lock receipts: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	startedAt := time.Now()
+	err = current.Migrate(ctx)
+	elapsed := time.Since(startedAt)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55P03" {
+		t.Fatalf("contended v3 migration error = %v, want 55P03", err)
+	}
+	if elapsed < time.Second || elapsed > 4*time.Second {
+		t.Fatalf("bounded v3 lock wait = %s, want approximately 2s", elapsed)
+	}
+	var lastMigration string
+	if err := pool.QueryRow(ctx, `
+		SELECT max(filename)
+		  FROM engine.schema_migrations`,
+	).Scan(&lastMigration); err != nil {
+		t.Fatalf("read rolled-back migration history: %v", err)
+	}
+	if lastMigration != "20260726000700_phase3_user_api_keys.up.sql" {
+		t.Fatalf("last migration after contention = %q", lastMigration)
+	}
+	if err := lockingTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry v3 migration: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify retried v3 migration: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
 func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	var count int
@@ -3539,9 +3756,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 19 ||
+	if count != 20 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260726000700_phase3_user_api_keys.up.sql" {
+		last != "20260726000800_phase3_balance_projection_hash_v3.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,
@@ -4280,7 +4497,7 @@ func assertReceiptIdentityConstraints(t *testing.T, pool *pgxpool.Pool) {
 			business_input_hash_version, decision_hash_version,
 			decision_hash, resulting_state_hash, envelope, decision
 		) VALUES (7, $1, $2, 1, 1, decode(repeat('01', 32), 'hex'),
-		          decode(repeat('04', 32), 'hex'), 1, 2,
+		          decode(repeat('04', 32), 'hex'), 1, 3,
 		          decode(repeat('02', 32), 'hex'), decode(repeat('03', 32), 'hex'),
 		          '{}'::jsonb, '{}'::jsonb)`
 	inputID := "019f9460-4b36-4e9b-8f44-682611f7ee01"
