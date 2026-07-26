@@ -87,6 +87,11 @@ jobs:
       PLATFORMGO_TEST_CENTRIFUGO_TOKEN_SECRET: phase3-ci-token-secret-0123456789abcdef
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Fetch pinned v3 upgrade artifact
+        run: |
+          v3_revision=2021865d18393bcadf8ed4eae8632295caba2238
+          git fetch --no-tags --depth=1 origin "$v3_revision"
+          test "$(git rev-parse "$v3_revision^{commit}")" = "$v3_revision"
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         if: ${{ hashFiles('go.mod') != '' }}
         with:
@@ -153,6 +158,11 @@ jobs:
       PLATFORMGO_TEST_CENTRIFUGO_TOKEN_SECRET: phase3-ci-token-secret-0123456789abcdef
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Fetch pinned v3 upgrade artifact
+        run: |
+          v3_revision=2021865d18393bcadf8ed4eae8632295caba2238
+          git fetch --no-tags --depth=1 origin "$v3_revision"
+          test "$(git rev-parse "$v3_revision^{commit}")" = "$v3_revision"
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         if: ${{ hashFiles('go.mod') != '' }}
         with:
