@@ -39,12 +39,27 @@ type IdentityRecord struct {
 	PasswordHash string
 }
 
+// AccountRecord is the durable internal account summary loaded for one user.
+type AccountRecord struct {
+	AccountID        string
+	Login            int64
+	UserID           string
+	BaseCurrency     string
+	MarginMode       string
+	OmsMode          string
+	MarketVenue      string
+	PermittedClasses []string
+	Status           string
+	CreatedAt        time.Time
+}
+
 // IdentityStore is the durable identity boundary.
 type IdentityStore interface {
 	UserByLogin(context.Context, string) (IdentityRecord, error)
 	UserByID(context.Context, string) (IdentityRecord, error)
 	BrokerUserByID(context.Context, string, string) (IdentityRecord, error)
 	UserAccounts(context.Context, string) ([]string, error)
+	AccountsByUser(context.Context, string) ([]AccountRecord, error)
 	BrokerUserAccounts(context.Context, string, string) ([]string, error)
 	CreateBrokerUser(
 		context.Context,
@@ -196,6 +211,90 @@ func (identity *Identity) Profile(
 	return edge.UserProfile{
 		UserID: record.UserID, Login: record.Login, Email: record.Email,
 		Status: "active",
+	}, nil
+}
+
+// MyAccounts returns complete summaries for only the authenticated user.
+func (identity *Identity) MyAccounts(
+	ctx context.Context,
+	principal edge.Principal,
+) ([]edge.MyAccountView, error) {
+	records, err := identity.store.AccountsByUser(ctx, principal.Subject)
+	if err != nil {
+		return nil, fmt.Errorf("identity accounts: %w", err)
+	}
+	accounts := make([]edge.MyAccountView, 0, len(records))
+	for _, record := range records {
+		account, err := clientAccountSummary(record)
+		if err != nil {
+			return nil, fmt.Errorf("identity accounts: %w", err)
+		}
+		accounts = append(accounts, account)
+	}
+	return accounts, nil
+}
+
+func clientAccountSummary(record AccountRecord) (edge.MyAccountView, error) {
+	normalized := func(kind, value string, allowed ...string) (string, error) {
+		for _, candidate := range allowed {
+			if value == candidate {
+				return strings.ToLower(value), nil
+			}
+		}
+		return "", fmt.Errorf("invalid %s %q", kind, value)
+	}
+	status, err := normalized(
+		"account status",
+		record.Status,
+		"PENDING",
+		"ACTIVE",
+		"CLOSE_ONLY",
+		"FROZEN",
+		"READ_ONLY",
+		"SUSPENDED",
+		"CLOSED",
+	)
+	if err != nil {
+		return edge.MyAccountView{}, err
+	}
+	marginMode, err := normalized(
+		"account margin mode",
+		record.MarginMode,
+		"CROSS",
+		"ISOLATED",
+	)
+	if err != nil {
+		return edge.MyAccountView{}, err
+	}
+	omsMode, err := normalized(
+		"account OMS mode",
+		record.OmsMode,
+		"NETTING",
+		"HEDGING",
+	)
+	if err != nil {
+		return edge.MyAccountView{}, err
+	}
+	if record.MarketVenue != "HYPERLIQUID" ||
+		len(record.PermittedClasses) != 1 ||
+		record.PermittedClasses[0] != "CRYPTOCURRENCY" {
+		return edge.MyAccountView{}, fmt.Errorf(
+			"invalid account market compatibility %q/%v",
+			record.MarketVenue,
+			record.PermittedClasses,
+		)
+	}
+	return edge.MyAccountView{
+		AccountID:        record.AccountID,
+		Login:            record.Login,
+		UserID:           record.UserID,
+		BaseCurrency:     record.BaseCurrency,
+		MarginMode:       marginMode,
+		OmsMode:          omsMode,
+		MarketVenue:      "hyperliquid",
+		PermittedClasses: []string{"perps"},
+		Status:           status,
+		CreatedAt:        record.CreatedAt.UTC().Format(time.RFC3339Nano),
 	}, nil
 }
 

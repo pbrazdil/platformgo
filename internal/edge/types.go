@@ -143,6 +143,20 @@ type UserProfile struct {
 	Status string `json:"status"`
 }
 
+// MyAccountView is the frozen client-visible account summary.
+type MyAccountView struct {
+	AccountID        string   `json:"accountId"`
+	Login            int64    `json:"login"`
+	UserID           string   `json:"userId"`
+	BaseCurrency     string   `json:"baseCurrency"`
+	MarginMode       string   `json:"marginMode"`
+	OmsMode          string   `json:"omsMode"`
+	MarketVenue      string   `json:"marketVenue"`
+	PermittedClasses []string `json:"permittedClasses"`
+	Status           string   `json:"status"`
+	CreatedAt        string   `json:"createdAt"`
+}
+
 // BrokerUserRequest is the broker identity-convergence request.
 type BrokerUserRequest struct {
 	Login string `json:"login"`
@@ -194,6 +208,7 @@ type BrokerTokenResponse struct {
 type IdentityService interface {
 	Login(context.Context, LoginRequest) (LoginResponse, error)
 	Profile(context.Context, Principal) (UserProfile, error)
+	MyAccounts(context.Context, Principal) ([]MyAccountView, error)
 	BrokerEcho(
 		context.Context,
 		Principal,

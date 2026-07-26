@@ -143,6 +143,17 @@ func (testIdentity) Profile(
 	}, nil
 }
 
+func (testIdentity) MyAccounts(
+	_ context.Context,
+	principal Principal,
+) ([]MyAccountView, error) {
+	return []MyAccountView{{
+		AccountID: "urn:xb:account:test",
+		UserID:    principal.Subject,
+		Status:    "active",
+	}}, nil
+}
+
 func (testIdentity) BrokerEcho(
 	_ context.Context,
 	principal Principal,

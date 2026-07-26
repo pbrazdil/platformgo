@@ -2599,6 +2599,386 @@ func TestMigratorRejectsDisposableEightFileHistoryWithoutChangingData(t *testing
 	}
 }
 
+func TestAccountSummaryMigrationUsesBoundedLockAndPreservesExistingAccounts(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000300_phase3_fill_filter_read_model.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 43); err != nil {
+		t.Fatalf("apply previous account schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:summary-upgrade', 'HEDGING')`,
+	); err != nil {
+		t.Fatalf("seed existing account: %v", err)
+	}
+
+	lockingTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin account-summary lock: %v", err)
+	}
+	defer func() { _ = lockingTx.Rollback(context.Background()) }()
+	if _, err := lockingTx.Exec(ctx, `
+		SELECT account_id
+		  FROM trading.accounts
+		 WHERE account_id = 'urn:xb:account:summary-upgrade'`,
+	); err != nil {
+		t.Fatalf("hold account read lock: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	startedAt := time.Now()
+	err = current.Migrate(ctx)
+	elapsed := time.Since(startedAt)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55P03" {
+		t.Fatalf(
+			"contended account-summary upgrade error = %v, want SQLSTATE 55P03",
+			err,
+		)
+	}
+	if elapsed < 4*time.Second || elapsed > 8*time.Second {
+		t.Fatalf(
+			"bounded account-summary lock wait = %s, want approximately 5s",
+			elapsed,
+		)
+	}
+	var (
+		lastMigration    string
+		statusExists     bool
+		marginModeExists bool
+		accountCount     int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			EXISTS (
+				SELECT 1
+				  FROM information_schema.columns
+				 WHERE table_schema = 'trading'
+				   AND table_name = 'accounts'
+				   AND column_name = 'status'
+			),
+			EXISTS (
+				SELECT 1
+				  FROM information_schema.columns
+				 WHERE table_schema = 'trading'
+				   AND table_name = 'accounts'
+				   AND column_name = 'margin_mode'
+			),
+			(SELECT count(*) FROM trading.accounts)`,
+	).Scan(
+		&lastMigration,
+		&statusExists,
+		&marginModeExists,
+		&accountCount,
+	); err != nil {
+		t.Fatalf("inspect rolled-back account-summary migration: %v", err)
+	}
+	if lastMigration != "20260726000300_phase3_fill_filter_read_model.up.sql" ||
+		statusExists ||
+		marginModeExists ||
+		accountCount != 1 {
+		t.Fatalf(
+			"contended account-summary state = last %q status %t margin %t accounts %d",
+			lastMigration,
+			statusExists,
+			marginModeExists,
+			accountCount,
+		)
+	}
+
+	if err := lockingTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	columnsOnly := platformpostgres.NewMigrator(
+		pool,
+		migrationFilesThrough(
+			t,
+			"20260726000400_phase3_account_summary_read_model.up.sql",
+		),
+	)
+	if err := columnsOnly.Migrate(ctx); err != nil {
+		t.Fatalf("retry account-summary column phase: %v", err)
+	}
+	var constraintCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM pg_constraint
+		 WHERE conrelid = 'trading.accounts'::regclass
+		   AND conname IN (
+				'accounts_status_check',
+				'accounts_margin_mode_check'
+		   )`,
+	).Scan(&constraintCount); err != nil {
+		t.Fatalf("inspect account-summary column phase: %v", err)
+	}
+	if constraintCount != 0 {
+		t.Fatalf(
+			"column phase installed %d account-summary constraints",
+			constraintCount,
+		)
+	}
+
+	constraintsOnly := platformpostgres.NewMigrator(
+		pool,
+		migrationFilesThrough(
+			t,
+			"20260726000500_phase3_account_summary_constraints.up.sql",
+		),
+	)
+	if err := constraintsOnly.Migrate(ctx); err != nil {
+		t.Fatalf("apply account-summary constraint phase: %v", err)
+	}
+	var unvalidatedCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM pg_constraint
+		 WHERE conrelid = 'trading.accounts'::regclass
+		   AND conname IN (
+				'accounts_status_check',
+				'accounts_margin_mode_check'
+		   )
+		   AND NOT convalidated`,
+	).Scan(&unvalidatedCount); err != nil {
+		t.Fatalf("inspect account-summary constraint phase: %v", err)
+	}
+	if unvalidatedCount != 2 {
+		t.Fatalf(
+			"unvalidated account-summary constraints = %d, want 2",
+			unvalidatedCount,
+		)
+	}
+
+	validationProbe, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin account-summary validation lock probe: %v", err)
+	}
+	if _, err := validationProbe.Exec(ctx, `
+		ALTER TABLE trading.accounts
+		VALIDATE CONSTRAINT accounts_status_check`,
+	); err != nil {
+		_ = validationProbe.Rollback(ctx)
+		t.Fatalf("validate status constraint in lock probe: %v", err)
+	}
+	var validationPID int32
+	if err := validationProbe.QueryRow(
+		ctx,
+		"SELECT pg_backend_pid()",
+	).Scan(&validationPID); err != nil {
+		_ = validationProbe.Rollback(ctx)
+		t.Fatalf("read validation lock probe PID: %v", err)
+	}
+	var validationLocks []string
+	if err := pool.QueryRow(ctx, `
+		SELECT array_agg(mode ORDER BY mode)
+		  FROM pg_locks
+		 WHERE pid = $1
+		   AND relation = 'trading.accounts'::regclass
+		   AND granted`,
+		validationPID,
+	).Scan(&validationLocks); err != nil {
+		_ = validationProbe.Rollback(ctx)
+		t.Fatalf("inspect validation locks: %v", err)
+	}
+	var hasShareUpdateExclusive bool
+	for _, mode := range validationLocks {
+		if mode == "AccessExclusiveLock" {
+			_ = validationProbe.Rollback(ctx)
+			t.Fatalf(
+				"validation retained ACCESS EXCLUSIVE: %v",
+				validationLocks,
+			)
+		}
+		hasShareUpdateExclusive = hasShareUpdateExclusive ||
+			mode == "ShareUpdateExclusiveLock"
+	}
+	if !hasShareUpdateExclusive {
+		_ = validationProbe.Rollback(ctx)
+		t.Fatalf(
+			"validation locks = %v, want SHARE UPDATE EXCLUSIVE",
+			validationLocks,
+		)
+	}
+	writeCtx, cancelWrite := context.WithTimeout(ctx, 2*time.Second)
+	var concurrentlyRead string
+	if err := pool.QueryRow(writeCtx, `
+		SELECT account_id
+		  FROM trading.accounts
+		 WHERE account_id = 'urn:xb:account:summary-upgrade'`,
+	).Scan(&concurrentlyRead); err != nil {
+		cancelWrite()
+		_ = validationProbe.Rollback(ctx)
+		t.Fatalf("ordinary read blocked by validation lock: %v", err)
+	}
+	var insertedStatus string
+	var insertedMarginMode string
+	if err := pool.QueryRow(writeCtx, `
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:summary-old-binary', 'NETTING')
+		RETURNING status, margin_mode`,
+	).Scan(&insertedStatus, &insertedMarginMode); err != nil {
+		cancelWrite()
+		_ = validationProbe.Rollback(ctx)
+		t.Fatalf("old-binary insert blocked by validation lock: %v", err)
+	}
+	cancelWrite()
+	if concurrentlyRead != "urn:xb:account:summary-upgrade" ||
+		insertedStatus != "ACTIVE" ||
+		insertedMarginMode != "CROSS" {
+		_ = validationProbe.Rollback(ctx)
+		t.Fatalf(
+			"concurrent validation access = read %q status %q margin %q",
+			concurrentlyRead,
+			insertedStatus,
+			insertedMarginMode,
+		)
+	}
+	if err := validationProbe.Rollback(ctx); err != nil {
+		t.Fatalf("rollback validation lock probe: %v", err)
+	}
+
+	validationBlocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin account-summary validation blocker: %v", err)
+	}
+	if _, err := validationBlocker.Exec(
+		ctx,
+		"LOCK TABLE trading.accounts IN SHARE MODE",
+	); err != nil {
+		_ = validationBlocker.Rollback(ctx)
+		t.Fatalf("lock account table against validation: %v", err)
+	}
+	validationStartedAt := time.Now()
+	err = current.Migrate(ctx)
+	validationElapsed := time.Since(validationStartedAt)
+	if !errors.As(err, &postgresError) || postgresError.Code != "55P03" {
+		_ = validationBlocker.Rollback(ctx)
+		t.Fatalf(
+			"contended account-summary validation error = %v, want SQLSTATE 55P03",
+			err,
+		)
+	}
+	if validationElapsed < 4*time.Second || validationElapsed > 8*time.Second {
+		_ = validationBlocker.Rollback(ctx)
+		t.Fatalf(
+			"bounded account-summary validation wait = %s, want approximately 5s",
+			validationElapsed,
+		)
+	}
+	var validationTip string
+	if err := pool.QueryRow(ctx, `
+		SELECT max(filename)
+		  FROM engine.schema_migrations`,
+	).Scan(&validationTip); err != nil {
+		_ = validationBlocker.Rollback(ctx)
+		t.Fatalf("inspect rolled-back validation history: %v", err)
+	}
+	if validationTip !=
+		"20260726000500_phase3_account_summary_constraints.up.sql" {
+		_ = validationBlocker.Rollback(ctx)
+		t.Fatalf(
+			"contended validation migration tip = %q",
+			validationTip,
+		)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM pg_constraint
+		 WHERE conrelid = 'trading.accounts'::regclass
+		   AND conname IN (
+				'accounts_status_check',
+				'accounts_margin_mode_check'
+		   )
+		   AND NOT convalidated`,
+	).Scan(&unvalidatedCount); err != nil {
+		_ = validationBlocker.Rollback(ctx)
+		t.Fatalf("inspect rolled-back validation constraints: %v", err)
+	}
+	if unvalidatedCount != 2 {
+		_ = validationBlocker.Rollback(ctx)
+		t.Fatalf(
+			"constraints after failed validation = %d unvalidated, want 2",
+			unvalidatedCount,
+		)
+	}
+	if err := validationBlocker.Rollback(ctx); err != nil {
+		t.Fatalf("release account-summary validation blocker: %v", err)
+	}
+
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("apply account-summary validation phase: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify retried account-summary upgrade: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+	var validatedCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM pg_constraint
+		 WHERE conrelid = 'trading.accounts'::regclass
+		   AND conname IN (
+				'accounts_status_check',
+				'accounts_margin_mode_check'
+		   )
+		   AND convalidated`,
+	).Scan(&validatedCount); err != nil {
+		t.Fatalf("inspect account-summary validation phase: %v", err)
+	}
+	if validatedCount != 2 {
+		t.Fatalf(
+			"validated account-summary constraints = %d, want 2",
+			validatedCount,
+		)
+	}
+
+	var statusValue string
+	var marginMode string
+	var omsMode string
+	if err := pool.QueryRow(ctx, `
+		SELECT status, margin_mode, oms_mode
+		  FROM trading.accounts
+		 WHERE account_id = 'urn:xb:account:summary-upgrade'`,
+	).Scan(&statusValue, &marginMode, &omsMode); err != nil {
+		t.Fatalf("read upgraded account: %v", err)
+	}
+	if statusValue != "ACTIVE" ||
+		marginMode != "CROSS" ||
+		omsMode != "HEDGING" {
+		t.Fatalf(
+			"upgraded account = status %q margin %q oms %q",
+			statusValue,
+			marginMode,
+			omsMode,
+		)
+	}
+	for name, statement := range map[string]string{
+		"invalid status": `
+			UPDATE trading.accounts
+			   SET status = 'active'
+			 WHERE account_id = 'urn:xb:account:summary-upgrade'`,
+		"invalid margin mode": `
+			UPDATE trading.accounts
+			   SET margin_mode = 'cross'
+			 WHERE account_id = 'urn:xb:account:summary-upgrade'`,
+	} {
+		if _, err := pool.Exec(ctx, statement); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+	}
+}
+
 func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	var count int
@@ -2610,9 +2990,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 15 ||
+	if count != 18 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260726000300_phase3_fill_filter_read_model.up.sql" {
+		last != "20260726000600_phase3_account_summary_constraint_validation.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,
