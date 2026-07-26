@@ -38,6 +38,9 @@ Validate at each boundary. Internal origin does not make a payload valid.
 - Shown-once credential creation requires a stable idempotency key. The exact
   encrypted HTTP response commits atomically with the credential and audit fact
   so a lost success response cannot leave an unrecoverable active credential.
+- Existing shown-once credential replay or request-hash conflict is resolved
+  before new-work rate rejection. Invalid new requests consume shared rate
+  capacity exactly once; replay and conflict consume no new-work capacity.
 - Replay-key rotation distributes future decryption material to every replica
   before activation and retains old keys through the replay TTL and cleanup
   horizon.

@@ -71,8 +71,11 @@ bounded owned cleanup loop. The additive migration grants the API role only
 execution of bounded authority functions, not direct table mutation. The
 shown-once endpoint requires a client-stable `Idempotency-Key`; this
 owner-approved safety deviation prevents an active credential whose only
-plaintext response was lost. Its governing decision is landed; implementation
-review and source-port acceptance remain separate follow-up gates.
+plaintext response was lost. The landed replay-order decision also requires
+exact committed replay and deterministic conflict resolution before new-work
+rate rejection, while invalid new requests remain rate-accounted exactly once.
+Implementation review and source-port acceptance remain separate follow-up
+gates.
 
 Phase 3 is not complete. The runtime must still:
 
