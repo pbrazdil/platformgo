@@ -10,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
+	"github.com/upcomers-org/platformgo/internal/engine"
+	"github.com/upcomers-org/platformgo/testkit"
 )
 
 // Ported from:
@@ -404,6 +406,240 @@ func TestFillsHistoryReadsAndPaginates(t *testing.T) {
 	if err == nil || len(invalid.Items) != 0 || invalid.Total != 0 {
 		t.Fatalf("invalid fill cursor page = %#v, error %v", invalid, err)
 	}
+}
+
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/trading/e2e_fills.rs:849
+//	test: fill_realized_isolates_hedged_legs_by_position
+//
+// Adaptations:
+//   - The deterministic Go engine creates and closes two real hedged legs;
+//     direct writes to the legacy fill mirror are removed.
+//   - Current Go position UUIDs remain the authoritative internal projection.
+//   - Opening fills retain the current Go absence of realized PnL rather than
+//     manufacturing a numeric zero.
+//
+// Assertions preserved:
+//   - The long close realizes its own exact positive PnL.
+//   - The short close realizes its own exact positive PnL.
+//   - Opening fills do not report realized profit from another leg.
+//   - Long and short fills retain distinct, correlatable position identities.
+//
+// Strengthening:
+//   - The same deterministic engine decisions are committed atomically to
+//     PostgreSQL and read through the least-privilege compatibility role.
+func TestFillRealizedIsolatesHedgedLegsByPosition(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).MigrateAndProvision(ctx, 7); err != nil {
+		t.Fatalf("migrate hedged fill realization database: %v", err)
+	}
+
+	store := platformpostgres.NewEngineStore(pool)
+	state := engine.NewState(7)
+	ids := testkit.NewShardIDSequence(7)
+	clock := testkit.NewManualClock(engine.NewLogicalTime(
+		time.Date(2026, time.July, 26, 18, 0, 0, 0, time.UTC),
+	))
+	apply := func(action engine.TradingAction) engine.Decision {
+		var decision engine.Decision
+		state, decision, _, _ = applyStoredTrading(
+			t,
+			pool,
+			store,
+			state,
+			ids,
+			clock,
+			action,
+			platformpostgres.ApplyOptions{},
+		)
+		return decision
+	}
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionConfigureInstrument,
+		ConfigureInstrument: &engine.ConfigureInstrument{
+			InstrumentID:            "BTC-PERP",
+			Revision:                1,
+			PriceScale:              2,
+			QuantityScale:           3,
+			SettlementCurrency:      "USDC",
+			SettlementCurrencyScale: 2,
+			InitialMarginRate:       "0.1",
+			MaintenanceMarginRate:   "0.05",
+			MaxLeverage:             "10",
+			MakerFeeRate:            "0",
+			TakerFeeRate:            "0",
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "urn:xb:account:hedged-fill-realization",
+			OmsMode:   engine.OmsModeHedging,
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionAdjustBalance,
+		AdjustBalance: &engine.AdjustBalance{
+			AccountID:     "urn:xb:account:hedged-fill-realization",
+			Currency:      "USDC",
+			CurrencyScale: 2,
+			Operation:     engine.BalanceOperationDeposit,
+			Amount:        "1000",
+		},
+	})
+	updateBook := func(mark, bid, ask string) {
+		apply(engine.TradingAction{
+			Kind: engine.TradingActionUpdateBook,
+			UpdateBook: &engine.UpdateBook{
+				InstrumentID: "BTC-PERP",
+				MarkPrice:    mark,
+				Bids: []engine.BookLevel{{
+					Price: bid, Quantity: "10",
+				}},
+				Asks: []engine.BookLevel{{
+					Price: ask, Quantity: "10",
+				}},
+			},
+		})
+	}
+	submit := func(
+		orderID engine.ID,
+		side engine.Side,
+		positionID engine.ID,
+		reduceOnly bool,
+	) engine.FillSnapshot {
+		decision := apply(engine.TradingAction{
+			Kind: engine.TradingActionSubmitOrder,
+			SubmitOrder: &engine.SubmitOrder{
+				OrderID:      orderID,
+				AccountID:    "urn:xb:account:hedged-fill-realization",
+				InstrumentID: "BTC-PERP",
+				Side:         side,
+				Type:         engine.OrderTypeMarket,
+				TimeInForce:  engine.TimeInForceGTC,
+				Quantity:     "1",
+				ReduceOnly:   reduceOnly,
+				PositionID:   positionID,
+			},
+		})
+		if len(decision.Fills) != 1 {
+			t.Fatalf(
+				"order %s decision = %#v, want one fill",
+				orderID,
+				decision,
+			)
+		}
+		return decision.Fills[0]
+	}
+
+	updateBook("100", "100", "101")
+	longOpen := submit(
+		engine.IDFromSequence(engine.ID{}, 4101),
+		engine.SideBuy,
+		engine.ID{},
+		false,
+	)
+	shortOpen := submit(
+		engine.IDFromSequence(engine.ID{}, 4102),
+		engine.SideSell,
+		engine.ID{},
+		false,
+	)
+	if longOpen.PositionID == shortOpen.PositionID {
+		t.Fatalf(
+			"hedged opening fills share position %s",
+			longOpen.PositionID,
+		)
+	}
+
+	updateBook("151", "151", "152")
+	longClose := submit(
+		engine.IDFromSequence(engine.ID{}, 4103),
+		engine.SideSell,
+		longOpen.PositionID,
+		true,
+	)
+	updateBook("70", "69", "70")
+	shortClose := submit(
+		engine.IDFromSequence(engine.ID{}, 4104),
+		engine.SideBuy,
+		shortOpen.PositionID,
+		true,
+	)
+
+	apiPool := runtimeRoleLoginPool(
+		t,
+		pool,
+		"platformgo_fill_hedged_realization_api_login",
+		"platformgo_api",
+	)
+	page, err := platformpostgres.NewCompatibilityStore(apiPool).
+		FilterFillExecutions(
+			ctx,
+			"urn:xb:account:hedged-fill-realization",
+			platformpostgres.FillExecutionFilter{Limit: 10},
+		)
+	if err != nil {
+		t.Fatalf("read hedged fill realization: %v", err)
+	}
+	if len(page.Items) != 4 || page.Total != 4 {
+		t.Fatalf("hedged fill page = %#v, want four fills", page)
+	}
+	byID := make(map[string]struct {
+		positionID  string
+		realizedPnL *string
+	}, len(page.Items))
+	for _, fill := range page.Items {
+		byID[fill.FillID] = struct {
+			positionID  string
+			realizedPnL *string
+		}{
+			positionID:  fill.PositionID,
+			realizedPnL: fill.RealizedPnL,
+		}
+	}
+	assertFill := func(
+		fill engine.FillSnapshot,
+		wantPositionID string,
+		wantRealizedPnL *string,
+	) {
+		t.Helper()
+		got, ok := byID[fill.FillID.String()]
+		if !ok {
+			t.Fatalf("fill %s missing from compatibility page", fill.FillID)
+		}
+		if got.positionID != wantPositionID {
+			t.Fatalf(
+				"fill %s position = %q, want %q",
+				fill.FillID,
+				got.positionID,
+				wantPositionID,
+			)
+		}
+		if (got.realizedPnL == nil) != (wantRealizedPnL == nil) ||
+			(got.realizedPnL != nil &&
+				*got.realizedPnL != *wantRealizedPnL) {
+			t.Fatalf(
+				"fill %s realized PnL = %v, want %v",
+				fill.FillID,
+				got.realizedPnL,
+				wantRealizedPnL,
+			)
+		}
+	}
+	longProfit := "50"
+	shortProfit := "30"
+	assertFill(longOpen, longOpen.PositionID.String(), nil)
+	assertFill(shortOpen, shortOpen.PositionID.String(), nil)
+	assertFill(longClose, longOpen.PositionID.String(), &longProfit)
+	assertFill(shortClose, shortOpen.PositionID.String(), &shortProfit)
 }
 
 // Ported from:
