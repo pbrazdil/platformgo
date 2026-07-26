@@ -1289,8 +1289,10 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 			SELECT
 				fill.fill_id,
 				fill.order_id,
+				fill.position_id,
 				fill.side,
 				fill.position_effect,
+				fill.realized_pnl,
 				fill.logical_time
 			  FROM trading.fills AS fill
 			 WHERE fill.account_id = $1
@@ -1310,8 +1312,10 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 		SELECT
 			page.fill_id::text,
 			page.order_id::text,
+			page.position_id::text,
 			page.side,
 			page.position_effect,
+			trim_scale(page.realized_pnl)::text,
 			page.logical_time,
 			filtered_total.total
 		  FROM filtered_total
@@ -1333,8 +1337,10 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 			SELECT
 				fill.fill_id,
 				fill.order_id,
+				fill.position_id,
 				fill.side,
 				fill.position_effect,
+				fill.realized_pnl,
 				fill.logical_time
 			  FROM trading.fills AS fill
 			 WHERE fill.account_id = $1
@@ -1354,8 +1360,10 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 		SELECT
 			page.fill_id::text,
 			page.order_id::text,
+			page.position_id::text,
 			page.side,
 			page.position_effect,
+			trim_scale(page.realized_pnl)::text,
 			page.logical_time,
 			filtered_total.total
 		  FROM filtered_total
@@ -1389,8 +1397,10 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 			SELECT
 				fill.fill_id,
 				fill.order_id,
+				fill.position_id,
 				fill.side,
 				fill.position_effect,
+				fill.realized_pnl,
 				fill.logical_time
 			  FROM trading.fills AS fill
 			 WHERE fill.account_id = $1
@@ -1409,8 +1419,10 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 		SELECT
 			page.fill_id::text,
 			page.order_id::text,
+			page.position_id::text,
 			page.side,
 			page.position_effect,
+			trim_scale(page.realized_pnl)::text,
 			page.logical_time,
 			filtered_total.total
 		  FROM filtered_total

@@ -1006,8 +1006,10 @@ func (store *CompatibilityStore) LatestFillExecution(
 		SELECT
 			fill.fill_id::text,
 			fill.order_id::text,
+			fill.position_id::text,
 			fill.side,
 			fill.position_effect,
+			trim_scale(fill.realized_pnl)::text,
 			fill.logical_time
 		  FROM trading.fills AS fill
 		 WHERE fill.account_id = $1
@@ -1017,8 +1019,10 @@ func (store *CompatibilityStore) LatestFillExecution(
 	).Scan(
 		&view.FillID,
 		&view.OrderID,
+		&view.PositionID,
 		&view.Side,
 		&view.TradeType,
+		&view.RealizedPnL,
 		&logicalTime,
 	); err != nil {
 		return edge.FillExecutionView{}, fmt.Errorf("read latest fill execution: %w", err)
@@ -1101,8 +1105,10 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			SELECT
 				fill.fill_id,
 				fill.order_id,
+				fill.position_id,
 				fill.side,
 				fill.position_effect,
+				fill.realized_pnl,
 				fill.logical_time
 			  FROM trading.fills AS fill
 			 WHERE fill.account_id = $1
@@ -1121,8 +1127,10 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		SELECT
 			page.fill_id::text,
 			page.order_id::text,
+			page.position_id::text,
 			page.side,
 			page.position_effect,
+			trim_scale(page.realized_pnl)::text,
 			page.logical_time,
 			filtered_total.total
 		  FROM filtered_total
@@ -1141,8 +1149,10 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				SELECT
 					fill.fill_id,
 					fill.order_id,
+					fill.position_id,
 					fill.side,
 					fill.position_effect,
+					fill.realized_pnl,
 					fill.logical_time
 				  FROM trading.fills AS fill
 				 WHERE fill.account_id = $1
@@ -1162,8 +1172,10 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			SELECT
 				page.fill_id::text,
 				page.order_id::text,
+				page.position_id::text,
 				page.side,
 				page.position_effect,
+				trim_scale(page.realized_pnl)::text,
 				page.logical_time,
 				filtered_total.total
 			  FROM filtered_total
@@ -1176,8 +1188,10 @@ func (store *CompatibilityStore) FilterFillExecutions(
 					SELECT
 						fill.fill_id,
 						fill.order_id,
+						fill.position_id,
 						fill.side,
 						fill.position_effect,
+						fill.realized_pnl,
 						fill.logical_time
 					  FROM trading.fills AS fill
 					 WHERE fill.account_id = $1
@@ -1197,8 +1211,10 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				SELECT
 					page.fill_id::text,
 					page.order_id::text,
+					page.position_id::text,
 					page.side,
 					page.position_effect,
+					trim_scale(page.realized_pnl)::text,
 					page.logical_time,
 					filtered_total.total
 				  FROM filtered_total
@@ -1227,15 +1243,19 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		var (
 			fillID         *string
 			orderID        *string
+			positionID     *string
 			side           *string
 			positionEffect *string
+			realizedPnL    *string
 			logicalTime    *int64
 		)
 		if err := rows.Scan(
 			&fillID,
 			&orderID,
+			&positionID,
 			&side,
 			&positionEffect,
+			&realizedPnL,
 			&logicalTime,
 			&total,
 		); err != nil {
@@ -1248,6 +1268,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			continue
 		}
 		if orderID == nil ||
+			positionID == nil ||
 			side == nil ||
 			positionEffect == nil ||
 			logicalTime == nil {
@@ -1257,8 +1278,10 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		}
 		row.view.FillID = *fillID
 		row.view.OrderID = *orderID
+		row.view.PositionID = *positionID
 		row.view.Side = *side
 		row.view.TradeType = *positionEffect
+		row.view.RealizedPnL = realizedPnL
 		row.logicalTime = *logicalTime
 		if err := validateFillTradeType(row.view.TradeType); err != nil {
 			return edge.FillExecutionPage{}, fmt.Errorf(
