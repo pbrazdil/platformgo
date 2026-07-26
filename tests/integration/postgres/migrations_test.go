@@ -508,6 +508,96 @@ func TestRealtimeMigrationUpgradesPopulatedPreviousSchema(t *testing.T) {
 	}
 }
 
+func TestRealtimeMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260725001000_phase3_api_revision_lock.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 29); err != nil {
+		t.Fatalf("apply previous schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO identity.users (user_id, login, normalized_login)
+		VALUES (
+			'urn:xb:user:realtime-lock-proof',
+			'realtime-lock-proof',
+			'realtime-lock-proof'
+		)`,
+	); err != nil {
+		t.Fatalf("seed previous-schema user: %v", err)
+	}
+	lockingTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lockingTx.Rollback(context.Background()) }()
+	if _, err := lockingTx.Exec(
+		ctx,
+		"LOCK TABLE identity.users IN ACCESS SHARE MODE",
+	); err != nil {
+		t.Fatalf("lock identity users: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	startedAt := time.Now()
+	err = current.Migrate(ctx)
+	elapsed := time.Since(startedAt)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55P03" {
+		t.Fatalf("contended realtime upgrade error = %v, want SQLSTATE 55P03", err)
+	}
+	if elapsed < 4*time.Second || elapsed > 8*time.Second {
+		t.Fatalf("bounded realtime lock wait = %s, want approximately 5s", elapsed)
+	}
+	var (
+		lastMigration  string
+		userPreserved  bool
+		realtimeExists bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			EXISTS (
+				SELECT 1
+				  FROM identity.users
+				 WHERE user_id = 'urn:xb:user:realtime-lock-proof'
+			),
+			to_regnamespace('realtime') IS NOT NULL`,
+	).Scan(&lastMigration, &userPreserved, &realtimeExists); err != nil {
+		t.Fatalf("inspect rolled-back realtime migration: %v", err)
+	}
+	if lastMigration != "20260725001000_phase3_api_revision_lock.up.sql" ||
+		!userPreserved ||
+		realtimeExists {
+		t.Fatalf(
+			"contended realtime migration state = last %q user %t realtime %t",
+			lastMigration,
+			userPreserved,
+			realtimeExists,
+		)
+	}
+
+	if err := lockingTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry uncontended realtime upgrade: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify retried realtime upgrade: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
 func TestRuntimeMigrationVerificationIsExactAndOldEngineIsFenced(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
