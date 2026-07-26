@@ -1010,6 +1010,7 @@ func (store *CompatibilityStore) LatestFillExecution(
 			fill.side,
 			fill.position_effect,
 			trim_scale(fill.realized_pnl)::text,
+			fill.settlement_currency,
 			fill.logical_time
 		  FROM trading.fills AS fill
 		 WHERE fill.account_id = $1
@@ -1023,6 +1024,7 @@ func (store *CompatibilityStore) LatestFillExecution(
 		&view.Side,
 		&view.TradeType,
 		&view.RealizedPnL,
+		&view.SettlementCurrency,
 		&logicalTime,
 	); err != nil {
 		return edge.FillExecutionView{}, fmt.Errorf("read latest fill execution: %w", err)
@@ -1031,6 +1033,11 @@ func (store *CompatibilityStore) LatestFillExecution(
 		return edge.FillExecutionView{}, fmt.Errorf(
 			"read latest fill execution: %w",
 			err,
+		)
+	}
+	if (view.RealizedPnL == nil) != (view.SettlementCurrency == nil) {
+		return edge.FillExecutionView{}, fmt.Errorf(
+			"read latest fill execution: incomplete realized PnL",
 		)
 	}
 	view.OrderID = "urn:xb:order:" + view.OrderID
@@ -1109,6 +1116,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				fill.side,
 				fill.position_effect,
 				fill.realized_pnl,
+				fill.settlement_currency,
 				fill.logical_time
 			  FROM trading.fills AS fill
 			 WHERE fill.account_id = $1
@@ -1131,6 +1139,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			page.side,
 			page.position_effect,
 			trim_scale(page.realized_pnl)::text,
+			page.settlement_currency,
 			page.logical_time,
 			filtered_total.total
 		  FROM filtered_total
@@ -1153,6 +1162,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 					fill.side,
 					fill.position_effect,
 					fill.realized_pnl,
+					fill.settlement_currency,
 					fill.logical_time
 				  FROM trading.fills AS fill
 				 WHERE fill.account_id = $1
@@ -1176,6 +1186,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				page.side,
 				page.position_effect,
 				trim_scale(page.realized_pnl)::text,
+				page.settlement_currency,
 				page.logical_time,
 				filtered_total.total
 			  FROM filtered_total
@@ -1192,6 +1203,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 						fill.side,
 						fill.position_effect,
 						fill.realized_pnl,
+						fill.settlement_currency,
 						fill.logical_time
 					  FROM trading.fills AS fill
 					 WHERE fill.account_id = $1
@@ -1215,6 +1227,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 					page.side,
 					page.position_effect,
 					trim_scale(page.realized_pnl)::text,
+					page.settlement_currency,
 					page.logical_time,
 					filtered_total.total
 				  FROM filtered_total
@@ -1247,6 +1260,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			side           *string
 			positionEffect *string
 			realizedPnL    *string
+			settlement     *string
 			logicalTime    *int64
 		)
 		if err := rows.Scan(
@@ -1256,6 +1270,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			&side,
 			&positionEffect,
 			&realizedPnL,
+			&settlement,
 			&logicalTime,
 			&total,
 		); err != nil {
@@ -1282,7 +1297,14 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		row.view.Side = *side
 		row.view.TradeType = *positionEffect
 		row.view.RealizedPnL = realizedPnL
+		row.view.SettlementCurrency = settlement
 		row.logicalTime = *logicalTime
+		if (row.view.RealizedPnL == nil) !=
+			(row.view.SettlementCurrency == nil) {
+			return edge.FillExecutionPage{}, fmt.Errorf(
+				"scan filtered fill execution: incomplete realized PnL",
+			)
+		}
 		if err := validateFillTradeType(row.view.TradeType); err != nil {
 			return edge.FillExecutionPage{}, fmt.Errorf(
 				"scan filtered fill execution: %w",

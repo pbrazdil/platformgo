@@ -593,22 +593,26 @@ func TestFillRealizedIsolatesHedgedLegsByPosition(t *testing.T) {
 		t.Fatalf("hedged fill page = %#v, want four fills", page)
 	}
 	byID := make(map[string]struct {
-		positionID  string
-		realizedPnL *string
+		positionID         string
+		realizedPnL        *string
+		settlementCurrency *string
 	}, len(page.Items))
 	for _, fill := range page.Items {
 		byID[fill.FillID] = struct {
-			positionID  string
-			realizedPnL *string
+			positionID         string
+			realizedPnL        *string
+			settlementCurrency *string
 		}{
-			positionID:  fill.PositionID,
-			realizedPnL: fill.RealizedPnL,
+			positionID:         fill.PositionID,
+			realizedPnL:        fill.RealizedPnL,
+			settlementCurrency: fill.SettlementCurrency,
 		}
 	}
 	assertFill := func(
 		fill engine.FillSnapshot,
 		wantPositionID string,
 		wantRealizedPnL *string,
+		wantCurrency *string,
 	) {
 		t.Helper()
 		got, ok := byID[fill.FillID.String()]
@@ -633,13 +637,34 @@ func TestFillRealizedIsolatesHedgedLegsByPosition(t *testing.T) {
 				wantRealizedPnL,
 			)
 		}
+		if (got.settlementCurrency == nil) != (wantCurrency == nil) ||
+			(got.settlementCurrency != nil &&
+				*got.settlementCurrency != *wantCurrency) {
+			t.Fatalf(
+				"fill %s settlement currency = %v, want %v",
+				fill.FillID,
+				got.settlementCurrency,
+				wantCurrency,
+			)
+		}
 	}
 	longProfit := "50"
 	shortProfit := "30"
-	assertFill(longOpen, longOpen.PositionID.String(), nil)
-	assertFill(shortOpen, shortOpen.PositionID.String(), nil)
-	assertFill(longClose, longOpen.PositionID.String(), &longProfit)
-	assertFill(shortClose, shortOpen.PositionID.String(), &shortProfit)
+	settlementCurrency := "USDC"
+	assertFill(longOpen, longOpen.PositionID.String(), nil, nil)
+	assertFill(shortOpen, shortOpen.PositionID.String(), nil, nil)
+	assertFill(
+		longClose,
+		longOpen.PositionID.String(),
+		&longProfit,
+		&settlementCurrency,
+	)
+	assertFill(
+		shortClose,
+		shortOpen.PositionID.String(),
+		&shortProfit,
+		&settlementCurrency,
+	)
 }
 
 // Ported from:
@@ -1293,6 +1318,7 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 				fill.side,
 				fill.position_effect,
 				fill.realized_pnl,
+				fill.settlement_currency,
 				fill.logical_time
 			  FROM trading.fills AS fill
 			 WHERE fill.account_id = $1
@@ -1316,6 +1342,7 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 			page.side,
 			page.position_effect,
 			trim_scale(page.realized_pnl)::text,
+			page.settlement_currency,
 			page.logical_time,
 			filtered_total.total
 		  FROM filtered_total
@@ -1341,6 +1368,7 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 				fill.side,
 				fill.position_effect,
 				fill.realized_pnl,
+				fill.settlement_currency,
 				fill.logical_time
 			  FROM trading.fills AS fill
 			 WHERE fill.account_id = $1
@@ -1364,6 +1392,7 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 			page.side,
 			page.position_effect,
 			trim_scale(page.realized_pnl)::text,
+			page.settlement_currency,
 			page.logical_time,
 			filtered_total.total
 		  FROM filtered_total
@@ -1401,6 +1430,7 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 				fill.side,
 				fill.position_effect,
 				fill.realized_pnl,
+				fill.settlement_currency,
 				fill.logical_time
 			  FROM trading.fills AS fill
 			 WHERE fill.account_id = $1
@@ -1423,6 +1453,7 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 			page.side,
 			page.position_effect,
 			trim_scale(page.realized_pnl)::text,
+			page.settlement_currency,
 			page.logical_time,
 			filtered_total.total
 		  FROM filtered_total
