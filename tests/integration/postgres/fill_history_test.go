@@ -307,6 +307,24 @@ func TestFillsHistoryReadsAndPaginates(t *testing.T) {
 		pageTwo.Total != 3 {
 		t.Fatalf("second fill page = %#v", pageTwo)
 	}
+	emptyForward, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{
+			Side:   "buy",
+			Limit:  2,
+			Cursor: *pageTwo.PrevCursor,
+		},
+	)
+	if err != nil {
+		t.Fatalf("read empty forward fill page: %v", err)
+	}
+	if len(emptyForward.Items) != 0 ||
+		emptyForward.Total != 3 ||
+		emptyForward.NextCursor != nil ||
+		emptyForward.PrevCursor != nil {
+		t.Fatalf("empty forward fill page = %#v", emptyForward)
+	}
 	seen := make(map[string]int, len(fillIDs))
 	for _, fill := range append(pageOne.Items, pageTwo.Items...) {
 		seen[fill.FillID]++
@@ -335,6 +353,44 @@ func TestFillsHistoryReadsAndPaginates(t *testing.T) {
 		backward.Items[1].FillID != fillIDs[1] ||
 		backward.Total != 3 {
 		t.Fatalf("previous fill page = %#v", backward)
+	}
+	newest, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{
+			Side:      "buy",
+			Limit:     2,
+			Cursor:    *backward.NextCursor,
+			Direction: "backward",
+		},
+	)
+	if err != nil {
+		t.Fatalf("read newest backward fill page: %v", err)
+	}
+	if len(newest.Items) != 1 ||
+		newest.Items[0].FillID != fillIDs[2] ||
+		newest.Total != 3 ||
+		newest.NextCursor == nil {
+		t.Fatalf("newest backward fill page = %#v", newest)
+	}
+	emptyBackward, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{
+			Side:      "buy",
+			Limit:     2,
+			Cursor:    *newest.NextCursor,
+			Direction: "backward",
+		},
+	)
+	if err != nil {
+		t.Fatalf("read empty backward fill page: %v", err)
+	}
+	if len(emptyBackward.Items) != 0 ||
+		emptyBackward.Total != 3 ||
+		emptyBackward.NextCursor != nil ||
+		emptyBackward.PrevCursor != nil {
+		t.Fatalf("empty backward fill page = %#v", emptyBackward)
 	}
 
 	invalid, err := store.FilterFillExecutions(
@@ -993,26 +1049,39 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 		t,
 		pool,
 		"fills_account_history_idx",
-		`SELECT
-			fill.fill_id::text,
-			fill.order_id::text,
-			fill.side,
-			fill.position_effect,
-			fill.logical_time,
-			(
-				SELECT count(*)
-				  FROM trading.fills AS counted
-				 WHERE counted.account_id = $1
-				   AND ($2::text IS NULL OR counted.side = $2)
-				   AND ($3::uuid IS NULL OR counted.fill_id = $3)
-			)
-		   FROM trading.fills AS fill
-		  WHERE fill.account_id = $1
-		    AND ($2::text IS NULL OR fill.side = $2)
-		    AND ($3::uuid IS NULL OR fill.fill_id = $3)
-		    AND (fill.logical_time, fill.fill_id) < ($4, $5)
-		  ORDER BY fill.logical_time DESC, fill.fill_id DESC
-		  LIMIT $6`,
+		`WITH page AS (
+			SELECT
+				fill.fill_id,
+				fill.order_id,
+				fill.side,
+				fill.position_effect,
+				fill.logical_time
+			  FROM trading.fills AS fill
+			 WHERE fill.account_id = $1
+			   AND ($2::text IS NULL OR fill.side = $2)
+			   AND ($3::uuid IS NULL OR fill.fill_id = $3)
+			   AND (fill.logical_time, fill.fill_id) < ($4, $5)
+			 ORDER BY fill.logical_time DESC, fill.fill_id DESC
+			 LIMIT $6
+		),
+		filtered_total AS (
+			SELECT count(*) AS total
+			  FROM trading.fills AS counted
+			 WHERE counted.account_id = $1
+			   AND ($2::text IS NULL OR counted.side = $2)
+			   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+		)
+		SELECT
+			page.fill_id::text,
+			page.order_id::text,
+			page.side,
+			page.position_effect,
+			page.logical_time,
+			filtered_total.total
+		  FROM filtered_total
+		  LEFT JOIN page ON true
+		 ORDER BY page.logical_time DESC NULLS LAST,
+		          page.fill_id DESC NULLS LAST`,
 		"account-fill-plan",
 		nil,
 		nil,
@@ -1024,26 +1093,39 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 		t,
 		pool,
 		"fills_account_history_idx",
-		`SELECT
-			fill.fill_id::text,
-			fill.order_id::text,
-			fill.side,
-			fill.position_effect,
-			fill.logical_time,
-			(
-				SELECT count(*)
-				  FROM trading.fills AS counted
-				 WHERE counted.account_id = $1
-				   AND ($2::text IS NULL OR counted.side = $2)
-				   AND ($3::uuid IS NULL OR counted.fill_id = $3)
-			)
-		   FROM trading.fills AS fill
-		  WHERE fill.account_id = $1
-		    AND ($2::text IS NULL OR fill.side = $2)
-		    AND ($3::uuid IS NULL OR fill.fill_id = $3)
-		    AND (fill.logical_time, fill.fill_id) > ($4, $5)
-		  ORDER BY fill.logical_time ASC, fill.fill_id ASC
-		  LIMIT $6`,
+		`WITH page AS (
+			SELECT
+				fill.fill_id,
+				fill.order_id,
+				fill.side,
+				fill.position_effect,
+				fill.logical_time
+			  FROM trading.fills AS fill
+			 WHERE fill.account_id = $1
+			   AND ($2::text IS NULL OR fill.side = $2)
+			   AND ($3::uuid IS NULL OR fill.fill_id = $3)
+			   AND (fill.logical_time, fill.fill_id) > ($4, $5)
+			 ORDER BY fill.logical_time ASC, fill.fill_id ASC
+			 LIMIT $6
+		),
+		filtered_total AS (
+			SELECT count(*) AS total
+			  FROM trading.fills AS counted
+			 WHERE counted.account_id = $1
+			   AND ($2::text IS NULL OR counted.side = $2)
+			   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+		)
+		SELECT
+			page.fill_id::text,
+			page.order_id::text,
+			page.side,
+			page.position_effect,
+			page.logical_time,
+			filtered_total.total
+		  FROM filtered_total
+		  LEFT JOIN page ON true
+		 ORDER BY page.logical_time ASC NULLS LAST,
+		          page.fill_id ASC NULLS LAST`,
 		"account-fill-plan",
 		nil,
 		nil,
@@ -1067,25 +1149,38 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 		t,
 		pool,
 		"fills_account_side_history_idx",
-		`SELECT
-			fill.fill_id::text,
-			fill.order_id::text,
-			fill.side,
-			fill.position_effect,
-			fill.logical_time,
-			(
-				SELECT count(*)
-				  FROM trading.fills AS counted
-				 WHERE counted.account_id = $1
-				   AND ($2::text IS NULL OR counted.side = $2)
-				   AND ($3::uuid IS NULL OR counted.fill_id = $3)
-			)
-		   FROM trading.fills AS fill
-		  WHERE fill.account_id = $1
-		    AND ($2::text IS NULL OR fill.side = $2)
-		    AND ($3::uuid IS NULL OR fill.fill_id = $3)
-		  ORDER BY fill.logical_time DESC, fill.fill_id DESC
-		  LIMIT $4`,
+		`WITH page AS (
+			SELECT
+				fill.fill_id,
+				fill.order_id,
+				fill.side,
+				fill.position_effect,
+				fill.logical_time
+			  FROM trading.fills AS fill
+			 WHERE fill.account_id = $1
+			   AND ($2::text IS NULL OR fill.side = $2)
+			   AND ($3::uuid IS NULL OR fill.fill_id = $3)
+			 ORDER BY fill.logical_time DESC, fill.fill_id DESC
+			 LIMIT $4
+		),
+		filtered_total AS (
+			SELECT count(*) AS total
+			  FROM trading.fills AS counted
+			 WHERE counted.account_id = $1
+			   AND ($2::text IS NULL OR counted.side = $2)
+			   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+		)
+		SELECT
+			page.fill_id::text,
+			page.order_id::text,
+			page.side,
+			page.position_effect,
+			page.logical_time,
+			filtered_total.total
+		  FROM filtered_total
+		  LEFT JOIN page ON true
+		 ORDER BY page.logical_time DESC NULLS LAST,
+		          page.fill_id DESC NULLS LAST`,
 		"account-fill-plan",
 		"BUY",
 		nil,

@@ -1097,25 +1097,38 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		requestedTradeID = tradeID
 	}
 	query := `
+		WITH page AS (
+			SELECT
+				fill.fill_id,
+				fill.order_id,
+				fill.side,
+				fill.position_effect,
+				fill.logical_time
+			  FROM trading.fills AS fill
+			 WHERE fill.account_id = $1
+			   AND ($2::text IS NULL OR fill.side = $2)
+			   AND ($3::uuid IS NULL OR fill.fill_id = $3)
+			 ORDER BY fill.logical_time DESC, fill.fill_id DESC
+			 LIMIT $4
+		),
+		filtered_total AS (
+			SELECT count(*) AS total
+			  FROM trading.fills AS counted
+			 WHERE counted.account_id = $1
+			   AND ($2::text IS NULL OR counted.side = $2)
+			   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+		)
 		SELECT
-			fill.fill_id::text,
-			fill.order_id::text,
-			fill.side,
-			fill.position_effect,
-			fill.logical_time,
-			(
-				SELECT count(*)
-				  FROM trading.fills AS counted
-				 WHERE counted.account_id = $1
-				   AND ($2::text IS NULL OR counted.side = $2)
-				   AND ($3::uuid IS NULL OR counted.fill_id = $3)
-			)
-		  FROM trading.fills AS fill
-		 WHERE fill.account_id = $1
-		   AND ($2::text IS NULL OR fill.side = $2)
-		   AND ($3::uuid IS NULL OR fill.fill_id = $3)
-		 ORDER BY fill.logical_time DESC, fill.fill_id DESC
-		 LIMIT $4`
+			page.fill_id::text,
+			page.order_id::text,
+			page.side,
+			page.position_effect,
+			page.logical_time,
+			filtered_total.total
+		  FROM filtered_total
+		  LEFT JOIN page ON true
+		 ORDER BY page.logical_time DESC NULLS LAST,
+		          page.fill_id DESC NULLS LAST`
 	args := []any{
 		accountID,
 		requestedSide,
@@ -1124,48 +1137,74 @@ func (store *CompatibilityStore) FilterFillExecutions(
 	}
 	if cursor != nil {
 		query = `
+			WITH page AS (
+				SELECT
+					fill.fill_id,
+					fill.order_id,
+					fill.side,
+					fill.position_effect,
+					fill.logical_time
+				  FROM trading.fills AS fill
+				 WHERE fill.account_id = $1
+				   AND ($2::text IS NULL OR fill.side = $2)
+				   AND ($3::uuid IS NULL OR fill.fill_id = $3)
+				   AND (fill.logical_time, fill.fill_id) < ($4, $5)
+				 ORDER BY fill.logical_time DESC, fill.fill_id DESC
+				 LIMIT $6
+			),
+			filtered_total AS (
+				SELECT count(*) AS total
+				  FROM trading.fills AS counted
+				 WHERE counted.account_id = $1
+				   AND ($2::text IS NULL OR counted.side = $2)
+				   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+			)
 			SELECT
-				fill.fill_id::text,
-				fill.order_id::text,
-				fill.side,
-				fill.position_effect,
-				fill.logical_time,
-				(
-					SELECT count(*)
+				page.fill_id::text,
+				page.order_id::text,
+				page.side,
+				page.position_effect,
+				page.logical_time,
+				filtered_total.total
+			  FROM filtered_total
+			  LEFT JOIN page ON true
+			 ORDER BY page.logical_time DESC NULLS LAST,
+			          page.fill_id DESC NULLS LAST`
+		if !forward {
+			query = `
+				WITH page AS (
+					SELECT
+						fill.fill_id,
+						fill.order_id,
+						fill.side,
+						fill.position_effect,
+						fill.logical_time
+					  FROM trading.fills AS fill
+					 WHERE fill.account_id = $1
+					   AND ($2::text IS NULL OR fill.side = $2)
+					   AND ($3::uuid IS NULL OR fill.fill_id = $3)
+					   AND (fill.logical_time, fill.fill_id) > ($4, $5)
+					 ORDER BY fill.logical_time ASC, fill.fill_id ASC
+					 LIMIT $6
+				),
+				filtered_total AS (
+					SELECT count(*) AS total
 					  FROM trading.fills AS counted
 					 WHERE counted.account_id = $1
 					   AND ($2::text IS NULL OR counted.side = $2)
 					   AND ($3::uuid IS NULL OR counted.fill_id = $3)
 				)
-			  FROM trading.fills AS fill
-			 WHERE fill.account_id = $1
-			   AND ($2::text IS NULL OR fill.side = $2)
-			   AND ($3::uuid IS NULL OR fill.fill_id = $3)
-			   AND (fill.logical_time, fill.fill_id) < ($4, $5)
-			 ORDER BY fill.logical_time DESC, fill.fill_id DESC
-			 LIMIT $6`
-		if !forward {
-			query = `
 				SELECT
-					fill.fill_id::text,
-					fill.order_id::text,
-					fill.side,
-					fill.position_effect,
-					fill.logical_time,
-					(
-						SELECT count(*)
-						  FROM trading.fills AS counted
-						 WHERE counted.account_id = $1
-						   AND ($2::text IS NULL OR counted.side = $2)
-						   AND ($3::uuid IS NULL OR counted.fill_id = $3)
-					)
-				  FROM trading.fills AS fill
-				 WHERE fill.account_id = $1
-				   AND ($2::text IS NULL OR fill.side = $2)
-				   AND ($3::uuid IS NULL OR fill.fill_id = $3)
-				   AND (fill.logical_time, fill.fill_id) > ($4, $5)
-				 ORDER BY fill.logical_time ASC, fill.fill_id ASC
-				 LIMIT $6`
+					page.fill_id::text,
+					page.order_id::text,
+					page.side,
+					page.position_effect,
+					page.logical_time,
+					filtered_total.total
+				  FROM filtered_total
+				  LEFT JOIN page ON true
+				 ORDER BY page.logical_time ASC NULLS LAST,
+				          page.fill_id ASC NULLS LAST`
 		}
 		args = []any{
 			accountID,
@@ -1185,12 +1224,19 @@ func (store *CompatibilityStore) FilterFillExecutions(
 	var total int64
 	for rows.Next() {
 		var row fillHistoryRow
+		var (
+			fillID         *string
+			orderID        *string
+			side           *string
+			positionEffect *string
+			logicalTime    *int64
+		)
 		if err := rows.Scan(
-			&row.view.FillID,
-			&row.view.OrderID,
-			&row.view.Side,
-			&row.view.TradeType,
-			&row.logicalTime,
+			&fillID,
+			&orderID,
+			&side,
+			&positionEffect,
+			&logicalTime,
 			&total,
 		); err != nil {
 			return edge.FillExecutionPage{}, fmt.Errorf(
@@ -1198,6 +1244,22 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				err,
 			)
 		}
+		if fillID == nil {
+			continue
+		}
+		if orderID == nil ||
+			side == nil ||
+			positionEffect == nil ||
+			logicalTime == nil {
+			return edge.FillExecutionPage{}, fmt.Errorf(
+				"scan filtered fill execution: incomplete durable fill",
+			)
+		}
+		row.view.FillID = *fillID
+		row.view.OrderID = *orderID
+		row.view.Side = *side
+		row.view.TradeType = *positionEffect
+		row.logicalTime = *logicalTime
 		if err := validateFillTradeType(row.view.TradeType); err != nil {
 			return edge.FillExecutionPage{}, fmt.Errorf(
 				"scan filtered fill execution: %w",
