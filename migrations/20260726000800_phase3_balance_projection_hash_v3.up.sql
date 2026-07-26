@@ -25,11 +25,51 @@ LOCK TABLE
     engine.duplicate_delivery_receipts
 IN SHARE ROW EXCLUSIVE MODE;
 
-ALTER TABLE market.books
-    ALTER COLUMN mark_price DROP NOT NULL;
-
 DO $$
 BEGIN
+    IF EXISTS (
+        SELECT 1
+         FROM engine.input_receipts
+         WHERE decision ? 'InstrumentChanges'
+           AND jsonb_typeof(decision -> 'InstrumentChanges')
+               NOT IN ('array', 'null')
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'instrument change history is not a canonical array',
+            HINT = 'keep writers halted; preserve the database and resolve the malformed receipt through an owner-reviewed forward repair or restore/reset';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+          FROM engine.input_receipts AS receipt
+          CROSS JOIN LATERAL jsonb_array_elements(
+              CASE
+                  WHEN jsonb_typeof(
+                      receipt.decision -> 'InstrumentChanges'
+                  ) = 'array'
+                  THEN receipt.decision -> 'InstrumentChanges'
+                  ELSE '[]'::jsonb
+              END
+          ) AS change
+         WHERE jsonb_typeof(change) <> 'object'
+            OR COALESCE(change ->> 'SettlementCurrency', '') = ''
+            OR CASE
+                   WHEN COALESCE(
+                       change ->> 'SettlementCurrencyScale',
+                       ''
+                   ) ~ '^[0-9]+$'
+                   THEN (change ->> 'SettlementCurrencyScale')::numeric
+                        NOT BETWEEN 0 AND 18
+                   ELSE true
+               END
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'instrument change history has an invalid currency identity',
+            HINT = 'keep writers halted; preserve the database and resolve the malformed receipt through an owner-reviewed forward repair or restore/reset';
+    END IF;
+
     IF EXISTS (
         SELECT 1
           FROM (
@@ -78,6 +118,40 @@ BEGIN
 END
 $$;
 
+CREATE TABLE trading.currency_scales (
+    currency text PRIMARY KEY CHECK (currency <> ''),
+    scale smallint NOT NULL CHECK (scale BETWEEN 0 AND 18)
+);
+
+INSERT INTO trading.currency_scales (currency, scale)
+SELECT currency, min(scale)
+  FROM (
+      SELECT
+          settlement_currency AS currency,
+          settlement_currency_scale AS scale
+        FROM trading.instruments
+      UNION ALL
+      SELECT
+          change ->> 'SettlementCurrency' AS currency,
+          (change ->> 'SettlementCurrencyScale')::smallint AS scale
+        FROM engine.input_receipts AS receipt
+        CROSS JOIN LATERAL jsonb_array_elements(
+            CASE
+                WHEN jsonb_typeof(
+                    receipt.decision -> 'InstrumentChanges'
+                ) = 'array'
+                THEN receipt.decision -> 'InstrumentChanges'
+                ELSE '[]'::jsonb
+            END
+        ) AS change
+  ) AS currency_scales
+ WHERE currency IS NOT NULL
+   AND scale IS NOT NULL
+ GROUP BY currency;
+
+ALTER TABLE market.books
+    ALTER COLUMN mark_price DROP NOT NULL;
+
 CREATE FUNCTION engine.require_balance_projection_hash_v3()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -120,24 +194,22 @@ FOR EACH ROW EXECUTE FUNCTION engine.require_duplicate_delivery_hash_v3();
 CREATE FUNCTION trading.require_currency_scale_consistency()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, trading
 AS $$
+DECLARE
+    registered_scale smallint;
 BEGIN
-    IF TG_OP = 'UPDATE'
-       AND NEW.settlement_currency = OLD.settlement_currency
-       AND NEW.settlement_currency_scale <>
-           OLD.settlement_currency_scale THEN
-        RAISE EXCEPTION USING
-            ERRCODE = '23514',
-            MESSAGE = 'settlement currency code must use one scale';
-    END IF;
-    IF EXISTS (
-        SELECT 1
-          FROM trading.instruments AS existing
-         WHERE existing.settlement_currency = NEW.settlement_currency
-           AND existing.settlement_currency_scale <>
-               NEW.settlement_currency_scale
-           AND existing.instrument_id <> NEW.instrument_id
-    ) THEN
+    INSERT INTO trading.currency_scales (currency, scale)
+    VALUES (NEW.settlement_currency, NEW.settlement_currency_scale)
+    ON CONFLICT (currency) DO NOTHING;
+
+    SELECT scale
+      INTO registered_scale
+      FROM trading.currency_scales
+     WHERE currency = NEW.settlement_currency;
+
+    IF registered_scale IS DISTINCT FROM NEW.settlement_currency_scale THEN
         RAISE EXCEPTION USING
             ERRCODE = '23514',
             MESSAGE = 'settlement currency code must use one scale';
@@ -149,3 +221,5 @@ $$;
 CREATE TRIGGER instruments_require_currency_scale_consistency
 BEFORE INSERT OR UPDATE ON trading.instruments
 FOR EACH ROW EXECUTE FUNCTION trading.require_currency_scale_consistency();
+
+GRANT SELECT ON trading.currency_scales TO platformgo_engine;

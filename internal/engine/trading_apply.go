@@ -284,12 +284,10 @@ func configureTradingInstrument(
 	if err != nil {
 		return rejectedTradingDecision(state, RejectionInvalidInstrument)
 	}
-	for _, instrument := range state.trading.instruments {
-		existing := instrument.settlementCurrency
-		if existing.Code() == settlementCurrency.Code() &&
-			!existing.Equal(settlementCurrency) {
-			return rejectedTradingDecision(state, RejectionInvalidInstrument)
-		}
+	if existing, found := state.trading.currencyScale(
+		settlementCurrency.Code(),
+	); found && !existing.Equal(settlementCurrency) {
+		return rejectedTradingDecision(state, RejectionInvalidInstrument)
 	}
 	initialMarginRate, err := domain.NewRate(configure.InitialMarginRate)
 	if err != nil || initialMarginRate.Decimal().Sign() < 0 {
@@ -313,6 +311,7 @@ func configureTradingInstrument(
 	}
 
 	state.trading = state.trading.clone()
+	state.trading.rememberCurrencyScale(settlementCurrency)
 	state.trading.replaceInstrument(instrumentRecord{
 		revision:              revision,
 		settlementCurrency:    settlementCurrency,

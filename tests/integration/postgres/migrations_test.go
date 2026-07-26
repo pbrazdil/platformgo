@@ -3839,6 +3839,60 @@ func TestBalanceProjectionHashV3MigrationGuardsCurrencyScaleConflicts(
 	resetDurableSchemas(t, pool)
 	if err := platformpostgres.NewMigrator(pool, previous).
 		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("reapply pre-v3 schema for malformed history: %v", err)
+	}
+	malformedConnection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire malformed history connection: %v", err)
+	}
+	if _, err := malformedConnection.Exec(ctx, `
+		SELECT set_config(
+			'platformgo.runtime_schema_revision',
+			'20260725001100_phase3_committed_realtime_outbox',
+			false
+		);
+		INSERT INTO engine.input_receipts (
+			shard_id, input_id, stream_sequence, schema_version,
+			input_hash_version, input_hash, decision_hash_version,
+			decision_hash, resulting_state_hash, envelope, decision,
+			business_input_hash, business_input_hash_version
+		) VALUES (
+			8,
+			'00000000-0000-4000-8000-000000000832',
+			1,
+			1,
+			1,
+			decode(repeat('71', 32), 'hex'),
+			2,
+			decode(repeat('72', 32), 'hex'),
+			decode(repeat('73', 32), 'hex'),
+			'{}',
+			'{"InstrumentChanges":{"SettlementCurrency":"USDC"}}',
+			decode(repeat('74', 32), 'hex'),
+			1
+		)`); err != nil {
+		malformedConnection.Release()
+		t.Fatalf("seed malformed instrument history: %v", err)
+	}
+	malformedConnection.Release()
+	err = current.Migrate(ctx)
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("malformed history migration error = %v, want 55000", err)
+	}
+	var registryExists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT to_regclass('trading.currency_scales') IS NOT NULL`,
+	).Scan(&registryExists); err != nil || registryExists {
+		t.Fatalf(
+			"registry after malformed rollback exists=%t, error %v",
+			registryExists,
+			err,
+		)
+	}
+
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
 		t.Fatalf("reapply pre-v3 schema: %v", err)
 	}
 	if err := current.Migrate(ctx); err != nil {
@@ -3874,7 +3928,132 @@ func TestBalanceProjectionHashV3MigrationGuardsCurrencyScaleConflicts(
 	if !errors.As(err, &postgresError) || postgresError.Code != "23514" {
 		t.Fatalf("post-cutover conflicting update = %v, want 23514", err)
 	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE trading.instruments
+		   SET settlement_currency = 'EUR',
+		       settlement_currency_scale = 2
+		 WHERE instrument_id = 'BTC-PERP'`); err != nil {
+		t.Fatalf("post-cutover currency reconfiguration: %v", err)
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'SOL-PERP', 1, 2, 3, 'USDC', 8, 0.1, 0.05, 10, 0, 0
+		)`)
+	if !errors.As(err, &postgresError) || postgresError.Code != "23514" {
+		t.Fatalf("post-reconfiguration scale conflict = %v, want 23514", err)
+	}
+	var registeredScale int
+	if err := pool.QueryRow(ctx, `
+		SELECT scale
+		  FROM trading.currency_scales
+		 WHERE currency = 'USDC'`).Scan(&registeredScale); err != nil ||
+		registeredScale != 2 {
+		t.Fatalf(
+			"durable USDC scale = %d, error %v, want 2",
+			registeredScale,
+			err,
+		)
+	}
 	assertFinalMigrationHistory(t, pool)
+}
+
+func TestCurrencyScaleRegistrySerializesConcurrentFirstUse(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("migrate concurrent currency registry database: %v", err)
+	}
+
+	first, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin first currency registration: %v", err)
+	}
+	defer func() { _ = first.Rollback(context.Background()) }()
+	const insertInstrument = `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES ($1, 1, 2, 3, 'USDC', $2, 0.1, 0.05, 10, 0, 0)`
+	if _, err := first.Exec(ctx, insertInstrument, "BTC-PERP", 2); err != nil {
+		t.Fatalf("stage first currency scale: %v", err)
+	}
+
+	second, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire conflicting currency connection: %v", err)
+	}
+	defer second.Release()
+	var secondPID int32
+	if err := second.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&secondPID); err != nil {
+		t.Fatalf("load conflicting currency backend PID: %v", err)
+	}
+	secondResult := make(chan error, 1)
+	go func() {
+		_, execErr := second.Exec(ctx, insertInstrument, "ETH-PERP", 8)
+		secondResult <- execErr
+	}()
+	for {
+		var blocked bool
+		if err := pool.QueryRow(ctx, `
+			SELECT cardinality(pg_blocking_pids($1)) > 0`,
+			secondPID,
+		).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("conflicting currency registration did not serialize")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err := first.Commit(ctx); err != nil {
+		t.Fatalf("commit first currency scale: %v", err)
+	}
+	err = <-secondResult
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "23514" {
+		t.Fatalf("concurrent conflicting currency scale = %v, want 23514", err)
+	}
+	if _, err := pool.Exec(ctx, insertInstrument, "SOL-PERP", 2); err != nil {
+		t.Fatalf("same-scale registration after serialization: %v", err)
+	}
+	var (
+		instrumentCount int
+		registeredScale int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM trading.instruments),
+			(
+				SELECT scale
+				  FROM trading.currency_scales
+				 WHERE currency = 'USDC'
+			)`,
+	).Scan(&instrumentCount, &registeredScale); err != nil ||
+		instrumentCount != 2 ||
+		registeredScale != 2 {
+		t.Fatalf(
+			"serialized registry instruments=%d scale=%d error=%v",
+			instrumentCount,
+			registeredScale,
+			err,
+		)
+	}
 }
 
 func TestBalanceProjectionHashV3MigrationLocksBeforeHistoricalGuard(

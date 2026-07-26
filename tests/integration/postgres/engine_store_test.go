@@ -3407,15 +3407,20 @@ func TestEngineStoreRejectsCurrencyScaleAliasesAndRecoversExactly(
 	clock := testkit.NewManualClock(
 		engine.NewLogicalTime(time.Date(2026, time.July, 26, 17, 0, 0, 0, time.UTC)),
 	)
-	instrument := func(instrumentID string, scale uint8) engine.TradingAction {
+	instrument := func(
+		instrumentID string,
+		revision uint64,
+		currency string,
+		scale uint8,
+	) engine.TradingAction {
 		return engine.TradingAction{
 			Kind: engine.TradingActionConfigureInstrument,
 			ConfigureInstrument: &engine.ConfigureInstrument{
 				InstrumentID:            instrumentID,
-				Revision:                1,
+				Revision:                revision,
 				PriceScale:              2,
 				QuantityScale:           3,
-				SettlementCurrency:      "USDC",
+				SettlementCurrency:      currency,
 				SettlementCurrencyScale: scale,
 				InitialMarginRate:       "0.1",
 				MaintenanceMarginRate:   "0.05",
@@ -3432,10 +3437,39 @@ func TestEngineStoreRejectsCurrencyScaleAliasesAndRecoversExactly(
 		state,
 		ids,
 		clock,
-		instrument("BTC-PERP", 2),
+		instrument("BTC-PERP", 1, "USDC", 2),
 		platformpostgres.ApplyOptions{},
 	)
-	conflictingAction := instrument("ETH-PERP", 8)
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		engine.TradingAction{
+			Kind: engine.TradingActionAdjustBalance,
+			AdjustBalance: &engine.AdjustBalance{
+				AccountID:     "account-1",
+				Currency:      "USDC",
+				CurrencyScale: 2,
+				Operation:     engine.BalanceOperationSet,
+				Amount:        "10",
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		instrument("BTC-PERP", 2, "EUR", 2),
+		platformpostgres.ApplyOptions{},
+	)
+	conflictingAction := instrument("ETH-PERP", 1, "USDC", 8)
 	var (
 		conflictingDecision engine.Decision
 		conflictingInput    engine.InputEnvelope
@@ -3505,7 +3539,7 @@ func TestEngineStoreRejectsCurrencyScaleAliasesAndRecoversExactly(
 		duplicateState,
 		ids,
 		clock,
-		instrument("ETH-PERP", 2),
+		instrument("ETH-PERP", 1, "USDC", 2),
 		platformpostgres.ApplyOptions{},
 	)
 	if sameScale.CommandResult.Status != engine.CommandStatusAccepted ||

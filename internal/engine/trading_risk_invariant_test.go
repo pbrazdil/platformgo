@@ -53,6 +53,38 @@ func TestCurrencyCodeCannotBeConfiguredWithConflictingScales(t *testing.T) {
 	}
 }
 
+func TestCurrencyScaleIdentitySurvivesInstrumentReconfiguration(t *testing.T) {
+	fixture := newTradingFixture(t)
+	configure := func(instrumentID, currency string, scale uint8) TradingAction {
+		return TradingAction{
+			Kind: TradingActionConfigureInstrument,
+			ConfigureInstrument: &ConfigureInstrument{
+				InstrumentID:            instrumentID,
+				Revision:                2,
+				PriceScale:              2,
+				QuantityScale:           3,
+				SettlementCurrency:      currency,
+				SettlementCurrencyScale: scale,
+				InitialMarginRate:       "0.1",
+				MaintenanceMarginRate:   "0.05",
+				MaxLeverage:             "10",
+				MakerFeeRate:            "0",
+				TakerFeeRate:            "0",
+			},
+		}
+	}
+
+	fixture.apply(t, configure("BTC-PERP", "EUR", 2))
+	conflict := fixture.applyDecision(t, configure("ETH-PERP", "USDC", 2))
+	if conflict.CommandResult.Status != CommandStatusRejected ||
+		conflict.CommandResult.Reason != RejectionInvalidInstrument ||
+		len(conflict.InstrumentChanges) != 0 ||
+		len(conflict.BalanceChanges) != 0 ||
+		len(conflict.LedgerChanges) != 0 {
+		t.Fatalf("reintroduced currency scale decision = %+v", conflict)
+	}
+}
+
 func TestBalanceDecisionCarriesStableBalancedLedgerEffect(t *testing.T) {
 	fixture := newTradingFixture(t)
 	decision := fixture.apply(t, TradingAction{
