@@ -886,7 +886,7 @@ func TestFillHistoryMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 			60000,
 			0.01,
 			'30000000-0000-0000-0000-000000000001'::uuid,
-			'OPEN',
+			'open',
 			'TAKER',
 			0.5,
 			'USDC',
@@ -1042,7 +1042,7 @@ func TestFillFilterMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 			60000,
 			0.01,
 			'30000000-0000-0000-0000-000000000001'::uuid,
-			'OPEN',
+			'open',
 			'TAKER',
 			1600000000000000000 + sequence_number
 		  FROM generate_series(1, 100) AS sequence(sequence_number)`); err != nil {
@@ -1770,14 +1770,14 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 			 '019f9460-4b36-4e9b-8f44-682611f70001',
 			 '019f9460-4b36-4e9b-8f44-682611f70021',
 			 'account-netting', 'BTC-USDC', 'BUY', 100.00, 1.000,
-			 '019f9460-4b36-4e9b-8f44-682611f70031', 'OPEN',
+			 '019f9460-4b36-4e9b-8f44-682611f70031', 'open',
 			 0.00, 'USDC', 'MAKER', -0.01, 'USDC',
 			 1784894400000000000),
 			('019f9460-4b36-4e9b-8f44-682611f70012',
 			 '019f9460-4b36-4e9b-8f44-682611f70002',
 			 '019f9460-4b36-4e9b-8f44-682611f70022',
 			 'account-hedging', 'BTC-USDC', 'SELL', 101.00, 1.000,
-			 '019f9460-4b36-4e9b-8f44-682611f70032', 'OPEN',
+			 '019f9460-4b36-4e9b-8f44-682611f70032', 'open',
 			 NULL, NULL, 'TAKER', NULL, NULL,
 			 1784894401000000000);
 		INSERT INTO trading.positions (

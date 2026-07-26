@@ -1007,7 +1007,7 @@ func (store *CompatibilityStore) LatestFillExecution(
 			fill.fill_id::text,
 			fill.order_id::text,
 			fill.side,
-			lower(fill.position_effect),
+			fill.position_effect,
 			fill.logical_time
 		  FROM trading.fills AS fill
 		 WHERE fill.account_id = $1
@@ -1083,7 +1083,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			fill.fill_id::text,
 			fill.order_id::text,
 			fill.side,
-			lower(fill.position_effect),
+			fill.position_effect,
 			fill.logical_time,
 			count(*) OVER ()
 		  FROM trading.fills AS fill

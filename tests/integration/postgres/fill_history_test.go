@@ -113,7 +113,7 @@ func TestFillFilledAtIsEngineExecutionTimeNotInsertNow(t *testing.T) {
 			'019fa844-26c0-7000-8000-000000000003',
 			'urn:xb:account:fill-time', 'BTC-PERP',
 			'BUY', 60000, 0.01,
-			'019fa844-26c0-7000-8000-000000000004', 'OPEN',
+			'019fa844-26c0-7000-8000-000000000004', 'open',
 			NULL, NULL, 'TAKER', 0.5, 'USDC', $1
 		)`,
 		engineTime.UnixNano(),
@@ -215,7 +215,7 @@ func TestFillsHistoryFiltersBySideAndTradeID(t *testing.T) {
 				'urn:xb:account:fill-filter', 'BTC-PERP',
 				'BUY', 60000, 0.01,
 				'019fa844-26c0-7000-8000-000000000041',
-				'OPEN', 'TAKER', 1784901600000000001
+				'open', 'TAKER', 1784901600000000001
 			),
 			(
 				'019fa844-26c0-7000-8000-000000000012',
@@ -224,7 +224,7 @@ func TestFillsHistoryFiltersBySideAndTradeID(t *testing.T) {
 				'urn:xb:account:fill-filter', 'BTC-PERP',
 				'SELL', 61000, 0.01,
 				'019fa844-26c0-7000-8000-000000000042',
-				'CLOSE', 'TAKER', 1784901600000000002
+				'close', 'TAKER', 1784901600000000002
 			)`); err != nil {
 		t.Fatalf("seed durable fill filters: %v", err)
 	}
@@ -420,28 +420,135 @@ func TestFillHistoryReturnsSideAndTradeType(t *testing.T) {
 			)
 		}
 	}
+	latest, err := store.LatestFillExecution(ctx, accountID)
+	if err != nil {
+		t.Fatalf("read latest classified fill: %v", err)
+	}
+	if latest.FillID != "019fa844-26c0-7000-8000-000000000075" ||
+		latest.Side != "SELL" ||
+		latest.TradeType != "close" {
+		t.Fatalf("latest classified fill = %#v", latest)
+	}
 
 	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.accounts (account_id, oms_mode) VALUES
+			('urn:xb:account:fill-effect-upper', 'NETTING'),
+			('urn:xb:account:fill-effect-mixed', 'NETTING'),
+			('urn:xb:account:fill-effect-whitespace', 'NETTING'),
+			('urn:xb:account:fill-effect-unknown', 'NETTING');
+		INSERT INTO trading.orders (
+			order_id, account_id, instrument_id, side, order_type,
+			time_in_force, status, quantity, filled_quantity,
+			average_fill_price, triggered, reduce_only, has_rested,
+			version
+		) VALUES
+			('019fa844-26c0-7000-8000-0000000000b1',
+			 'urn:xb:account:fill-effect-upper', 'BTC-PERP', 'BUY',
+			 'MARKET', 'IOC', 'FILLED', 0.01, 0.01, 60000,
+			 false, false, false, 1),
+			('019fa844-26c0-7000-8000-0000000000b2',
+			 'urn:xb:account:fill-effect-mixed', 'BTC-PERP', 'BUY',
+			 'MARKET', 'IOC', 'FILLED', 0.01, 0.01, 60000,
+			 false, false, false, 1),
+			('019fa844-26c0-7000-8000-0000000000b3',
+			 'urn:xb:account:fill-effect-whitespace', 'BTC-PERP', 'BUY',
+			 'MARKET', 'IOC', 'FILLED', 0.01, 0.01, 60000,
+			 false, false, false, 1),
+			('019fa844-26c0-7000-8000-0000000000b4',
+			 'urn:xb:account:fill-effect-unknown', 'BTC-PERP', 'BUY',
+			 'MARKET', 'IOC', 'FILLED', 0.01, 0.01, 60000,
+			 false, false, false, 1);
 		INSERT INTO trading.fills (
 			fill_id, order_id, input_id, account_id, instrument_id,
 			side, price, quantity, position_id, position_effect,
 			liquidity_side, logical_time
-		) VALUES (
-			'019fa844-26c0-7000-8000-000000000076',
-			'019fa844-26c0-7000-8000-000000000081',
-			'019fa844-26c0-7000-8000-000000000096',
-			'urn:xb:account:fill-side-trade-type', 'BTC-PERP',
-			'BUY', 60000, 0.01,
-			'019fa844-26c0-7000-8000-0000000000a1',
-			'unknown', 'TAKER', 1784901600000000076)`); err != nil {
-		t.Fatalf("seed unknown durable fill trade type: %v", err)
+		) VALUES
+			('019fa844-26c0-7000-8000-0000000000c1',
+			 '019fa844-26c0-7000-8000-0000000000b1',
+			 '019fa844-26c0-7000-8000-0000000000d1',
+			 'urn:xb:account:fill-effect-upper', 'BTC-PERP',
+			 'BUY', 60000, 0.01,
+			 '019fa844-26c0-7000-8000-0000000000e1',
+			 'OPEN', 'TAKER', 1784901600000000081),
+			('019fa844-26c0-7000-8000-0000000000c2',
+			 '019fa844-26c0-7000-8000-0000000000b2',
+			 '019fa844-26c0-7000-8000-0000000000d2',
+			 'urn:xb:account:fill-effect-mixed', 'BTC-PERP',
+			 'BUY', 60000, 0.01,
+			 '019fa844-26c0-7000-8000-0000000000e2',
+			 'Open', 'TAKER', 1784901600000000082),
+			('019fa844-26c0-7000-8000-0000000000c3',
+			 '019fa844-26c0-7000-8000-0000000000b3',
+			 '019fa844-26c0-7000-8000-0000000000d3',
+			 'urn:xb:account:fill-effect-whitespace', 'BTC-PERP',
+			 'BUY', 60000, 0.01,
+			 '019fa844-26c0-7000-8000-0000000000e3',
+			 ' open ', 'TAKER', 1784901600000000083),
+			('019fa844-26c0-7000-8000-0000000000c4',
+			 '019fa844-26c0-7000-8000-0000000000b4',
+			 '019fa844-26c0-7000-8000-0000000000d4',
+			 'urn:xb:account:fill-effect-unknown', 'BTC-PERP',
+			 'BUY', 60000, 0.01,
+			 '019fa844-26c0-7000-8000-0000000000e4',
+			 'unknown', 'TAKER', 1784901600000000084)`); err != nil {
+		t.Fatalf("seed noncanonical durable fill trade types: %v", err)
 	}
-	if _, err := store.FilterFillExecutions(
-		ctx,
-		accountID,
-		platformpostgres.FillExecutionFilter{Limit: 10},
-	); err == nil {
-		t.Fatal("unknown durable fill position effect unexpectedly projected")
+
+	restartedPool := runtimeRoleLoginPool(
+		t,
+		pool,
+		"platformgo_fill_side_trade_type_restart_api_login",
+		"platformgo_api",
+	)
+	restartedStore := platformpostgres.NewCompatibilityStore(restartedPool)
+	invalidEffects := []struct {
+		label     string
+		accountID string
+	}{
+		{"uppercase", "urn:xb:account:fill-effect-upper"},
+		{"mixed-case", "urn:xb:account:fill-effect-mixed"},
+		{"whitespace", "urn:xb:account:fill-effect-whitespace"},
+		{"unknown", "urn:xb:account:fill-effect-unknown"},
+	}
+	stores := []struct {
+		label string
+		store *platformpostgres.CompatibilityStore
+	}{
+		{"current", store},
+		{"restarted", restartedStore},
+	}
+	for _, invalidEffect := range invalidEffects {
+		for _, candidateStore := range stores {
+			invalidLatest, err := candidateStore.store.LatestFillExecution(
+				ctx,
+				invalidEffect.accountID,
+			)
+			if err == nil || invalidLatest.FillID != "" {
+				t.Fatalf(
+					"%s %s latest = %#v, err=%v; want fail-closed zero view",
+					candidateStore.label,
+					invalidEffect.label,
+					invalidLatest,
+					err,
+				)
+			}
+			invalidPage, err := candidateStore.store.FilterFillExecutions(
+				ctx,
+				invalidEffect.accountID,
+				platformpostgres.FillExecutionFilter{Limit: 10},
+			)
+			if err == nil ||
+				len(invalidPage.Items) != 0 ||
+				invalidPage.Total != 0 {
+				t.Fatalf(
+					"%s %s page = %#v, err=%v; want fail-closed zero page",
+					candidateStore.label,
+					invalidEffect.label,
+					invalidPage,
+					err,
+				)
+			}
+		}
 	}
 }
 
@@ -508,7 +615,7 @@ func TestFillOrderIDIsTheCorrelatableOrderURN(t *testing.T) {
 			'urn:xb:account:fill-order-correlation',
 			'BTC-PERP', 'BUY', 60000, 0.01,
 			'019fa844-26c0-7000-8000-000000000064',
-			'OPEN', 'TAKER', 1784901600000000062
+			'open', 'TAKER', 1784901600000000062
 		)`); err != nil {
 		t.Fatalf("seed correlatable fill order: %v", err)
 	}
@@ -617,7 +724,7 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 			100,
 			0.01,
 			'30000000-0000-0000-0000-000000000001'::uuid,
-			'OPEN',
+			'open',
 			'TAKER',
 			1784901600000000000 + sequence_number
 		  FROM generate_series(1, 100000) AS sequence(sequence_number);
@@ -657,7 +764,7 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 			fill.fill_id::text,
 			fill.order_id::text,
 			fill.side,
-			lower(fill.position_effect),
+			fill.position_effect,
 			fill.logical_time,
 			count(*) OVER ()
 		   FROM trading.fills AS fill
