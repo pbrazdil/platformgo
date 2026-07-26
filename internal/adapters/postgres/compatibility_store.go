@@ -1037,14 +1037,26 @@ func (store *CompatibilityStore) LatestFillExecution(
 // FillExecutionFilter is the source-proven subset of fill-history filters.
 // TradeID names the external contract field that filters the durable fill ID.
 type FillExecutionFilter struct {
-	Side    string
-	TradeID string
-	Limit   int
+	Side      string
+	TradeID   string
+	Limit     int
+	Cursor    string
+	Direction string
 }
 
-// FilterFillExecutions returns immutable executions matching the source-proven
-// side and trade-ID filters. It remains internal until the complete HTTP fills
-// contract is implemented.
+type fillHistoryCursor struct {
+	logicalTime int64
+	fillID      string
+}
+
+type fillHistoryRow struct {
+	view        edge.FillExecutionView
+	logicalTime int64
+}
+
+// FilterFillExecutions returns one newest-first immutable execution page
+// matching the source-proven filters. It remains internal until the complete
+// HTTP fills contract is implemented.
 func (store *CompatibilityStore) FilterFillExecutions(
 	ctx context.Context,
 	accountID string,
@@ -1070,6 +1082,12 @@ func (store *CompatibilityStore) FilterFillExecutions(
 	if limit > 200 {
 		limit = 200
 	}
+	cursor, err := decodeFillHistoryCursor(filter.Cursor)
+	if err != nil {
+		return edge.FillExecutionPage{}, err
+	}
+	forward := cursor == nil ||
+		(filter.Direction != "prev" && filter.Direction != "backward")
 	var requestedSide any
 	if side != "" {
 		requestedSide = side
@@ -1078,43 +1096,146 @@ func (store *CompatibilityStore) FilterFillExecutions(
 	if tradeID != "" {
 		requestedTradeID = tradeID
 	}
-	rows, err := store.pool.Query(ctx, `
+	query := `
+		WITH page AS (
+			SELECT
+				fill.fill_id,
+				fill.order_id,
+				fill.side,
+				fill.position_effect,
+				fill.logical_time
+			  FROM trading.fills AS fill
+			 WHERE fill.account_id = $1
+			   AND ($2::text IS NULL OR fill.side = $2)
+			   AND ($3::uuid IS NULL OR fill.fill_id = $3)
+			 ORDER BY fill.logical_time DESC, fill.fill_id DESC
+			 LIMIT $4
+		),
+		filtered_total AS (
+			SELECT count(*) AS total
+			  FROM trading.fills AS counted
+			 WHERE counted.account_id = $1
+			   AND ($2::text IS NULL OR counted.side = $2)
+			   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+		)
 		SELECT
-			fill.fill_id::text,
-			fill.order_id::text,
-			fill.side,
-			fill.position_effect,
-			fill.logical_time,
-			count(*) OVER ()
-		  FROM trading.fills AS fill
-		 WHERE fill.account_id = $1
-		   AND ($2::text IS NULL OR fill.side = $2)
-		   AND ($3::uuid IS NULL OR fill.fill_id = $3)
-		 ORDER BY fill.logical_time DESC, fill.fill_id DESC
-		 LIMIT $4`,
+			page.fill_id::text,
+			page.order_id::text,
+			page.side,
+			page.position_effect,
+			page.logical_time,
+			filtered_total.total
+		  FROM filtered_total
+		  LEFT JOIN page ON true
+		 ORDER BY page.logical_time DESC NULLS LAST,
+		          page.fill_id DESC NULLS LAST`
+	args := []any{
 		accountID,
 		requestedSide,
 		requestedTradeID,
-		limit,
-	)
+		limit + 1,
+	}
+	if cursor != nil {
+		query = `
+			WITH page AS (
+				SELECT
+					fill.fill_id,
+					fill.order_id,
+					fill.side,
+					fill.position_effect,
+					fill.logical_time
+				  FROM trading.fills AS fill
+				 WHERE fill.account_id = $1
+				   AND ($2::text IS NULL OR fill.side = $2)
+				   AND ($3::uuid IS NULL OR fill.fill_id = $3)
+				   AND (fill.logical_time, fill.fill_id) < ($4, $5)
+				 ORDER BY fill.logical_time DESC, fill.fill_id DESC
+				 LIMIT $6
+			),
+			filtered_total AS (
+				SELECT count(*) AS total
+				  FROM trading.fills AS counted
+				 WHERE counted.account_id = $1
+				   AND ($2::text IS NULL OR counted.side = $2)
+				   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+			)
+			SELECT
+				page.fill_id::text,
+				page.order_id::text,
+				page.side,
+				page.position_effect,
+				page.logical_time,
+				filtered_total.total
+			  FROM filtered_total
+			  LEFT JOIN page ON true
+			 ORDER BY page.logical_time DESC NULLS LAST,
+			          page.fill_id DESC NULLS LAST`
+		if !forward {
+			query = `
+				WITH page AS (
+					SELECT
+						fill.fill_id,
+						fill.order_id,
+						fill.side,
+						fill.position_effect,
+						fill.logical_time
+					  FROM trading.fills AS fill
+					 WHERE fill.account_id = $1
+					   AND ($2::text IS NULL OR fill.side = $2)
+					   AND ($3::uuid IS NULL OR fill.fill_id = $3)
+					   AND (fill.logical_time, fill.fill_id) > ($4, $5)
+					 ORDER BY fill.logical_time ASC, fill.fill_id ASC
+					 LIMIT $6
+				),
+				filtered_total AS (
+					SELECT count(*) AS total
+					  FROM trading.fills AS counted
+					 WHERE counted.account_id = $1
+					   AND ($2::text IS NULL OR counted.side = $2)
+					   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+				)
+				SELECT
+					page.fill_id::text,
+					page.order_id::text,
+					page.side,
+					page.position_effect,
+					page.logical_time,
+					filtered_total.total
+				  FROM filtered_total
+				  LEFT JOIN page ON true
+				 ORDER BY page.logical_time ASC NULLS LAST,
+				          page.fill_id ASC NULLS LAST`
+		}
+		args = []any{
+			accountID,
+			requestedSide,
+			requestedTradeID,
+			cursor.logicalTime,
+			cursor.fillID,
+			limit + 1,
+		}
+	}
+	rows, err := store.pool.Query(ctx, query, args...)
 	if err != nil {
 		return edge.FillExecutionPage{}, fmt.Errorf("filter fill executions: %w", err)
 	}
 	defer rows.Close()
-	page := edge.FillExecutionPage{
-		Items: make([]edge.FillExecutionView, 0, limit),
-	}
+	history := make([]fillHistoryRow, 0, limit+1)
+	var total int64
 	for rows.Next() {
+		var row fillHistoryRow
 		var (
-			view        edge.FillExecutionView
-			logicalTime int64
-			total       int64
+			fillID         *string
+			orderID        *string
+			side           *string
+			positionEffect *string
+			logicalTime    *int64
 		)
 		if err := rows.Scan(
-			&view.FillID,
-			&view.OrderID,
-			&view.Side,
-			&view.TradeType,
+			&fillID,
+			&orderID,
+			&side,
+			&positionEffect,
 			&logicalTime,
 			&total,
 		); err != nil {
@@ -1123,21 +1244,101 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				err,
 			)
 		}
-		if err := validateFillTradeType(view.TradeType); err != nil {
+		if fillID == nil {
+			continue
+		}
+		if orderID == nil ||
+			side == nil ||
+			positionEffect == nil ||
+			logicalTime == nil {
+			return edge.FillExecutionPage{}, fmt.Errorf(
+				"scan filtered fill execution: incomplete durable fill",
+			)
+		}
+		row.view.FillID = *fillID
+		row.view.OrderID = *orderID
+		row.view.Side = *side
+		row.view.TradeType = *positionEffect
+		row.logicalTime = *logicalTime
+		if err := validateFillTradeType(row.view.TradeType); err != nil {
 			return edge.FillExecutionPage{}, fmt.Errorf(
 				"scan filtered fill execution: %w",
 				err,
 			)
 		}
-		view.OrderID = "urn:xb:order:" + view.OrderID
-		view.FilledAt = time.Unix(0, logicalTime).UTC().Format(time.RFC3339Nano)
-		page.Items = append(page.Items, view)
-		page.Total = total
+		row.view.OrderID = "urn:xb:order:" + row.view.OrderID
+		row.view.FilledAt = time.Unix(0, row.logicalTime).
+			UTC().
+			Format(time.RFC3339Nano)
+		history = append(history, row)
 	}
 	if err := rows.Err(); err != nil {
 		return edge.FillExecutionPage{}, fmt.Errorf("filter fill executions: %w", err)
 	}
+	hasMore := len(history) > limit
+	if hasMore {
+		history = history[:limit]
+	}
+	if !forward && cursor != nil {
+		for left, right := 0, len(history)-1; left < right; left, right = left+1, right-1 {
+			history[left], history[right] = history[right], history[left]
+		}
+	}
+	page := edge.FillExecutionPage{
+		Items: make([]edge.FillExecutionView, len(history)),
+		Total: total,
+	}
+	for index := range history {
+		page.Items[index] = history[index].view
+	}
+	if len(history) != 0 {
+		newest := encodeFillHistoryCursor(history[0])
+		oldest := encodeFillHistoryCursor(history[len(history)-1])
+		if forward {
+			if hasMore {
+				page.NextCursor = &oldest
+			}
+			if cursor != nil {
+				page.PrevCursor = &newest
+			}
+		} else {
+			page.NextCursor = &oldest
+			if hasMore {
+				page.PrevCursor = &newest
+			}
+		}
+	}
 	return page, nil
+}
+
+func encodeFillHistoryCursor(row fillHistoryRow) string {
+	raw := strconv.FormatInt(row.logicalTime, 10) + ":" + row.view.FillID
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+func decodeFillHistoryCursor(encoded string) (*fillHistoryCursor, error) {
+	if encoded == "" {
+		return nil, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, edge.ErrInvalidRequest
+	}
+	parts := strings.SplitN(string(raw), ":", 2)
+	if len(parts) != 2 {
+		return nil, edge.ErrInvalidRequest
+	}
+	nanoseconds, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return nil, edge.ErrInvalidRequest
+	}
+	if _, err := engine.ParseID(parts[1]); err != nil {
+		return nil, edge.ErrInvalidRequest
+	}
+	return &fillHistoryCursor{
+		logicalTime: nanoseconds,
+		fillID:      parts[1],
+	}, nil
 }
 
 func validateFillTradeType(tradeType string) error {
