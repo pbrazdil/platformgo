@@ -1,8 +1,8 @@
 -- Decision-hash v3 durable balance-projection authority.
 --
--- Lock: market.books takes ACCESS EXCLUSIVE before both receipt tables take
--- SHARE ROW EXCLUSIVE, matching the writer's book-before-receipt order and
--- closing overlap with an in-flight old writer. Locks are bounded by
+-- Lock: trading.instruments and market.books are locked before both receipt
+-- tables, matching the writer's instrument-before-book-before-receipt order
+-- and closing overlap with an in-flight old writer. Locks are bounded by
 -- lock_timeout.
 -- Rewrite: none. The guard is read-only and bounded by statement_timeout.
 -- Transaction: the migrator applies this file atomically; guard refusal or
@@ -16,6 +16,8 @@
 SET LOCAL lock_timeout = '2s';
 SET LOCAL statement_timeout = '30s';
 
+LOCK TABLE trading.instruments IN SHARE ROW EXCLUSIVE MODE;
+
 LOCK TABLE market.books IN ACCESS EXCLUSIVE MODE;
 
 LOCK TABLE
@@ -28,6 +30,39 @@ ALTER TABLE market.books
 
 DO $$
 BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM (
+              SELECT
+                  settlement_currency AS currency,
+                  settlement_currency_scale AS scale
+                FROM trading.instruments
+              UNION ALL
+              SELECT
+                  change ->> 'SettlementCurrency' AS currency,
+                  (change ->> 'SettlementCurrencyScale')::smallint AS scale
+                FROM engine.input_receipts AS receipt
+                CROSS JOIN LATERAL jsonb_array_elements(
+                    CASE
+                        WHEN jsonb_typeof(
+                            receipt.decision -> 'InstrumentChanges'
+                        ) = 'array'
+                        THEN receipt.decision -> 'InstrumentChanges'
+                        ELSE '[]'::jsonb
+                    END
+                ) AS change
+          ) AS currency_scales
+         WHERE currency IS NOT NULL
+           AND scale IS NOT NULL
+         GROUP BY currency
+        HAVING count(DISTINCT scale) > 1
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'one currency code has multiple settlement scales',
+            HINT = 'keep writers halted; preserve the database and resolve the catalog conflict through an owner-reviewed forward repair or restore/reset';
+    END IF;
+
     IF EXISTS (
         SELECT 1
           FROM engine.input_receipts
@@ -81,3 +116,36 @@ $$;
 CREATE TRIGGER duplicate_receipts_require_decision_hash_v3
 BEFORE INSERT ON engine.duplicate_delivery_receipts
 FOR EACH ROW EXECUTE FUNCTION engine.require_duplicate_delivery_hash_v3();
+
+CREATE FUNCTION trading.require_currency_scale_consistency()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF TG_OP = 'UPDATE'
+       AND NEW.settlement_currency = OLD.settlement_currency
+       AND NEW.settlement_currency_scale <>
+           OLD.settlement_currency_scale THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'settlement currency code must use one scale';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+          FROM trading.instruments AS existing
+         WHERE existing.settlement_currency = NEW.settlement_currency
+           AND existing.settlement_currency_scale <>
+               NEW.settlement_currency_scale
+           AND existing.instrument_id <> NEW.instrument_id
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'settlement currency code must use one scale';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER instruments_require_currency_scale_consistency
+BEFORE INSERT OR UPDATE ON trading.instruments
+FOR EACH ROW EXECUTE FUNCTION trading.require_currency_scale_consistency();

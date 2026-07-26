@@ -2,6 +2,57 @@ package engine
 
 import "testing"
 
+func TestCurrencyCodeCannotBeConfiguredWithConflictingScales(t *testing.T) {
+	fixture := newTradingFixture(t)
+	configure := func(instrumentID string, scale uint8) TradingAction {
+		return TradingAction{
+			Kind: TradingActionConfigureInstrument,
+			ConfigureInstrument: &ConfigureInstrument{
+				InstrumentID:            instrumentID,
+				Revision:                1,
+				PriceScale:              2,
+				QuantityScale:           3,
+				SettlementCurrency:      "USDC",
+				SettlementCurrencyScale: scale,
+				InitialMarginRate:       "0.1",
+				MaintenanceMarginRate:   "0.05",
+				MaxLeverage:             "10",
+				MakerFeeRate:            "0",
+				TakerFeeRate:            "0",
+			},
+		}
+	}
+
+	conflict := fixture.applyDecision(t, configure("ETH-PERP", 2))
+	if conflict.CommandResult.Status != CommandStatusRejected ||
+		conflict.CommandResult.Reason != RejectionInvalidInstrument ||
+		len(conflict.InstrumentChanges) != 0 {
+		t.Fatalf("conflicting currency scale decision = %+v", conflict)
+	}
+	conflictingBalance := fixture.applyDecision(t, TradingAction{
+		Kind: TradingActionAdjustBalance,
+		AdjustBalance: &AdjustBalance{
+			AccountID:     "account-1",
+			Currency:      "USDC",
+			CurrencyScale: 2,
+			Operation:     BalanceOperationSet,
+			Amount:        "20",
+		},
+	})
+	if conflictingBalance.CommandResult.Status != CommandStatusRejected ||
+		len(conflictingBalance.BalanceChanges) != 0 ||
+		len(conflictingBalance.LedgerChanges) != 0 {
+		t.Fatalf("conflicting scale balance decision = %+v", conflictingBalance)
+	}
+
+	sameScale := fixture.apply(t, configure("ETH-PERP", 8))
+	if sameScale.CommandResult.Status != CommandStatusAccepted ||
+		len(sameScale.InstrumentChanges) != 1 ||
+		sameScale.InstrumentChanges[0].SettlementCurrencyScale != 8 {
+		t.Fatalf("same currency scale decision = %+v", sameScale)
+	}
+}
+
 func TestBalanceDecisionCarriesStableBalancedLedgerEffect(t *testing.T) {
 	fixture := newTradingFixture(t)
 	decision := fixture.apply(t, TradingAction{

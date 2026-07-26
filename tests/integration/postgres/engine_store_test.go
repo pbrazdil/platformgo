@@ -3388,6 +3388,148 @@ func TestEngineStoreRestoredMarkRepairsProjectionWithoutLedgerDelta(
 	}
 }
 
+func TestEngineStoreRejectsCurrencyScaleAliasesAndRecoversExactly(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("migrate currency-scale database: %v", err)
+	}
+
+	store := platformpostgres.NewEngineStore(pool)
+	state := engine.NewState(8)
+	ids := testkit.NewShardIDSequence(8)
+	clock := testkit.NewManualClock(
+		engine.NewLogicalTime(time.Date(2026, time.July, 26, 17, 0, 0, 0, time.UTC)),
+	)
+	instrument := func(instrumentID string, scale uint8) engine.TradingAction {
+		return engine.TradingAction{
+			Kind: engine.TradingActionConfigureInstrument,
+			ConfigureInstrument: &engine.ConfigureInstrument{
+				InstrumentID:            instrumentID,
+				Revision:                1,
+				PriceScale:              2,
+				QuantityScale:           3,
+				SettlementCurrency:      "USDC",
+				SettlementCurrencyScale: scale,
+				InitialMarginRate:       "0.1",
+				MaintenanceMarginRate:   "0.05",
+				MaxLeverage:             "10",
+				MakerFeeRate:            "0",
+				TakerFeeRate:            "0",
+			},
+		}
+	}
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		instrument("BTC-PERP", 2),
+		platformpostgres.ApplyOptions{},
+	)
+	conflictingAction := instrument("ETH-PERP", 8)
+	var (
+		conflictingDecision engine.Decision
+		conflictingInput    engine.InputEnvelope
+	)
+	state, conflictingDecision, conflictingInput, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		conflictingAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if conflictingDecision.CommandResult.Status != engine.CommandStatusRejected ||
+		conflictingDecision.CommandResult.Reason != engine.RejectionInvalidInstrument ||
+		len(conflictingDecision.InstrumentChanges) != 0 ||
+		len(conflictingDecision.BalanceChanges) != 0 ||
+		len(conflictingDecision.LedgerChanges) != 0 {
+		t.Fatalf("conflicting currency-scale decision = %+v", conflictingDecision)
+	}
+	assertRowCount(t, pool, "trading.instruments", 1)
+
+	duplicateInput := conflictingInput
+	duplicateInput.StreamSequence = state.NextStreamSequence()
+	duplicateState, duplicateDecision, duplicate, err := store.ApplyTrading(
+		ctx,
+		state,
+		duplicateInput,
+		conflictingAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if err != nil || !duplicate {
+		t.Fatalf(
+			"conflicting scale duplicate = duplicate %t error %v",
+			duplicate,
+			err,
+		)
+	}
+	if len(duplicateDecision.InstrumentChanges) != 0 ||
+		len(duplicateDecision.BalanceChanges) != 0 ||
+		len(duplicateDecision.LedgerChanges) != 0 {
+		t.Fatalf("conflicting scale duplicate effects = %+v", duplicateDecision)
+	}
+	assertRowCount(t, pool, "trading.instruments", 1)
+
+	recovered, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover currency-scale rejection: %v", err)
+	}
+	if recovered.Hash() != duplicateState.Hash() || !recovered.Ready() {
+		t.Fatalf(
+			"recovered scale rejection ready=%t hash=%s, want %s",
+			recovered.Ready(),
+			recovered.Hash(),
+			duplicateState.Hash(),
+		)
+	}
+	if report, err := store.ReconcileShard(ctx, 8); err != nil || !report.Ready {
+		t.Fatalf("currency-scale rejection reconciliation = %+v, error %v", report, err)
+	}
+
+	finalState, sameScale, _, _ := applyStoredTrading(
+		t,
+		pool,
+		store,
+		duplicateState,
+		ids,
+		clock,
+		instrument("ETH-PERP", 2),
+		platformpostgres.ApplyOptions{},
+	)
+	if sameScale.CommandResult.Status != engine.CommandStatusAccepted ||
+		len(sameScale.InstrumentChanges) != 1 {
+		t.Fatalf("same currency-scale decision = %+v", sameScale)
+	}
+	assertRowCount(t, pool, "trading.instruments", 2)
+	recoveredFinal, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover same-scale instruments: %v", err)
+	}
+	if recoveredFinal.Hash() != finalState.Hash() || !recoveredFinal.Ready() {
+		t.Fatalf(
+			"recovered same-scale ready=%t hash=%s, want %s",
+			recoveredFinal.Ready(),
+			recoveredFinal.Hash(),
+			finalState.Hash(),
+		)
+	}
+	if report, err := store.ReconcileShard(ctx, 8); err != nil || !report.Ready {
+		t.Fatalf("same-scale reconciliation = %+v, error %v", report, err)
+	}
+}
+
 func assertLedgerRowCounts(
 	t *testing.T,
 	pool *pgxpool.Pool,
@@ -3625,6 +3767,8 @@ func assertRowCount(t *testing.T, pool queryRower, relation string, want int) {
 		query = "SELECT count(*) FROM trading.positions"
 	case "trading.accounts":
 		query = "SELECT count(*) FROM trading.accounts"
+	case "trading.instruments":
+		query = "SELECT count(*) FROM trading.instruments"
 	case "messaging.domain_outbox":
 		query = "SELECT count(*) FROM messaging.outbox WHERE subject LIKE 'domain.v1.%'"
 	default:

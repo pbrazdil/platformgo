@@ -284,6 +284,13 @@ func configureTradingInstrument(
 	if err != nil {
 		return rejectedTradingDecision(state, RejectionInvalidInstrument)
 	}
+	for _, instrument := range state.trading.instruments {
+		existing := instrument.settlementCurrency
+		if existing.Code() == settlementCurrency.Code() &&
+			!existing.Equal(settlementCurrency) {
+			return rejectedTradingDecision(state, RejectionInvalidInstrument)
+		}
+	}
 	initialMarginRate, err := domain.NewRate(configure.InitialMarginRate)
 	if err != nil || initialMarginRate.Decimal().Sign() < 0 {
 		return rejectedTradingDecision(state, RejectionInvalidInstrument)

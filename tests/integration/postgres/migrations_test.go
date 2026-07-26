@@ -3684,6 +3684,199 @@ func TestBalanceProjectionHashV3MigrationGuardsHistoricalOrderReceipts(
 	assertFinalMigrationHistory(t, pool)
 }
 
+func TestBalanceProjectionHashV3MigrationGuardsCurrencyScaleConflicts(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("apply pre-v3 schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES
+			('BTC-PERP', 1, 2, 3, 'USDC', 2, 0.1, 0.05, 10, 0, 0),
+			('ETH-PERP', 1, 2, 3, 'USDC', 8, 0.1, 0.05, 10, 0, 0)`); err != nil {
+		t.Fatalf("seed conflicting currency scales: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	err := current.Migrate(ctx)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("currency-scale migration error = %v, want 55000", err)
+	}
+	var (
+		lastMigration   string
+		instrumentCount int
+		markNotNull     bool
+		triggerExists   bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			(SELECT count(*) FROM trading.instruments),
+			(
+				SELECT attnotnull
+				  FROM pg_attribute
+				 WHERE attrelid = 'market.books'::regclass
+				   AND attname = 'mark_price'
+				   AND NOT attisdropped
+			),
+			EXISTS (
+				SELECT 1
+				  FROM pg_trigger
+				 WHERE tgname =
+				       'instruments_require_currency_scale_consistency'
+				   AND NOT tgisinternal
+			)`,
+	).Scan(
+		&lastMigration,
+		&instrumentCount,
+		&markNotNull,
+		&triggerExists,
+	); err != nil {
+		t.Fatalf("inspect currency-scale guard rollback: %v", err)
+	}
+	if lastMigration != "20260726000700_phase3_user_api_keys.up.sql" ||
+		instrumentCount != 2 ||
+		!markNotNull ||
+		triggerExists {
+		t.Fatalf(
+			"currency guard state = last %q instruments %d mark not-null %t trigger %t",
+			lastMigration,
+			instrumentCount,
+			markNotNull,
+			triggerExists,
+		)
+	}
+
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("reapply pre-v3 schema for receipt history: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 8, 0.1, 0.05, 10, 0, 0
+		)`); err != nil {
+		t.Fatalf("seed current currency scale: %v", err)
+	}
+	historyConnection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire historical scale connection: %v", err)
+	}
+	if _, err := historyConnection.Exec(ctx, `
+		SELECT set_config(
+			'platformgo.runtime_schema_revision',
+			'20260725001100_phase3_committed_realtime_outbox',
+			false
+		);
+		INSERT INTO engine.input_receipts (
+			shard_id, input_id, stream_sequence, schema_version,
+			input_hash_version, input_hash, decision_hash_version,
+			decision_hash, resulting_state_hash, envelope, decision,
+			business_input_hash, business_input_hash_version
+		) VALUES (
+			8,
+			'00000000-0000-4000-8000-000000000831',
+			1,
+			1,
+			1,
+			decode(repeat('61', 32), 'hex'),
+			2,
+			decode(repeat('62', 32), 'hex'),
+			decode(repeat('63', 32), 'hex'),
+			'{}',
+			'{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":2
+			}]}',
+			decode(repeat('64', 32), 'hex'),
+			1
+		)`); err != nil {
+		historyConnection.Release()
+		t.Fatalf("seed historical currency scale: %v", err)
+	}
+	historyConnection.Release()
+	err = current.Migrate(ctx)
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("historical scale migration error = %v, want 55000", err)
+	}
+	var historyPreserved bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM engine.input_receipts
+			 WHERE input_id =
+			       '00000000-0000-4000-8000-000000000831'
+		)`).Scan(&historyPreserved); err != nil || !historyPreserved {
+		t.Fatalf(
+			"historical scale receipt preserved=%t, error %v",
+			historyPreserved,
+			err,
+		)
+	}
+
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("reapply pre-v3 schema: %v", err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("migrate consistent currency catalog: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2, 0.1, 0.05, 10, 0, 0
+		)`); err != nil {
+		t.Fatalf("seed consistent currency scale: %v", err)
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'ETH-PERP', 1, 2, 3, 'USDC', 8, 0.1, 0.05, 10, 0, 0
+		)`)
+	if !errors.As(err, &postgresError) || postgresError.Code != "23514" {
+		t.Fatalf("post-cutover conflicting insert = %v, want 23514", err)
+	}
+	_, err = pool.Exec(ctx, `
+		UPDATE trading.instruments
+		   SET settlement_currency_scale = 8
+		 WHERE instrument_id = 'BTC-PERP'`)
+	if !errors.As(err, &postgresError) || postgresError.Code != "23514" {
+		t.Fatalf("post-cutover conflicting update = %v, want 23514", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
 func TestBalanceProjectionHashV3MigrationLocksBeforeHistoricalGuard(
 	t *testing.T,
 ) {
