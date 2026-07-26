@@ -31,7 +31,7 @@ import (
 //	test: client_creates_own_api_key
 //
 // Adaptations:
-//   - The Rust runtime is replaced by the Go HTTP edge and real PostgreSQL 17.
+//   - The Rust runtime is replaced by the Go HTTP edge and real PostgreSQL 19 Beta 2.
 //   - Fixture password length follows the accepted Go credential policy; the
 //     source test asserts successful authentication, not a password minimum.
 //   - Shared request fields unused by the source client handler are accepted
@@ -796,7 +796,7 @@ func TestUserAPIKeyReplayRotationUsesDistributeThenPromote(t *testing.T) {
 //	test: protected_surface_is_per_principal_rate_limited
 //
 // Adaptations:
-//   - The Rust runtime is replaced by the Go HTTP edge and real PostgreSQL 17.
+//   - The Rust runtime is replaced by the Go HTTP edge and real PostgreSQL 19 Beta 2.
 //   - Fixed test accounts and a catalog instrument replace source fixture
 //     builders while preserving the same public and protected routes.
 //
@@ -1295,7 +1295,7 @@ func TestInvalidUserAPIKeyRequestsConsumeSharedRate(t *testing.T) {
 //
 // Adaptations:
 //   - The handler-level source test is exercised through the real HTTP and
-//     PostgreSQL 17 boundary.
+//     PostgreSQL 19 Beta 2 boundary.
 //   - Concurrent requests at the final slot prove that the cap cannot race.
 //
 // Assertions preserved:

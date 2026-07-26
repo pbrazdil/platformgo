@@ -1173,8 +1173,15 @@ func enforceRuntimeDatabaseRole(
 	if expected == databaseRoleEngine {
 		if _, err := connection.Exec(
 			ctx,
-			"SELECT set_config('platformgo.runtime_schema_revision', $1, false)",
+			`SELECT
+				set_config('platformgo.runtime_schema_revision', $1, false),
+				set_config(
+					'platformgo.engine_decision_hash_version',
+					$2,
+					false
+				)`,
 			runtimeSchemaRevision,
+			fmt.Sprint(engine.CurrentDecisionHashVersion),
 		); err != nil {
 			return fmt.Errorf("runtime PostgreSQL schema revision binding: %w", err)
 		}

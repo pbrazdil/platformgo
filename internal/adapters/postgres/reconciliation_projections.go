@@ -446,8 +446,11 @@ func compareRisks(
 ) (uint64, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT risk.account_id, risk.instrument_id, risk.margin_mode,
-		       trim_scale(risk.leverage)::text, risk.version
-		  FROM trading.risk_configs AS risk`)
+		       trim_scale(risk.leverage)::text, risk.version,
+		       COALESCE(risk.leverage <= instrument.max_leverage, false)
+		  FROM trading.risk_configs AS risk
+		  LEFT JOIN trading.instruments AS instrument
+		    ON instrument.instrument_id = risk.instrument_id`)
 	if err != nil {
 		return 0, err
 	}
@@ -455,18 +458,22 @@ func compareRisks(
 	var mismatches uint64
 	for rows.Next() {
 		var actual versionedRisk
+		var withinInstrumentAuthority bool
 		if scanErr := rows.Scan(
 			&actual.Snapshot.AccountID,
 			&actual.Snapshot.InstrumentID,
 			&actual.Snapshot.MarginMode,
 			&actual.Snapshot.Leverage,
 			&actual.Version,
+			&withinInstrumentAuthority,
 		); scanErr != nil {
 			return 0, scanErr
 		}
 		key := actual.Snapshot.AccountID + "\x00" + actual.Snapshot.InstrumentID
 		want, found := expected[key]
-		if !found || !projectionEqual(want, actual) {
+		if !found ||
+			!projectionEqual(want, actual) ||
+			!withinInstrumentAuthority {
 			mismatches++
 		}
 		delete(expected, key)
@@ -662,6 +669,7 @@ func compareFills(
 		       COALESCE(settlement_currency, ''), liquidity_side,
 		       COALESCE(trim_scale(fee)::text, ''),
 		       COALESCE(fee_currency, ''),
+		       COALESCE(trim_scale(effective_leverage)::text, ''),
 		       logical_time
 		  FROM trading.fills AS fills`)
 	if err != nil {
@@ -689,6 +697,7 @@ func compareFills(
 			&actual.Snapshot.LiquiditySide,
 			&actual.Snapshot.Fee,
 			&actual.Snapshot.FeeCurrency,
+			&actual.Snapshot.EffectiveLeverage,
 			&logicalTime,
 		); scanErr != nil {
 			return 0, scanErr

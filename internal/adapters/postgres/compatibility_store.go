@@ -1011,6 +1011,7 @@ func (store *CompatibilityStore) LatestFillExecution(
 			fill.position_effect,
 			trim_scale(fill.realized_pnl)::text,
 			fill.settlement_currency,
+			trim_scale(fill.effective_leverage)::text,
 			fill.logical_time
 		  FROM trading.fills AS fill
 		 WHERE fill.account_id = $1
@@ -1025,6 +1026,7 @@ func (store *CompatibilityStore) LatestFillExecution(
 		&view.TradeType,
 		&view.RealizedPnL,
 		&view.SettlementCurrency,
+		&view.Leverage,
 		&logicalTime,
 	); err != nil {
 		return edge.FillExecutionView{}, fmt.Errorf("read latest fill execution: %w", err)
@@ -1117,6 +1119,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				fill.position_effect,
 				fill.realized_pnl,
 				fill.settlement_currency,
+				fill.effective_leverage,
 				fill.logical_time
 			  FROM trading.fills AS fill
 			 WHERE fill.account_id = $1
@@ -1140,6 +1143,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			page.position_effect,
 			trim_scale(page.realized_pnl)::text,
 			page.settlement_currency,
+			trim_scale(page.effective_leverage)::text,
 			page.logical_time,
 			filtered_total.total
 		  FROM filtered_total
@@ -1163,6 +1167,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 					fill.position_effect,
 					fill.realized_pnl,
 					fill.settlement_currency,
+					fill.effective_leverage,
 					fill.logical_time
 				  FROM trading.fills AS fill
 				 WHERE fill.account_id = $1
@@ -1187,6 +1192,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				page.position_effect,
 				trim_scale(page.realized_pnl)::text,
 				page.settlement_currency,
+				trim_scale(page.effective_leverage)::text,
 				page.logical_time,
 				filtered_total.total
 			  FROM filtered_total
@@ -1204,6 +1210,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 						fill.position_effect,
 						fill.realized_pnl,
 						fill.settlement_currency,
+						fill.effective_leverage,
 						fill.logical_time
 					  FROM trading.fills AS fill
 					 WHERE fill.account_id = $1
@@ -1228,6 +1235,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 					page.position_effect,
 					trim_scale(page.realized_pnl)::text,
 					page.settlement_currency,
+					trim_scale(page.effective_leverage)::text,
 					page.logical_time,
 					filtered_total.total
 				  FROM filtered_total
@@ -1261,6 +1269,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			positionEffect *string
 			realizedPnL    *string
 			settlement     *string
+			leverage       *string
 			logicalTime    *int64
 		)
 		if err := rows.Scan(
@@ -1271,6 +1280,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			&positionEffect,
 			&realizedPnL,
 			&settlement,
+			&leverage,
 			&logicalTime,
 			&total,
 		); err != nil {
@@ -1298,6 +1308,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		row.view.TradeType = *positionEffect
 		row.view.RealizedPnL = realizedPnL
 		row.view.SettlementCurrency = settlement
+		row.view.Leverage = leverage
 		row.logicalTime = *logicalTime
 		if (row.view.RealizedPnL == nil) !=
 			(row.view.SettlementCurrency == nil) {

@@ -1245,11 +1245,17 @@ func TestRuntimeMigrationVerificationIsExactAndOldEngineIsFenced(t *testing.T) {
 	}
 	if _, err = currentEngine.Exec(ctx, "SET LOCAL ROLE platformgo_engine"); err == nil {
 		_, err = currentEngine.Exec(ctx, `
-			SELECT set_config(
-				'platformgo.runtime_schema_revision',
-				'20260725001100_phase3_committed_realtime_outbox',
-				true
-			)`)
+			SELECT
+				set_config(
+					'platformgo.runtime_schema_revision',
+					'20260725001100_phase3_committed_realtime_outbox',
+					true
+				),
+				set_config(
+					'platformgo.engine_decision_hash_version',
+					'4',
+					true
+				)`)
 	}
 	if err == nil {
 		_, err = currentEngine.Exec(ctx, testInputReceiptInsertSQL, 31, 2)
@@ -1295,7 +1301,7 @@ const testInputReceiptInsertSQL = `
 		1,
 		1,
 		decode(repeat('00', 32), 'hex'),
-		3,
+		4,
 		decode(repeat('01', 32), 'hex'),
 		decode(repeat('02', 32), 'hex'),
 		'{}',
@@ -1718,11 +1724,17 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 	}
 	defer connection.Release()
 	if _, err := connection.Exec(context.Background(), `
-		SELECT set_config(
-			'platformgo.runtime_schema_revision',
-			'20260725001100_phase3_committed_realtime_outbox',
-			false
-		)`); err != nil {
+		SELECT
+			set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				false
+			),
+			set_config(
+				'platformgo.engine_decision_hash_version',
+				'4',
+				false
+			)`); err != nil {
 		t.Fatalf("bind baseline runtime schema revision: %v", err)
 	}
 	_, err = connection.Exec(context.Background(), `
@@ -1827,17 +1839,17 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 			resulting_state_hash, envelope, decision
 		) VALUES
 			(7, '019f9460-4b36-4e9b-8f44-682611f70021', 1, 1,
-			 1, decode(repeat('21', 32), 'hex'), 3,
+			 1, decode(repeat('21', 32), 'hex'), 4,
 			 decode(repeat('31', 32), 'hex'), 1,
 			 decode(repeat('41', 32), 'hex'),
 			 decode(repeat('51', 32), 'hex'), '{}', '{}'),
 			(7, '019f9460-4b36-4e9b-8f44-682611f70022', 2, 1,
-			 1, decode(repeat('22', 32), 'hex'), 3,
+			 1, decode(repeat('22', 32), 'hex'), 4,
 			 decode(repeat('32', 32), 'hex'), 1,
 			 decode(repeat('42', 32), 'hex'),
 			 decode(repeat('52', 32), 'hex'), '{}', '{}'),
 			(7, '019f9460-4b36-4e9b-8f44-682611f70023', 3, 1,
-			 1, decode(repeat('23', 32), 'hex'), 3,
+			 1, decode(repeat('23', 32), 'hex'), 4,
 			 decode(repeat('33', 32), 'hex'), 1,
 			 decode(repeat('43', 32), 'hex'),
 			 decode(repeat('53', 32), 'hex'), '{}', '{}');
@@ -1859,7 +1871,7 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 			decode(repeat('31', 32), 'hex'),
 			decode(repeat('71', 32), 'hex'),
 			decode(repeat('51', 32), 'hex'), '{}',
-			'{"DecisionHashVersion":3}'
+			'{"DecisionHashVersion":4}'
 		);
 		INSERT INTO trading.idempotency_records (
 			scope, idempotency_key, request_hash, command_id, state, expires_at
@@ -2004,11 +2016,17 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 		"SET LOCAL ROLE platformgo_engine",
 	); err == nil {
 		_, err = engineTransaction.Exec(context.Background(), `
-			SELECT set_config(
-				'platformgo.runtime_schema_revision',
-				'20260725001100_phase3_committed_realtime_outbox',
-				true
-			)`)
+			SELECT
+				set_config(
+					'platformgo.runtime_schema_revision',
+					'20260725001100_phase3_committed_realtime_outbox',
+					true
+				),
+				set_config(
+					'platformgo.engine_decision_hash_version',
+					'4',
+					true
+				)`)
 	}
 	if err == nil {
 		_, err = engineTransaction.Exec(context.Background(), `
@@ -2024,7 +2042,7 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 				business_input_hash, resulting_state_hash, envelope, decision
 			) VALUES (
 				9, '019f9460-4b36-4e9b-8f44-682611f70101', 1, 1,
-				1, decode(repeat('93', 32), 'hex'), 3,
+				1, decode(repeat('93', 32), 'hex'), 4,
 				decode(repeat('94', 32), 'hex'), 1,
 				decode(repeat('95', 32), 'hex'),
 				decode(repeat('92', 32), 'hex'), '{}', '{}'
@@ -4888,9 +4906,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 20 ||
+	if count != 22 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260726000800_phase3_balance_projection_hash_v3.up.sql" {
+		last != "20260726001000_phase3_validate_fill_effective_leverage.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,
@@ -5613,11 +5631,17 @@ func assertReceiptIdentityConstraints(t *testing.T, pool *pgxpool.Pool) {
 	}
 	defer connection.Release()
 	if _, err := connection.Exec(context.Background(), `
-		SELECT set_config(
-			'platformgo.runtime_schema_revision',
-			'20260725001100_phase3_committed_realtime_outbox',
-			false
-		);
+		SELECT
+			set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				false
+			),
+			set_config(
+				'platformgo.engine_decision_hash_version',
+				'4',
+				false
+			);
 		INSERT INTO engine.deployment_shard (shard_id)
 		VALUES (7)`); err != nil {
 		t.Fatalf("bind receipt test deployment shard: %v", err)
@@ -5629,7 +5653,7 @@ func assertReceiptIdentityConstraints(t *testing.T, pool *pgxpool.Pool) {
 			business_input_hash_version, decision_hash_version,
 			decision_hash, resulting_state_hash, envelope, decision
 		) VALUES (7, $1, $2, 1, 1, decode(repeat('01', 32), 'hex'),
-		          decode(repeat('04', 32), 'hex'), 1, 3,
+		          decode(repeat('04', 32), 'hex'), 1, 4,
 		          decode(repeat('02', 32), 'hex'), decode(repeat('03', 32), 'hex'),
 		          '{}'::jsonb, '{}'::jsonb)`
 	inputID := "019f9460-4b36-4e9b-8f44-682611f7ee01"

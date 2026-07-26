@@ -302,11 +302,17 @@ func TestOutboxRuntimeRoleExecutesProductionClaimAndRepublish(t *testing.T) {
 	}
 	defer engineSeed.Release()
 	if _, err := engineSeed.Exec(context.Background(), `
-		SELECT set_config(
-			'platformgo.runtime_schema_revision',
-			'20260725001100_phase3_committed_realtime_outbox',
-			false
-		)`); err != nil {
+		SELECT
+			set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				false
+			),
+			set_config(
+				'platformgo.engine_decision_hash_version',
+				'4',
+				false
+			)`); err != nil {
 		t.Fatalf("bind engine seed schema revision: %v", err)
 	}
 	if _, err := engineSeed.Exec(context.Background(), `
@@ -317,9 +323,10 @@ func TestOutboxRuntimeRoleExecutesProductionClaimAndRepublish(t *testing.T) {
 			business_input_hash, business_input_hash_version
 		) VALUES (
 			7, $1, 1, 1,
-			1, decode(repeat('11', 32), 'hex'), 3,
+			1, decode(repeat('11', 32), 'hex'), 4,
 			decode(repeat('12', 32), 'hex'),
-			decode(repeat('13', 32), 'hex'), '{}', '{}',
+			decode(repeat('13', 32), 'hex'), '{}',
+			'{"DecisionHashVersion":4}',
 			decode(repeat('14', 32), 'hex'), 1
 		)`,
 		inputID.String(),

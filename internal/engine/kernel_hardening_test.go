@@ -190,11 +190,46 @@ func TestCanonicalJSONPayloadHasStableOrderingAndDefensiveBytes(t *testing.T) {
 func TestKernelHashGoldenVectors(t *testing.T) {
 	input := testInput(t, 1)
 	state := NewState(7)
-	next, decision, err := apply(state, input, func(state State) (State, Decision) {
+	accepted := func(state State) (State, Decision) {
 		return state, Decision{CommandResult: CommandResult{Status: CommandStatusAccepted}}
-	})
+	}
+	v2Next, v2Decision, err := applyWithSchemaAndDecisionHashVersion(
+		state,
+		input,
+		nil,
+		CurrentSchemaVersion,
+		accepted,
+		2,
+	)
 	if err != nil {
-		t.Fatalf("accepted apply: %v", err)
+		t.Fatalf("accepted apply v2: %v", err)
+	}
+	v3Next, v3Decision, err := applyWithSchemaAndDecisionHashVersion(
+		state,
+		input,
+		nil,
+		CurrentSchemaVersion,
+		accepted,
+		3,
+	)
+	if err != nil {
+		t.Fatalf("accepted apply v3: %v", err)
+	}
+	v4Next, v4Decision, err := apply(state, input, accepted)
+	if err != nil {
+		t.Fatalf("accepted current apply: %v", err)
+	}
+	if v2Decision.DecisionHashVersion != 2 ||
+		v3Decision.DecisionHashVersion != 3 ||
+		v4Decision.DecisionHashVersion != CurrentDecisionHashVersion ||
+		CurrentDecisionHashVersion != 4 {
+		t.Fatalf(
+			"decision hash versions = v2:%d v3:%d current:%d/%d",
+			v2Decision.DecisionHashVersion,
+			v3Decision.DecisionHashVersion,
+			v4Decision.DecisionHashVersion,
+			CurrentDecisionHashVersion,
+		)
 	}
 
 	invalid := testInput(t, 1)
@@ -210,21 +245,6 @@ func TestKernelHashGoldenVectors(t *testing.T) {
 	emptyPayload.Payload = CanonicalPayload{}
 	binaryPayload := testInput(t, 1)
 	binaryPayload.Payload = canonicalPayloadFromTrustedBytes([]byte{0x00, 0xff, 0x80, 0x01})
-	legacyDecision, legacyHashErr := hashDecisionAtVersion(
-		state.Hash(),
-		decision.InputHash,
-		decision.EffectsHash,
-		2,
-	)
-	if legacyHashErr != nil {
-		t.Fatalf("legacy decision hash: %v", legacyHashErr)
-	}
-	legacyState := hashAcceptedState(
-		state.Hash(),
-		decision.InputHash,
-		legacyDecision,
-		2,
-	)
 
 	vectors := []struct {
 		name string
@@ -232,12 +252,16 @@ func TestKernelHashGoldenVectors(t *testing.T) {
 		want string
 	}{
 		{name: "initial state", got: state.Hash(), want: "6685cbadc498da804da2b0f316b0b598ff43f501672c619c248330380e1496ab"},
-		{name: "input", got: decision.InputHash, want: "03c13213415db9db34fd61e86021074bf078552c47218ffa054313c6a86c1e2b"},
-		{name: "effects", got: decision.EffectsHash, want: "1a6d7a5957c2bc6f2f4fe77a1d184a6b5d8bf4420aa296ebdabf6756bfe48f75"},
-		{name: "decision v3", got: decision.DecisionHash, want: "8f084ec5428516d7a54f4074eb8957dd0d688d5b83b5a9ea49b09040d885db48"},
-		{name: "accepted state v3", got: next.Hash(), want: "fb8a2722d8b2fd39ebac53c055c7aaa86d67513d469c1d83bda9bcb9ce425294"},
-		{name: "decision v2", got: legacyDecision, want: "cf0e84ad5edfcca4a891b0831b202c5ec93a68cfda62960fffd280cd89ed99b0"},
-		{name: "accepted state v2", got: legacyState, want: "456d87bb496db7c6e94a446e0dfacd617bc45281044a5d95f1ef6a9daf5c9b2d"},
+		{name: "input", got: v4Decision.InputHash, want: "03c13213415db9db34fd61e86021074bf078552c47218ffa054313c6a86c1e2b"},
+		{name: "effects v2", got: v2Decision.EffectsHash, want: "1a6d7a5957c2bc6f2f4fe77a1d184a6b5d8bf4420aa296ebdabf6756bfe48f75"},
+		{name: "decision v2", got: v2Decision.DecisionHash, want: "cf0e84ad5edfcca4a891b0831b202c5ec93a68cfda62960fffd280cd89ed99b0"},
+		{name: "accepted state v2", got: v2Next.Hash(), want: "456d87bb496db7c6e94a446e0dfacd617bc45281044a5d95f1ef6a9daf5c9b2d"},
+		{name: "effects v3", got: v3Decision.EffectsHash, want: "1a6d7a5957c2bc6f2f4fe77a1d184a6b5d8bf4420aa296ebdabf6756bfe48f75"},
+		{name: "decision v3", got: v3Decision.DecisionHash, want: "8f084ec5428516d7a54f4074eb8957dd0d688d5b83b5a9ea49b09040d885db48"},
+		{name: "accepted state v3", got: v3Next.Hash(), want: "fb8a2722d8b2fd39ebac53c055c7aaa86d67513d469c1d83bda9bcb9ce425294"},
+		{name: "effects v4", got: v4Decision.EffectsHash, want: "3eebc4d2e3b833babcde727c0c7627a4bec572f35a27d7558bf8863700231996"},
+		{name: "decision v4", got: v4Decision.DecisionHash, want: "b0b2bf5a34e50943cc3a3dfbf100698a977ff91782b25ad896d5d529bb7ff7f1"},
+		{name: "accepted state v4", got: v4Next.Hash(), want: "5aef9288325b3743164e7ddfdc6afffebc5ee104fc44639724c123f1238efb9a"},
 		{name: "halted state", got: halted.Hash(), want: "cd748e998b0582ad13540b96e0bb5682faa9f10b636ef7e2c3c15ea384771565"},
 		{name: "negative logical time", got: hashInput(negativeTime), want: "c803b3138c8db07c468b249391405f394d1942207eecaebbfa1e621a52b2fa26"},
 		{name: "empty payload", got: hashInput(emptyPayload), want: "59837e1266e78dd508ae139143de7e4f23bb8d848698982be96131910a40b54b"},

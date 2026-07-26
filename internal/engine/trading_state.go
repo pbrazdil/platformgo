@@ -112,21 +112,23 @@ type orderRecord struct {
 }
 
 type fillRecord struct {
-	fillID         ID
-	orderID        ID
-	accountID      string
-	instrument     domain.InstrumentRevision
-	side           Side
-	price          domain.Price
-	quantity       domain.Quantity
-	positionID     ID
-	positionEffect PositionEffect
-	realizedPnL    domain.Money
-	hasRealizedPnL bool
-	liquiditySide  LiquiditySide
-	fee            domain.Money
-	hasFee         bool
-	logicalTime    LogicalTime
+	fillID               ID
+	orderID              ID
+	accountID            string
+	instrument           domain.InstrumentRevision
+	side                 Side
+	price                domain.Price
+	quantity             domain.Quantity
+	positionID           ID
+	positionEffect       PositionEffect
+	realizedPnL          domain.Money
+	hasRealizedPnL       bool
+	liquiditySide        LiquiditySide
+	fee                  domain.Money
+	hasFee               bool
+	logicalTime          LogicalTime
+	effectiveLeverage    domain.Ratio
+	hasEffectiveLeverage bool
 }
 
 type positionRecord struct {
@@ -426,6 +428,9 @@ func (fill fillRecord) snapshot() FillSnapshot {
 	if fill.hasRealizedPnL {
 		snapshot.RealizedPnL = fill.realizedPnL.Decimal().String()
 		snapshot.SettlementCurrency = fill.realizedPnL.Currency().Code()
+	}
+	if fill.hasEffectiveLeverage {
+		snapshot.EffectiveLeverage = fill.effectiveLeverage.Decimal().String()
 	}
 	return snapshot
 }
