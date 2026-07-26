@@ -190,6 +190,32 @@ Feed gaps, engine ambiguity, ledger mismatch or sequence corruption automaticall
 - compromised secret/API key;
 - cutover and rollback.
 
+### Phase 3 API-key migration rollback boundary
+
+Migration `20260726000700_phase3_user_api_keys.up.sql` is additive but not
+binary-backward-compatible with the strict schema verifier. A binary that does
+not embed the applied migration rejects the database as schema-ahead; it does
+not ignore the new objects.
+
+Before applying the migration:
+
+1. halt API-key mutation traffic;
+2. take and restore-verify a backup containing application schemas,
+   `schema_migrations`, identity state, and audit state;
+3. record the backup/PITR boundary and candidate artifact digest;
+4. verify the forward-fix candidate can apply from the previous released
+   schema.
+
+After the migration is applied, never edit, remove, or down-migrate it. For an
+incident, keep writers halted and deploy a reviewed forward code or forward
+migration fix. If an owner-authorized full rollback is unavoidable, stop every
+writer, restore the complete database to the recorded pre-migration boundary,
+deploy the prior binary, and run reconciliation before reopening traffic. A
+selective schema or identity-table restore is forbidden because it can split
+credential, audit, command, and monetary history. Once post-migration traffic
+has been accepted, prefer forward repair; restoring the old boundary discards
+all later durable facts and requires the normal disaster-recovery decision.
+
 ## 8. Release gates
 
 Continuous and release reconciliation follows `RECONCILIATION.md`.
