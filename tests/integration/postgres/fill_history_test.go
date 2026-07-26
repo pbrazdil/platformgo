@@ -143,6 +143,127 @@ func TestFillFilledAtIsEngineExecutionTimeNotInsertNow(t *testing.T) {
 	}
 }
 
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/trading/e2e_fills.rs:328
+//	test: fills_history_filters_by_side_and_trade_id
+//
+// Adaptations:
+//   - Deterministic UUID fill IDs replace the legacy mirror's free-form IDs.
+//   - Durable immutable fills replace legacy mirror rows.
+//   - The PostgreSQL compatibility reader replaces the Rust query dispatcher.
+//
+// Assertions preserved:
+//   - A lowercase side filter returns only the matching fill and filtered total.
+//   - A trade ID filter returns exactly the requested fill.
+func TestFillsHistoryFiltersBySideAndTradeID(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("migrate fill filtering database: %v", err)
+	}
+
+	const (
+		accountID  = "urn:xb:account:fill-filter"
+		buyFillID  = "019fa844-26c0-7000-8000-000000000011"
+		sellFillID = "019fa844-26c0-7000-8000-000000000012"
+	)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2,
+			0.1, 0.05, 10, -0.0001, 0.0005
+		);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:fill-filter', 'NETTING');
+		INSERT INTO trading.orders (
+			order_id, account_id, instrument_id, side, order_type,
+			time_in_force, status, quantity, filled_quantity,
+			average_fill_price, triggered, reduce_only, has_rested,
+			version
+		) VALUES
+			(
+				'019fa844-26c0-7000-8000-000000000021',
+				'urn:xb:account:fill-filter', 'BTC-PERP', 'BUY', 'MARKET',
+				'IOC', 'FILLED', 0.01, 0.01, 60000,
+				false, false, false, 1
+			),
+			(
+				'019fa844-26c0-7000-8000-000000000022',
+				'urn:xb:account:fill-filter', 'BTC-PERP', 'SELL', 'MARKET',
+				'IOC', 'FILLED', 0.01, 0.01, 61000,
+				false, false, false, 1
+			);
+		INSERT INTO trading.fills (
+			fill_id, order_id, input_id, account_id, instrument_id,
+			side, price, quantity, position_id, position_effect,
+			liquidity_side, logical_time
+		) VALUES
+			(
+				'019fa844-26c0-7000-8000-000000000011',
+				'019fa844-26c0-7000-8000-000000000021',
+				'019fa844-26c0-7000-8000-000000000031',
+				'urn:xb:account:fill-filter', 'BTC-PERP',
+				'BUY', 60000, 0.01,
+				'019fa844-26c0-7000-8000-000000000041',
+				'OPEN', 'TAKER', 1784901600000000001
+			),
+			(
+				'019fa844-26c0-7000-8000-000000000012',
+				'019fa844-26c0-7000-8000-000000000022',
+				'019fa844-26c0-7000-8000-000000000032',
+				'urn:xb:account:fill-filter', 'BTC-PERP',
+				'SELL', 61000, 0.01,
+				'019fa844-26c0-7000-8000-000000000042',
+				'CLOSE', 'TAKER', 1784901600000000002
+			)`); err != nil {
+		t.Fatalf("seed durable fill filters: %v", err)
+	}
+
+	apiPool := runtimeRoleLoginPool(
+		t,
+		pool,
+		"platformgo_fill_filter_api_login",
+		"platformgo_api",
+	)
+	store := platformpostgres.NewCompatibilityStore(apiPool)
+	buys, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{Side: "buy", Limit: 10},
+	)
+	if err != nil {
+		t.Fatalf("filter fills by side: %v", err)
+	}
+	if len(buys.Items) != 1 || buys.Items[0].FillID != buyFillID {
+		t.Fatalf("buy fills = %#v, want only %s", buys.Items, buyFillID)
+	}
+	if buys.Total != 1 {
+		t.Fatalf("buy filtered total = %d, want 1", buys.Total)
+	}
+
+	one, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{TradeID: sellFillID, Limit: 10},
+	)
+	if err != nil {
+		t.Fatalf("filter fills by trade ID: %v", err)
+	}
+	if len(one.Items) != 1 || one.Items[0].FillID != sellFillID {
+		t.Fatalf("trade-ID fills = %#v, want only %s", one.Items, sellFillID)
+	}
+}
+
 func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
@@ -165,6 +286,9 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 		);
 		INSERT INTO trading.accounts (account_id, oms_mode)
 		VALUES ('account-fill-plan', 'NETTING');
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		SELECT format('account-fill-plan-other-%s', account_number), 'NETTING'
+		  FROM generate_series(1, 9) AS accounts(account_number);
 		INSERT INTO trading.orders (
 			order_id, account_id, instrument_id, side, order_type,
 			time_in_force, status, quantity, filled_quantity,
@@ -191,16 +315,25 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 				'20000000-0000-0000-0000-%s',
 				lpad(to_hex(sequence_number), 12, '0')
 			)::uuid,
-			'account-fill-plan',
+			CASE
+				WHEN sequence_number <= 10000 THEN 'account-fill-plan'
+				ELSE format(
+					'account-fill-plan-other-%s',
+					1 + ((sequence_number - 10001) / 10000)
+				)
+			END,
 			'BTC-PERP',
-			'BUY',
+			CASE
+				WHEN sequence_number % 2 = 0 THEN 'BUY'
+				ELSE 'SELL'
+			END,
 			100,
 			0.01,
 			'30000000-0000-0000-0000-000000000001'::uuid,
 			'OPEN',
 			'TAKER',
 			1784901600000000000 + sequence_number
-		  FROM generate_series(1, 10000) AS sequence(sequence_number);
+		  FROM generate_series(1, 100000) AS sequence(sequence_number);
 		ANALYZE trading.fills`); err != nil {
 		t.Fatalf("seed representative fill history: %v", err)
 	}
@@ -208,6 +341,7 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 	assertFillPlanUsesIndex(
 		t,
 		pool,
+		"fills_account_history_idx",
 		`SELECT fill_id
 		   FROM trading.fills
 		  WHERE account_id = 'account-fill-plan'
@@ -219,6 +353,7 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 	assertFillPlanUsesIndex(
 		t,
 		pool,
+		"fills_account_history_idx",
 		`SELECT fill_id
 		   FROM trading.fills
 		  WHERE account_id = 'account-fill-plan'
@@ -227,14 +362,40 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 		  ORDER BY logical_time ASC, fill_id ASC
 		  LIMIT 51`,
 	)
+	assertFillPlanUsesIndex(
+		t,
+		pool,
+		"fills_account_side_history_idx",
+		`SELECT
+			fill.fill_id::text,
+			fill.logical_time,
+			count(*) OVER ()
+		   FROM trading.fills AS fill
+		  WHERE fill.account_id = $1
+		    AND ($2::text IS NULL OR fill.side = $2)
+		    AND ($3::uuid IS NULL OR fill.fill_id = $3)
+		  ORDER BY fill.logical_time DESC, fill.fill_id DESC
+		  LIMIT $4`,
+		"account-fill-plan",
+		"BUY",
+		nil,
+		10,
+	)
 }
 
-func assertFillPlanUsesIndex(t *testing.T, pool *pgxpool.Pool, query string) {
+func assertFillPlanUsesIndex(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	indexName string,
+	query string,
+	args ...any,
+) {
 	t.Helper()
 	var rawPlan []byte
 	if err := pool.QueryRow(
 		context.Background(),
 		"EXPLAIN (FORMAT JSON, COSTS OFF) "+query,
+		args...,
 	).Scan(&rawPlan); err != nil {
 		t.Fatalf("explain fill query: %v", err)
 	}
@@ -252,7 +413,7 @@ func assertFillPlanUsesIndex(t *testing.T, pool *pgxpool.Pool, query string) {
 		fillSeqScan bool
 	)
 	walkPostgresPlan(explained[0].Plan, func(plan postgresExplainPlan) {
-		indexFound = indexFound || plan.IndexName == "fills_account_history_idx"
+		indexFound = indexFound || plan.IndexName == indexName
 		fillSeqScan = fillSeqScan ||
 			(plan.NodeType == "Seq Scan" && plan.RelationName == "fills")
 	})

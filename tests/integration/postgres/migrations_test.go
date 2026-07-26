@@ -971,6 +971,179 @@ func TestFillHistoryMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 	}
 }
 
+func TestFillFilterMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000200_phase3_fill_history_read_model.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 42); err != nil {
+		t.Fatalf("apply previous fill-history schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2,
+			0.1, 0.05, 10, -0.0001, 0.0005
+		);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:fill-filter-upgrade', 'NETTING');
+		INSERT INTO trading.orders (
+			order_id, account_id, instrument_id, side, order_type,
+			time_in_force, status, quantity, filled_quantity,
+			average_fill_price, triggered, reduce_only, has_rested,
+			version
+		) VALUES (
+			'019fa844-26c0-7000-8000-000000000001',
+			'urn:xb:account:fill-filter-upgrade',
+			'BTC-PERP',
+			'BUY',
+			'MARKET',
+			'IOC',
+			'FILLED',
+			1,
+			1,
+			60000,
+			false,
+			false,
+			false,
+			1
+		);
+		INSERT INTO trading.fills (
+			fill_id, order_id, input_id, account_id, instrument_id,
+			side, price, quantity, position_id, position_effect,
+			liquidity_side, logical_time
+		)
+		SELECT
+			format(
+				'10000000-0000-0000-0000-%s',
+				lpad(to_hex(sequence_number), 12, '0')
+			)::uuid,
+			'019fa844-26c0-7000-8000-000000000001'::uuid,
+			format(
+				'20000000-0000-0000-0000-%s',
+				lpad(to_hex(sequence_number), 12, '0')
+			)::uuid,
+			'urn:xb:account:fill-filter-upgrade',
+			'BTC-PERP',
+			CASE
+				WHEN sequence_number % 2 = 0 THEN 'BUY'
+				ELSE 'SELL'
+			END,
+			60000,
+			0.01,
+			'30000000-0000-0000-0000-000000000001'::uuid,
+			'OPEN',
+			'TAKER',
+			1600000000000000000 + sequence_number
+		  FROM generate_series(1, 100) AS sequence(sequence_number)`); err != nil {
+		t.Fatalf("seed populated fill-filter schema: %v", err)
+	}
+
+	lockingTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin fill-filter lock: %v", err)
+	}
+	defer func() { _ = lockingTx.Rollback(context.Background()) }()
+	if _, err := lockingTx.Exec(
+		ctx,
+		"LOCK TABLE trading.fills IN ROW EXCLUSIVE MODE",
+	); err != nil {
+		t.Fatalf("lock fills: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	startedAt := time.Now()
+	err = current.Migrate(ctx)
+	elapsed := time.Since(startedAt)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55P03" {
+		t.Fatalf("contended fill-filter upgrade error = %v, want SQLSTATE 55P03", err)
+	}
+	if elapsed < 4*time.Second || elapsed > 8*time.Second {
+		t.Fatalf("bounded fill-filter lock wait = %s, want approximately 5s", elapsed)
+	}
+	var (
+		lastMigration    string
+		historyIndex     bool
+		sideHistoryIndex bool
+		fillCount        int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			to_regclass('trading.fills_account_history_idx') IS NOT NULL,
+			to_regclass('trading.fills_account_side_history_idx') IS NOT NULL,
+			(SELECT count(*) FROM trading.fills)`,
+	).Scan(
+		&lastMigration,
+		&historyIndex,
+		&sideHistoryIndex,
+		&fillCount,
+	); err != nil {
+		t.Fatalf("inspect rolled-back fill-filter migration: %v", err)
+	}
+	if lastMigration != "20260726000200_phase3_fill_history_read_model.up.sql" ||
+		!historyIndex ||
+		sideHistoryIndex ||
+		fillCount != 100 {
+		t.Fatalf(
+			"contended fill-filter migration state = last %q old-index %t "+
+				"new-index %t fills %d",
+			lastMigration,
+			historyIndex,
+			sideHistoryIndex,
+			fillCount,
+		)
+	}
+
+	if err := lockingTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry uncontended fill-filter upgrade: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify retried fill-filter upgrade: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+
+	apiPool := runtimeRoleLoginPool(
+		t,
+		pool,
+		"platformgo_fill_filter_upgrade_api_login",
+		"platformgo_api",
+	)
+	filtered, err := platformpostgres.NewCompatibilityStore(apiPool).
+		FilterFillExecutions(
+			ctx,
+			"urn:xb:account:fill-filter-upgrade",
+			platformpostgres.FillExecutionFilter{Side: "buy", Limit: 200},
+		)
+	if err != nil {
+		t.Fatalf("read preserved filtered fills after upgrade: %v", err)
+	}
+	if len(filtered.Items) != 50 || filtered.Total != 50 {
+		t.Fatalf("preserved BUY fills = %#v, want 50 rows and total 50", filtered)
+	}
+	if filtered.Items[0].FillID !=
+		"10000000-0000-0000-0000-000000000064" {
+		t.Fatalf("newest preserved BUY fill = %q", filtered.Items[0].FillID)
+	}
+}
+
 func TestRuntimeMigrationVerificationIsExactAndOldEngineIsFenced(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
@@ -2437,9 +2610,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 14 ||
+	if count != 15 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260726000200_phase3_fill_history_read_model.up.sql" {
+		last != "20260726000300_phase3_fill_filter_read_model.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,

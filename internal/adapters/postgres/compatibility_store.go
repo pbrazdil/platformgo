@@ -707,6 +707,95 @@ func (store *CompatibilityStore) LatestFillExecution(
 	return view, nil
 }
 
+// FillExecutionFilter is the source-proven subset of fill-history filters.
+// TradeID names the external contract field that filters the durable fill ID.
+type FillExecutionFilter struct {
+	Side    string
+	TradeID string
+	Limit   int
+}
+
+// FilterFillExecutions returns immutable executions matching the source-proven
+// side and trade-ID filters. It remains internal until the complete HTTP fills
+// contract is implemented.
+func (store *CompatibilityStore) FilterFillExecutions(
+	ctx context.Context,
+	accountID string,
+	filter FillExecutionFilter,
+) (edge.FillExecutionPage, error) {
+	side := strings.ToUpper(strings.TrimSpace(filter.Side))
+	if side != "" && side != "BUY" && side != "SELL" {
+		return edge.FillExecutionPage{}, edge.ErrInvalidRequest
+	}
+	tradeID := strings.TrimSpace(filter.TradeID)
+	if tradeID != "" {
+		if _, err := engine.ParseID(tradeID); err != nil {
+			return edge.FillExecutionPage{}, edge.ErrInvalidRequest
+		}
+	}
+	limit := filter.Limit
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	var requestedSide any
+	if side != "" {
+		requestedSide = side
+	}
+	var requestedTradeID any
+	if tradeID != "" {
+		requestedTradeID = tradeID
+	}
+	rows, err := store.pool.Query(ctx, `
+		SELECT
+			fill.fill_id::text,
+			fill.logical_time,
+			count(*) OVER ()
+		  FROM trading.fills AS fill
+		 WHERE fill.account_id = $1
+		   AND ($2::text IS NULL OR fill.side = $2)
+		   AND ($3::uuid IS NULL OR fill.fill_id = $3)
+		 ORDER BY fill.logical_time DESC, fill.fill_id DESC
+		 LIMIT $4`,
+		accountID,
+		requestedSide,
+		requestedTradeID,
+		limit,
+	)
+	if err != nil {
+		return edge.FillExecutionPage{}, fmt.Errorf("filter fill executions: %w", err)
+	}
+	defer rows.Close()
+	page := edge.FillExecutionPage{
+		Items: make([]edge.FillExecutionView, 0, limit),
+	}
+	for rows.Next() {
+		var (
+			view        edge.FillExecutionView
+			logicalTime int64
+			total       int64
+		)
+		if err := rows.Scan(&view.FillID, &logicalTime, &total); err != nil {
+			return edge.FillExecutionPage{}, fmt.Errorf(
+				"scan filtered fill execution: %w",
+				err,
+			)
+		}
+		view.FilledAt = time.Unix(0, logicalTime).UTC().Format(time.RFC3339Nano)
+		page.Items = append(page.Items, view)
+		page.Total = total
+	}
+	if err := rows.Err(); err != nil {
+		return edge.FillExecutionPage{}, fmt.Errorf("filter fill executions: %w", err)
+	}
+	return page, nil
+}
+
 // Funding returns one exact, newest-first account funding page.
 func (store *CompatibilityStore) Funding(
 	ctx context.Context,

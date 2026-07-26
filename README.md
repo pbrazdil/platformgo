@@ -40,7 +40,9 @@ source-port acceptance.
 The fill-history foundation is also landed: its indexed newest-execution read
 preserves the immutable engine execution time exactly, and its first
 source-derived behavior has separate port-ledger acceptance. The external
-fills route remains inventory.
+fills route remains inventory. The current candidate adds account-scoped,
+case-insensitive side filtering and exact fill-ID filtering over immutable
+fills, with a filtered total from the same PostgreSQL statement.
 
 Phase 3 is not complete. The runtime must still:
 
@@ -66,7 +68,7 @@ This repository is not yet a production-capable replacement.
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
 | 2 — Durable execution | Complete | PostgreSQL 17 authority, immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
-| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, and exact client funding history with PostgreSQL 17 query-plan and migration evidence. Funding implementation and separate port-ledger acceptance are landed. The fill-history foundation and its first separately accepted source behavior add an indexed newest-execution read with exact engine-time fidelity; the external fills route remains inventory until its complete source contract is implemented and reviewed. |
+| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, and exact client funding history with PostgreSQL 17 query-plan and migration evidence. Funding implementation and separate port-ledger acceptance are landed. The fill-history foundation and its first separately accepted source behavior add an indexed newest-execution read with exact engine-time fidelity. A current candidate adds immutable side/fill-ID filtering and same-statement filtered totals; the external fills route remains inventory until its complete source contract is implemented and reviewed. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
@@ -84,8 +86,11 @@ green and landed through hosted CI. The current fill-history foundation has
 live PostgreSQL 17 proof that `filledAt` comes from the persisted engine
 execution time, its newest-execution read uses the intended account-history
 index, and a contended populated-schema upgrade rolls back and retries cleanly.
-These results do not activate the external fills route or complete the
-remaining Phase 3 scope.
+The current filtering candidate additionally has live PostgreSQL 17 proof for
+lowercase side and exact fill-ID filters, same-statement totals, the exact
+production query plan over a representative 100,000-fill multi-account
+dataset, and bounded migration rollback/retry. These results do not activate
+the external fills route or complete the remaining Phase 3 scope.
 
 ## Next milestone
 
