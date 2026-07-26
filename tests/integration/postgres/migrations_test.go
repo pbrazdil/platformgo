@@ -791,6 +791,186 @@ func TestFundingHistoryMigrationUpgradesPopulatedRealtimeSchema(t *testing.T) {
 	assertFinalMigrationHistory(t, pool)
 }
 
+func TestFillHistoryMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000100_phase3_funding_history_read_model.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 41); err != nil {
+		t.Fatalf("apply previous funding schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2,
+			0.1, 0.05, 10, -0.0001, 0.0005
+		);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:fill-upgrade', 'NETTING');
+		INSERT INTO identity.users (
+			user_id, login, normalized_login, broker_subject
+		) VALUES (
+			'urn:xb:user:fill-upgrade',
+			'fill-upgrade',
+			'fill-upgrade',
+			'urn:xb:tenant:fill-upgrade'
+		);
+		INSERT INTO identity.user_accounts (
+			user_id, account_id, broker_subject
+		) VALUES (
+			'urn:xb:user:fill-upgrade',
+			'urn:xb:account:fill-upgrade',
+			'urn:xb:tenant:fill-upgrade'
+		);
+		INSERT INTO identity.account_profiles (
+			account_id, login, base_currency, market_venue,
+			permitted_classes, created_at, broker_subject
+		) VALUES (
+			'urn:xb:account:fill-upgrade',
+			1001,
+			'USDC',
+			'HYPERLIQUID',
+			ARRAY['CRYPTOCURRENCY'],
+			'2020-09-13T12:26:40Z',
+			'urn:xb:tenant:fill-upgrade'
+		);
+		INSERT INTO trading.orders (
+			order_id, account_id, instrument_id, side, order_type,
+			time_in_force, status, quantity, filled_quantity,
+			average_fill_price, triggered, reduce_only, has_rested,
+			version
+		) VALUES (
+			'019fa844-26c0-7000-8000-000000000001',
+			'urn:xb:account:fill-upgrade',
+			'BTC-PERP',
+			'BUY',
+			'MARKET',
+			'IOC',
+			'FILLED',
+			1,
+			1,
+			60000,
+			false,
+			false,
+			false,
+			1
+		);
+		INSERT INTO trading.fills (
+			fill_id, order_id, input_id, account_id, instrument_id,
+			side, price, quantity, position_id, position_effect,
+			liquidity_side, fee, fee_currency, logical_time
+		)
+		SELECT
+			format(
+				'10000000-0000-0000-0000-%s',
+				lpad(to_hex(sequence_number), 12, '0')
+			)::uuid,
+			'019fa844-26c0-7000-8000-000000000001'::uuid,
+			format(
+				'20000000-0000-0000-0000-%s',
+				lpad(to_hex(sequence_number), 12, '0')
+			)::uuid,
+			'urn:xb:account:fill-upgrade',
+			'BTC-PERP',
+			'BUY',
+			60000,
+			0.01,
+			'30000000-0000-0000-0000-000000000001'::uuid,
+			'OPEN',
+			'TAKER',
+			0.5,
+			'USDC',
+			1600000000000000000 + sequence_number
+		  FROM generate_series(1, 100) AS sequence(sequence_number)`); err != nil {
+		t.Fatalf("seed populated fill-history schema: %v", err)
+	}
+
+	lockingTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin fill-history lock: %v", err)
+	}
+	defer func() { _ = lockingTx.Rollback(context.Background()) }()
+	if _, err := lockingTx.Exec(
+		ctx,
+		"LOCK TABLE trading.fills IN ROW EXCLUSIVE MODE",
+	); err != nil {
+		t.Fatalf("lock fills: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	startedAt := time.Now()
+	err = current.Migrate(ctx)
+	elapsed := time.Since(startedAt)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55P03" {
+		t.Fatalf("contended fill-history upgrade error = %v, want SQLSTATE 55P03", err)
+	}
+	if elapsed < 4*time.Second || elapsed > 8*time.Second {
+		t.Fatalf("bounded fill-history lock wait = %s, want approximately 5s", elapsed)
+	}
+	var (
+		lastMigration string
+		indexExists   bool
+		fillCount     int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			to_regclass('trading.fills_account_history_idx') IS NOT NULL,
+			(SELECT count(*) FROM trading.fills)`,
+	).Scan(&lastMigration, &indexExists, &fillCount); err != nil {
+		t.Fatalf("inspect rolled-back fill-history migration: %v", err)
+	}
+	if lastMigration != "20260726000100_phase3_funding_history_read_model.up.sql" ||
+		indexExists ||
+		fillCount != 100 {
+		t.Fatalf(
+			"contended fill-history migration state = last %q index %t fills %d",
+			lastMigration,
+			indexExists,
+			fillCount,
+		)
+	}
+
+	if err := lockingTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry uncontended fill-history upgrade: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify retried fill-history upgrade: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+	latest, err := platformpostgres.NewCompatibilityStore(pool).LatestFillExecution(
+		ctx,
+		"urn:xb:account:fill-upgrade",
+	)
+	if err != nil {
+		t.Fatalf("read preserved fill history after upgrade: %v", err)
+	}
+	wantTime := time.Unix(0, 1600000000000000100).
+		UTC().
+		Format(time.RFC3339Nano)
+	if latest.FillID != "10000000-0000-0000-0000-000000000064" ||
+		latest.FilledAt != wantTime {
+		t.Fatalf("preserved latest fill = %#v, want newest time %q", latest, wantTime)
+	}
+}
+
 func TestRuntimeMigrationVerificationIsExactAndOldEngineIsFenced(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
@@ -2257,9 +2437,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 13 ||
+	if count != 14 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260726000100_phase3_funding_history_read_model.up.sql" {
+		last != "20260726000200_phase3_fill_history_read_model.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,

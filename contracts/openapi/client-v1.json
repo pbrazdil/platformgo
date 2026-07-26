@@ -190,6 +190,29 @@
         ],
         "type": "object"
       },
+      "FundingPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FundingView"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "type": "string"
+          },
+          "prevCursor": {
+            "type": "string"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "FundingView": {
         "properties": {
           "accountLogin": {
@@ -238,29 +261,6 @@
           "fundingAmount",
           "currency",
           "fundingTime"
-        ],
-        "type": "object"
-      },
-      "FundingPage": {
-        "properties": {
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/FundingView"
-            },
-            "type": "array"
-          },
-          "nextCursor": {
-            "type": "string"
-          },
-          "prevCursor": {
-            "type": "string"
-          },
-          "total": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "items"
         ],
         "type": "object"
       },

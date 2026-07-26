@@ -681,6 +681,32 @@ func (store *CompatibilityStore) Balances(
 	return values, rows.Err()
 }
 
+// LatestFillExecution returns the newest immutable execution-time projection
+// proven by the first native fill-history source port.
+func (store *CompatibilityStore) LatestFillExecution(
+	ctx context.Context,
+	accountID string,
+) (edge.FillExecutionView, error) {
+	var (
+		view        edge.FillExecutionView
+		logicalTime int64
+	)
+	if err := store.pool.QueryRow(ctx, `
+		SELECT
+			fill.fill_id::text,
+			fill.logical_time
+		  FROM trading.fills AS fill
+		 WHERE fill.account_id = $1
+		 ORDER BY fill.logical_time DESC, fill.fill_id DESC
+		 LIMIT 1`,
+		accountID,
+	).Scan(&view.FillID, &logicalTime); err != nil {
+		return edge.FillExecutionView{}, fmt.Errorf("read latest fill execution: %w", err)
+	}
+	view.FilledAt = time.Unix(0, logicalTime).UTC().Format(time.RFC3339Nano)
+	return view, nil
+}
+
 // Funding returns one exact, newest-first account funding page.
 func (store *CompatibilityStore) Funding(
 	ctx context.Context,

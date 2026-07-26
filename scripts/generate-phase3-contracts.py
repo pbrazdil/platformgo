@@ -184,6 +184,13 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "statuses": [200, 400, 401, 403, 503],
         "success_array": "BalanceView",
     },
+    ("GET", "/v1/accounts/{accountId}/funding"): {
+        "statuses": [200, 400, 401, 403],
+        "success": "FundingPage",
+        "success_description": "Funding history, newest first",
+        "pagination": True,
+        "security": "bearer",
+    },
     ("GET", "/broker/v1/ping"): {"statuses": [200, 401]},
     ("POST", "/broker/v1/echo"): {
         "statuses": [200, 401, 403, 409, 503],
@@ -271,6 +278,10 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                 )
                 for status in accepted["statuses"]
             }
+            if accepted.get("success_description") is not None:
+                operation["responses"]["200"]["description"] = accepted[
+                    "success_description"
+                ]
             operation["x-platformgo-contract-status"] = "phase3-accepted-runtime"
             request_schema = accepted.get("request")
             if request_schema is not None:
@@ -293,11 +304,43 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                     "schema": {"type": "string"},
                 }
             ]
+        if accepted is not None and accepted.get("pagination") is True:
+            operation["parameters"] = [
+                {
+                    "name": "accountId",
+                    "in": "path",
+                    "required": True,
+                    "schema": {"type": "string"},
+                },
+                {
+                    "name": "limit",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer", "minimum": 1, "maximum": 200},
+                },
+                {
+                    "name": "cursor",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                },
+                {
+                    "name": "direction",
+                    "in": "query",
+                    "required": False,
+                    "schema": {
+                        "type": "string",
+                        "enum": ["next", "prev", "backward"],
+                    },
+                },
+            ]
+        if accepted is not None and accepted.get("security") is not None:
+            operation["security"] = [{accepted["security"]: []}]
         paths.setdefault(path, {})[method.lower()] = operation
     return paths
 
 
-def schemas() -> dict[str, object]:
+def schemas(client: bool) -> dict[str, object]:
     decimal = {"type": "string", "pattern": r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$"}
     return {
         "Error": {
@@ -532,13 +575,61 @@ def schemas() -> dict[str, object]:
                 "createdAt": {"type": "string", "format": "date-time"},
             },
         },
-        "FundingView": {
-            "type": "object",
-            "properties": {
-                "amount": decimal,
-                "rate": decimal,
-            },
-        },
+        "FundingView": (
+            {
+                "type": "object",
+                "required": [
+                    "fundingId",
+                    "symbol",
+                    "positionId",
+                    "positionSignedQty",
+                    "oraclePrice",
+                    "fundingRate",
+                    "fundingAmount",
+                    "currency",
+                    "fundingTime",
+                ],
+                "properties": {
+                    "fundingId": {"type": "string"},
+                    "symbol": {"type": "string"},
+                    "positionId": {"type": "string"},
+                    "positionSignedQty": decimal,
+                    "oraclePrice": decimal,
+                    "fundingRate": decimal,
+                    "fundingAmount": decimal,
+                    "currency": {"type": "string"},
+                    "fundingTime": {"type": "string", "format": "date-time"},
+                    "accountLogin": {"type": "integer"},
+                },
+            }
+            if client
+            else {
+                "type": "object",
+                "properties": {
+                    "amount": decimal,
+                    "rate": decimal,
+                },
+            }
+        ),
+        **(
+            {
+                "FundingPage": {
+                    "type": "object",
+                    "required": ["items"],
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/FundingView"},
+                        },
+                        "nextCursor": {"type": "string"},
+                        "prevCursor": {"type": "string"},
+                        "total": {"type": "integer"},
+                    },
+                }
+            }
+            if client
+            else {}
+        ),
         "RealtimeToken": {
             "type": "object",
             "required": ["token", "channels"],
@@ -570,7 +661,7 @@ def document(title: str, raw: str, security: str) -> dict[str, object]:
                     else {"type": "http", "scheme": "bearer"}
                 )
             },
-            "schemas": schemas(),
+            "schemas": schemas(raw == CLIENT),
         },
     }
 

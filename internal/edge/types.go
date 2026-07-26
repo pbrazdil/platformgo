@@ -276,6 +276,13 @@ type PageParams struct {
 	Direction string
 }
 
+// FillExecutionView is the narrow immutable execution-time projection proven
+// by the first native fill-history source port.
+type FillExecutionView struct {
+	FillID   string `json:"fillId"`
+	FilledAt string `json:"filledAt"`
+}
+
 // FundingView is one exact, append-only client funding projection.
 type FundingView struct {
 	FundingID              string `json:"fundingId"`
