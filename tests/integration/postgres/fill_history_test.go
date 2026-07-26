@@ -143,6 +143,127 @@ func TestFillFilledAtIsEngineExecutionTimeNotInsertNow(t *testing.T) {
 	}
 }
 
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/trading/e2e_fills.rs:328
+//	test: fills_history_filters_by_side_and_trade_id
+//
+// Adaptations:
+//   - Deterministic UUID fill IDs replace the legacy mirror's free-form IDs.
+//   - Durable immutable fills replace legacy mirror rows.
+//   - The PostgreSQL compatibility reader replaces the Rust query dispatcher.
+//
+// Assertions preserved:
+//   - A lowercase side filter returns only the matching fill and filtered total.
+//   - A trade ID filter returns exactly the requested fill.
+func TestFillsHistoryFiltersBySideAndTradeID(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("migrate fill filtering database: %v", err)
+	}
+
+	const (
+		accountID  = "urn:xb:account:fill-filter"
+		buyFillID  = "019fa844-26c0-7000-8000-000000000011"
+		sellFillID = "019fa844-26c0-7000-8000-000000000012"
+	)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2,
+			0.1, 0.05, 10, -0.0001, 0.0005
+		);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:fill-filter', 'NETTING');
+		INSERT INTO trading.orders (
+			order_id, account_id, instrument_id, side, order_type,
+			time_in_force, status, quantity, filled_quantity,
+			average_fill_price, triggered, reduce_only, has_rested,
+			version
+		) VALUES
+			(
+				'019fa844-26c0-7000-8000-000000000021',
+				'urn:xb:account:fill-filter', 'BTC-PERP', 'BUY', 'MARKET',
+				'IOC', 'FILLED', 0.01, 0.01, 60000,
+				false, false, false, 1
+			),
+			(
+				'019fa844-26c0-7000-8000-000000000022',
+				'urn:xb:account:fill-filter', 'BTC-PERP', 'SELL', 'MARKET',
+				'IOC', 'FILLED', 0.01, 0.01, 61000,
+				false, false, false, 1
+			);
+		INSERT INTO trading.fills (
+			fill_id, order_id, input_id, account_id, instrument_id,
+			side, price, quantity, position_id, position_effect,
+			liquidity_side, logical_time
+		) VALUES
+			(
+				'019fa844-26c0-7000-8000-000000000011',
+				'019fa844-26c0-7000-8000-000000000021',
+				'019fa844-26c0-7000-8000-000000000031',
+				'urn:xb:account:fill-filter', 'BTC-PERP',
+				'BUY', 60000, 0.01,
+				'019fa844-26c0-7000-8000-000000000041',
+				'OPEN', 'TAKER', 1784901600000000001
+			),
+			(
+				'019fa844-26c0-7000-8000-000000000012',
+				'019fa844-26c0-7000-8000-000000000022',
+				'019fa844-26c0-7000-8000-000000000032',
+				'urn:xb:account:fill-filter', 'BTC-PERP',
+				'SELL', 61000, 0.01,
+				'019fa844-26c0-7000-8000-000000000042',
+				'CLOSE', 'TAKER', 1784901600000000002
+			)`); err != nil {
+		t.Fatalf("seed durable fill filters: %v", err)
+	}
+
+	apiPool := runtimeRoleLoginPool(
+		t,
+		pool,
+		"platformgo_fill_filter_api_login",
+		"platformgo_api",
+	)
+	store := platformpostgres.NewCompatibilityStore(apiPool)
+	buys, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{Side: "buy", Limit: 10},
+	)
+	if err != nil {
+		t.Fatalf("filter fills by side: %v", err)
+	}
+	if len(buys.Items) != 1 || buys.Items[0].FillID != buyFillID {
+		t.Fatalf("buy fills = %#v, want only %s", buys.Items, buyFillID)
+	}
+	if buys.Total != 1 {
+		t.Fatalf("buy filtered total = %d, want 1", buys.Total)
+	}
+
+	one, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{TradeID: sellFillID, Limit: 10},
+	)
+	if err != nil {
+		t.Fatalf("filter fills by trade ID: %v", err)
+	}
+	if len(one.Items) != 1 || one.Items[0].FillID != sellFillID {
+		t.Fatalf("trade-ID fills = %#v, want only %s", one.Items, sellFillID)
+	}
+}
+
 func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
