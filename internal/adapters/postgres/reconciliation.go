@@ -518,6 +518,8 @@ func (store *EngineStore) ReconcileShard(
 			    OR publication.maximum_sequence <> publication.publication_count
 			    OR sequence.last_sequence <> publication.maximum_sequence
 		),
+		-- claimed_at is operational lease metadata. Comparing it with wall time
+		-- here would make the durable shard-fault decision nondeterministic.
 		state_mismatches AS (
 			SELECT channel
 			  FROM realtime.publications
@@ -528,7 +530,7 @@ func (store *EngineStore) ReconcileShard(
 					OR last_error IS NOT NULL
 					OR failure_class IS NOT NULL
 				)
-			 ) OR claimed_at > clock_timestamp()
+			 )
 		)
 		SELECT
 			(SELECT count(*) FROM channel_mismatches) +
