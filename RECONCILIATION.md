@@ -37,6 +37,9 @@ Idempotent jobs periodically verify:
 - terminal state and remaining quantity agree;
 - no duplicate fill identity;
 - command result agrees with order outcome.
+- every decision-hash v4 fill's effective leverage agrees exactly across the
+  immutable decision, state, and PostgreSQL projection; valid v2/v3 history may
+  retain absent/SQL `NULL` leverage.
 
 ### Positions and risk
 
@@ -44,6 +47,8 @@ Idempotent jobs periodically verify:
 - realized PnL and average entry are reproducible;
 - flat positions have no active protection;
 - margin/reservations agree with positions and working orders;
+- every account/instrument risk leverage is positive and no greater than the
+  current instrument maximum;
 - stop-out/liquidation jobs have one effect.
 
 ### Messaging

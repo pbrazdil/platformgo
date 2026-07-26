@@ -12,6 +12,16 @@ PostgreSQL is the authoritative durable store for all business state. NATS and C
 - Queries list explicit columns. `SELECT *` is forbidden.
 - Generated SQL is allowed only when the generated source is reviewed and deterministic.
 
+### Supported PostgreSQL version
+
+The migrator and runtime schema verifier require PostgreSQL 19 or newer. While
+PostgreSQL 19 is prerelease software, the exact minimum accepted build is
+PostgreSQL 19 Beta 2; development snapshots, Beta 1, older majors, and
+noncanonical version strings fail closed. PostgreSQL 19 Beta 2 is qualified
+only for development and CI. Production requires PostgreSQL 19 GA and the
+major-upgrade, backup-restore, recovery, and reconciliation gates in
+`OPERATIONS.md`.
+
 ## 3. Logical schemas
 
 ```text
@@ -104,10 +114,18 @@ Network calls are outside the transaction.
   The engine preserves the last durable projection instead of inventing a
   price or zeroing an economic value. Restoring the mark recomputes the exact
   projection and emits no ledger entries unless the funded total changed.
-- Decision-hash version 3 includes complete derived balance projections.
-  Recovery replays each immutable business and duplicate-delivery receipt at
-  its recorded decision-hash version, so valid v2 history remains verifiable
-  while every new receipt uses v3.
+- Decision-hash version 3 introduced complete derived balance projections.
+  Valid v2/v3 receipts remain verifiable at their recorded version.
+- Current decision-hash version 4 preserves the v3 balance authority and also
+  binds every new fill's exact positive execution-time effective leverage into
+  its effects hash. The value comes from the unique account/instrument risk
+  authority, or the instrument maximum when no explicit risk exists, and is
+  persisted as an immutable fill fact. Every new business and
+  duplicate-delivery receipt uses v4.
+- Recovery replays each immutable business and duplicate-delivery receipt at
+  its recorded v2, v3, or v4 decision-hash version. Historical v2/v3 fills may
+  have absent/SQL `NULL` leverage; every current v4 fill must have one canonical
+  positive value and must match the stored decision and projection exactly.
 - `trading.currency_scales` is the append-only durable authority for the one
   scale assigned to each currency code. Recovery seeds the deterministic state
   from the registry before replay, then independently verifies historical
@@ -211,6 +229,41 @@ decision-hash v3. A prior binary is therefore not compatible after the
 migration commits. Applied migration history is never edited: recover with a
 reviewed forward fix, or restore the complete pre-migration database while all
 writers remain stopped.
+
+### Phase 3 frozen-effective-leverage migration boundary
+
+Migration `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` is the
+halted v4 cutover. Before DDL it acquires the configured shard's engine-owner
+advisory lock and, under a two-second lock timeout and thirty-second statement
+timeout, rejects any existing account/instrument risk leverage above the
+instrument maximum with SQLSTATE `55000`. The refusal is atomic and blocks the
+cutover. Correct that authority only through a normal audited v3 input whose
+receipt, decision/state hashes, checkpoint, projection, fresh-owner recovery,
+and reconciliation all agree. Then stop every runtime, rescan, and record a new
+restore-verified rollback boundary before retrying. Direct SQL,
+projection-only repair, implicit clamping, and a pre-correction backup are not
+valid remediation or rollback boundaries.
+
+Migration 009 adds nullable, no-default `numeric(38,18)`
+`trading.fills.effective_leverage` without rewriting or backfilling historical
+fill pages. Its positive-value check is installed `NOT VALID`, so it protects
+new writes immediately while preserving valid v2/v3 `NULL` history. Runtime
+version fences cover new business receipts, duplicate receipts, shard faults,
+and checkpoints, preventing a v3 engine from writing after the cutover.
+
+Migration `20260726001000_phase3_validate_fill_effective_leverage.up.sql`
+validates that constraint in a separate transaction under PostgreSQL's
+`SHARE UPDATE EXCLUSIVE` lock with the same two-second and thirty-second bounds.
+Ordinary DML is lock-compatible, but the no-overlap cutover keeps every runtime
+stopped. A PostgreSQL statement timeout before `COMMIT` leaves the constraint
+enforced but unvalidated and migration 010 unapplied for a clean retry. A
+connection, client-deadline, failover, or commit-acknowledgment error has an
+unknown outcome: inspect the exact migration journal/checksum and catalog state
+before retrying. The strict schema verifier rejects a newly started runtime at
+migration 009; it does not evict an already-open pool. The current immutable
+schema tip is migration 010. Recover only with a reviewed forward fix or a
+complete valid post-correction/pre-009 restore while every runtime remains
+stopped.
 
 ## 11. Retention and partitioning
 

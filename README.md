@@ -2,7 +2,10 @@
 
 Clean-room Go replacement for `upcomers-org/platform`, using pinned source
 tests as the executable specification. The intended production stack is Go,
-PostgreSQL 17 or newer, NATS with JetStream, Centrifugo, and Hyperliquid first.
+PostgreSQL 19 or newer, NATS with JetStream, Centrifugo, and Hyperliquid first.
+The current pre-release qualification is PostgreSQL 19 Beta 2 for development
+and CI only; production requires PostgreSQL 19 GA and a separately reviewed
+major-upgrade, backup-restore, recovery, and reconciliation rehearsal.
 
 ## Current status
 
@@ -131,6 +134,18 @@ registry prevents one currency code from acquiring conflicting scales. The
 pinned rejection behavior now has separate owner-approved port-ledger
 acceptance. The frozen external order contract is unchanged.
 
+The landed frozen-effective-leverage slice preserves the current deterministic
+Go execution-time risk authority. Every new decision-hash v4 fill freezes the
+unique positive account/instrument risk leverage, or the instrument maximum
+when no explicit risk exists, before hashing and atomic persistence. Canonical
+`5.00` therefore becomes `5`; later configuration cannot rewrite an earlier
+fill. Historical v2/v3 decisions remain verifiable with absent/SQL `NULL`
+leverage. Decision, state, PostgreSQL projection, compatibility read, recovery,
+duplicate delivery, and reconciliation must agree on the immutable value and
+fail closed on disagreement. The pinned leverage behavior now has separate
+owner-approved port-ledger acceptance; it does not activate the external fills
+route.
+
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
@@ -140,8 +155,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 63
-independently reviewed green source tests; 2,588 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 64
+independently reviewed green source tests; 2,587 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
@@ -154,8 +169,8 @@ This repository is not yet a production-capable replacement.
 |---|---|---|
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
-| 2 — Durable execution | Complete | PostgreSQL 17 authority, immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
-| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, authenticated caller-scoped account summaries, and hash-only self-service API-key creation with encrypted durable replay, a PostgreSQL-authoritative owner cap, protected-client rate limiting, and an atomic audit fact. Funding, account-summary, and API-key implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first seven separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, same-statement filtered totals, a correlatable fill-to-order identity using the current Go `urn:xb:order:<UUID>` representation, exact classified side/trade-type projection, strict deterministic tuple pagination with stable filter-wide totals, per-position exact realized PnL/currency that keeps hedged legs isolated, and atomic fee-bearing order/fill settlement across rollback, retry, duplicate delivery, restart, and fail-closed reconciliation. Terminal-only audit recovery is separately accepted through the current Go command/idempotency/receipt authority, including transaction rollback, duplicate delivery, restart, exact permitted-effect, and full durable-projection evidence. Rejected-order durability is also landed and separately accepted using the deterministic current-Go transition: exact terminal reason, reservation release, duplicate/restart/reconciliation stability, decision-hash v3 balance authority, markless recovery, and monotonic currency scales. Current Go fill semantics and durable identities remain authoritative, and the external fills route remains inventory until its complete source contract is implemented and reviewed. |
+| 2 — Durable execution | Complete | PostgreSQL authority, historically completed and validated on PostgreSQL 17; immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
+| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, authenticated caller-scoped account summaries, and hash-only self-service API-key creation with encrypted durable replay, a PostgreSQL-authoritative owner cap, protected-client rate limiting, and an atomic audit fact. Funding, account-summary, and API-key implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first eight separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, same-statement filtered totals, a correlatable fill-to-order identity using the current Go `urn:xb:order:<UUID>` representation, exact classified side/trade-type projection, strict deterministic tuple pagination with stable filter-wide totals, per-position exact realized PnL/currency that keeps hedged legs isolated, atomic fee-bearing order/fill settlement across rollback, retry, duplicate delivery, restart, and fail-closed reconciliation, and decision-hash v4 frozen execution-time leverage shared by decisions, durable state, PostgreSQL, recovery, and reconciliation while retaining v2/v3 history. Terminal-only audit recovery is separately accepted through the current Go command/idempotency/receipt authority, including transaction rollback, duplicate delivery, restart, exact permitted-effect, and full durable-projection evidence. Rejected-order durability is also landed and separately accepted using the deterministic current-Go transition: exact terminal reason, reservation release, duplicate/restart/reconciliation stability, historical decision-hash v3 balance authority, markless recovery, and monotonic currency scales. Current Go fill semantics and durable identities remain authoritative, and the external fills route remains inventory until its complete source contract is implemented and reviewed. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
@@ -243,6 +258,24 @@ authority. Its exact implementation candidate passed hosted CI 7/7 plus
 independent determinism, money, PostgreSQL-foundation, and release reviews
 before merge. The owner-approved source adaptation is separately accepted in
 the port ledger.
+The frozen-effective-leverage slice has PostgreSQL 19 Beta 2 proof for exact
+execution-time values `10` and canonical `5`, the instrument-maximum default,
+immutable v2/v3 absence, v4 decision/state hashes, atomic fill persistence,
+same-sequence replay, later-sequence duplicate delivery, fresh-owner recovery,
+and fail-closed reconciliation. Its additive migrations 009 and 010 preserve
+old fill pages without backfill, reject invalid preexisting risk authority,
+fence old engine receipt/fault/checkpoint writers, and validate the
+positive-value constraint under bounded locks. The exact implementation
+candidate passed hosted CI 7/7 plus independent
+determinism, money, migration, and release reviews before merge. PostgreSQL 19
+Beta 2 remains a nonproduction qualification; this evidence is not a
+production major-upgrade rehearsal. The owner-approved source adaptation is
+separately accepted in the port ledger.
+Production additionally remains blocked on a replay-safe v3 invalid-authority
+remediation rehearsal, a post-correction restore proof, commit-acknowledgment
+outcome resolution for migrations 009/010, production-scale lock timing, and
+proof that every old runtime role and database pool is gone throughout the
+cutover.
 These results do not activate the external fills route or complete the
 remaining Phase 3 scope.
 

@@ -1,5 +1,18 @@
 # Operations and Production Safety
 
+## PostgreSQL 19 qualification and production boundary
+
+The current migrator and every runtime schema verifier require PostgreSQL 19 or
+newer, with PostgreSQL 19 Beta 2 as the exact prerelease floor. Beta 2 is
+qualified only for development and CI. It is not approved for production.
+Production requires PostgreSQL 19 GA plus a production-like rehearsal from the
+then-supported deployed major using the chosen `pg_upgrade`, dump/restore, or
+logical-replication procedure. The release evidence must include a complete
+pre-upgrade backup and restore drill, immutable artifact and database version
+identity, application of every migration through the current tip, recovery, and
+zero reconciliation mismatch. A clean-database Beta 2 CI run is not evidence of
+a safe production major upgrade.
+
 ## 1. Deployment order
 
 1. Provision PostgreSQL, NATS/JetStream and Centrifugo.
@@ -11,6 +24,34 @@
 7. Verify readiness, input lag, invariant checks and reconciliation before enabling trading.
 
 Schema migration failure blocks deployment.
+
+### No-overlap migration protocol
+
+For every no-overlap schema cutover, `halt` is only the first step. Withdraw
+API and gRPC traffic, stop the engine, API background loops, outbox and event
+publishers, projectors, marketdata roles, realtime workers, consumers, and
+cleanup workers, then prove their leases, PostgreSQL sessions, and transactions
+have ended. The runtime schema verifier runs when a process opens its pool; it
+rejects a new process at the wrong migration tip but does not evict or
+continuously reverify an already-open pool. Keep every old runtime process
+stopped until the complete target migration set has committed and the new
+artifact passes schema verification.
+
+Classify migration errors by durable outcome:
+
+- A PostgreSQL migration-statement error, `lock_timeout`, or
+  `statement_timeout` raised before `COMMIT` aborts that transaction and leaves
+  the prior recorded tip.
+- A connection loss, client deadline, failover, or other error during or after
+  `COMMIT` acknowledgment has an unknown outcome. It does not prove rollback.
+
+For an unknown outcome, keep every runtime stopped and reconnect with the
+migrator identity. Compare the exact filename and checksum in
+`engine.schema_migrations` with the expected column, constraint, trigger, and
+constraint-validation catalog state. Classify the database at an exact known
+tip before retrying or choosing a binary. A journal/catalog disagreement stays
+halted for a reviewed forward fix; never guess, edit migration history, or
+restore selectively.
 
 ### Phase 3 realtime schema upgrade
 
@@ -60,10 +101,13 @@ a no-overlap engine boundary:
    `market.books`, `engine.input_receipts`, and
    `engine.duplicate_delivery_receipts` in writer-compatible order under a
    two-second lock timeout and a thirty-second statement timeout.
-4. Treat SQLSTATE `55000`, a timeout, or any migration error as a failed
-   cutover. Keep writers halted. The transaction leaves the old schema and
-   history intact; preserve the database and resolve malformed or incomplete
-   history through an owner-reviewed forward repair or a complete restore.
+4. Treat SQLSTATE `55000`, a PostgreSQL statement/lock timeout, or another
+   definite pre-commit migration error as a failed cutover. Keep writers halted.
+   The transaction leaves the old schema and history intact; preserve the
+   database and resolve malformed or incomplete history through an
+   owner-reviewed forward repair or a complete restore. Resolve an unknown
+   commit outcome through the no-overlap protocol above before taking any
+   further action.
 5. After a successful commit, start only the new engine image. New business
    and duplicate receipts are fenced to decision-hash v3, so an old engine
    must not be restarted against the upgraded database.
@@ -86,6 +130,72 @@ before deploying the prior binary; then run full reconciliation. Never
 selectively restore tables, edit an applied migration, or run an old binary
 against the v3 schema. Any facts accepted after the boundary are lost by a
 full restore and require the normal disaster-recovery decision.
+
+### Phase 3 frozen-effective-leverage hash v4 upgrade
+
+Migrations `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` and
+`20260726001000_phase3_validate_fill_effective_leverage.up.sql` introduce the
+next no-overlap engine boundary:
+
+1. At the v3 tip, scan for account/instrument risk leverage above the
+   instrument maximum. If any exists, abort the cutover. Submit an
+   owner-approved normal v3 configuration input through the single writer so
+   the correction commits one immutable receipt, decision/state hashes,
+   checkpoint, and matching projection. If open orders or positions prevent
+   that action, unwind them only through separately approved normal economic
+   inputs or stop for an explicit owner decision. Direct SQL, projection-only
+   repair migrations, implicit clamping, and reuse of a pre-correction backup
+   as the rollback boundary are forbidden.
+2. After a correction, acquire fresh v3 ownership, prove exact recovery and zero
+   reconciliation mismatch, then stop it again. Rescan the authority. A
+   mismatch still blocks the cutover.
+3. Apply the complete no-overlap protocol above: withdraw traffic; terminate
+   the v3 engine and every API, publisher, projector, marketdata, realtime,
+   consumer, and cleanup process; release their leases; and prove no
+   application-role transaction remains.
+4. Record the candidate artifact digest and take a new complete,
+   restore-verified backup/PITR boundary containing the corrected configuration,
+   fills, receipts, checkpoints, and `schema_migrations`.
+5. Inspect blockers before running migration 009. Its column and constraint
+   change takes `ACCESS EXCLUSIVE` on `trading.fills`, which conflicts even with
+   ordinary reads. Its trigger creation takes `SHARE ROW EXCLUSIVE` on
+   `engine.input_receipts`, `engine.duplicate_delivery_receipts`,
+   `engine.shard_faults`, and `engine.shard_checkpoints`. It also takes the
+   engine-owner advisory lock and uses a two-second lock timeout and
+   thirty-second statement timeout.
+6. SQLSTATE `55000`, `55P03`, or a PostgreSQL statement timeout raised by a
+   migration statement before `COMMIT` is a definite rollback to the v3 tip.
+   Preserve evidence. For `55000`, return to step 1; any correction must use the
+   normal v3 writer and requires another recovery/reconciliation proof and new
+   backup. For a lock or statement timeout, drain the blocker and retry from the
+   stopped state. A connection, deadline, failover, or commit-acknowledgment
+   error has an unknown outcome; inspect the migration journal and catalog under
+   the no-overlap protocol before retrying or selecting a binary.
+7. Migration 009 adds the nullable/no-default leverage column without
+   backfilling historical fills and fences new business, duplicate, fault, and
+   checkpoint writes to runtime decision-hash v4. Never restart a v3 engine
+   after it commits.
+8. Migration 010 validates the already-enforced positive-value constraint in a
+   separate transaction under a `SHARE UPDATE EXCLUSIVE` lock with the same
+   time bounds. A PostgreSQL statement timeout before commit leaves the database
+   at migration 009 for a clean retry; an unknown commit outcome requires the
+   same journal/catalog inspection. Keep every runtime stopped at migration 009.
+   The startup verifier rejects a newly opened runtime pool there, but does not
+   evict an old process—which is why step 3 is mandatory.
+9. Only after migration 010 is proven committed, start the v4 artifact and
+   require its exact schema verification. Verify v2/v3 replay, v4 decision and
+   state hashes,
+   exact immutable fill leverage, restart recovery, duplicate delivery,
+   risk-versus-instrument authority, and zero reconciliation mismatch before
+   leaving halt.
+
+Operational rollback after migration 009 is a reviewed forward fix with all
+runtimes halted. First resolve any unknown commit outcome. An owner-authorized
+database rollback means a complete restore of the valid post-correction,
+pre-009 boundary followed by the prior binary, fresh recovery, and full
+reconciliation. Never edit applied migrations, selectively restore economic
+tables, directly update a receipt-backed projection, backfill historical
+leverage, or run a v3 writer against the v4 schema.
 
 ### Realtime quarantine repair
 
@@ -273,3 +383,32 @@ A production release requires:
 - dependency/security scans clean or explicitly accepted;
 - signed immutable artifact digest;
 - rollback/forward-fix plan.
+
+For the first PostgreSQL 19 production release, these gates additionally
+require a PostgreSQL 19 GA build, a production-like major-upgrade rehearsal
+from the currently deployed major, a complete pre-upgrade restore drill,
+successful immutable migration through the current schema tip, and clean
+post-upgrade recovery and reconciliation. PostgreSQL 19 Beta 2 development/CI
+qualification does not satisfy this production gate.
+
+The rehearsal must additionally prove:
+
+- invalid pre-v4 risk authority is corrected only by an audited v3 input, with
+  fresh-owner recovery and reconciliation before a new rollback backup;
+- the corrected rollback backup restores to the v3 tip with the same receipt,
+  decision/state hash, checkpoint, projection, and clean reconciliation;
+- a configuration blocked by open orders or positions stops the cutover rather
+  than falling back to a projection-only repair;
+- connection loss after PostgreSQL accepts `COMMIT` for migrations 009 and 010
+  is resolved from exact journal/checksum and catalog evidence without assuming
+  rollback or applying a migration twice;
+- every old API, engine, publisher, projector, marketdata, realtime, consumer,
+  and cleanup process, lease, pool, and transaction is gone before the final
+  backup, and no application write or external acknowledgment crosses the
+  migration window;
+- production-scale lock and validation timing is measured after draining
+  blockers—including a long old-runtime fill read—on every table touched by
+  migrations 009 and 010.
+
+Until those upgrade tests and orchestration proofs exist, production remains
+blocked even after PostgreSQL 19 GA.
