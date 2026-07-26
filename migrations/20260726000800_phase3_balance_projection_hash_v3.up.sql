@@ -119,8 +119,29 @@ BEGIN
         SELECT 1
           FROM engine.input_receipts
          WHERE decision_hash_version < 3
-           AND jsonb_typeof(decision -> 'OrderChanges') = 'array'
-           AND jsonb_array_length(decision -> 'OrderChanges') > 0
+           AND decision ? 'OrderChanges'
+           AND jsonb_typeof(decision -> 'OrderChanges')
+               NOT IN ('array', 'null')
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'pre-v3 order history is not a canonical array',
+            HINT = 'keep writers halted; preserve the database and resolve the malformed receipt through an owner-reviewed forward repair or restore/reset';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+         FROM engine.input_receipts
+         WHERE decision_hash_version < 3
+           AND CASE
+                   WHEN jsonb_typeof(
+                       decision -> 'OrderChanges'
+                   ) = 'array'
+                   THEN jsonb_array_length(
+                       decision -> 'OrderChanges'
+                   ) > 0
+                   ELSE false
+               END
     ) THEN
         RAISE EXCEPTION USING
             ERRCODE = '55000',

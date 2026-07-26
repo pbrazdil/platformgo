@@ -4197,6 +4197,150 @@ func TestBalanceProjectionHashV3MigrationRejectsMalformedCurrencyHistory(
 	assertFinalMigrationHistory(t, pool)
 }
 
+func TestBalanceProjectionHashV3MigrationValidatesOrderHistoryShape(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	cases := []struct {
+		name     string
+		decision string
+		reject   bool
+	}{
+		{name: "string", decision: `{"OrderChanges":"bad"}`, reject: true},
+		{name: "object", decision: `{"OrderChanges":{}}`, reject: true},
+		{name: "number", decision: `{"OrderChanges":1}`, reject: true},
+		{name: "boolean", decision: `{"OrderChanges":true}`, reject: true},
+		{name: "missing", decision: `{}`},
+		{name: "null", decision: `{"OrderChanges":null}`},
+		{name: "empty array", decision: `{"OrderChanges":[]}`},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			resetDurableSchemas(t, pool)
+			if err := platformpostgres.NewMigrator(pool, previous).
+				MigrateAndProvision(ctx, 8); err != nil {
+				t.Fatalf("apply pre-v3 schema: %v", err)
+			}
+			connection, err := pool.Acquire(ctx)
+			if err != nil {
+				t.Fatalf("acquire order-history connection: %v", err)
+			}
+			if _, err := connection.Exec(ctx, `
+				SELECT set_config(
+					'platformgo.runtime_schema_revision',
+					'20260725001100_phase3_committed_realtime_outbox',
+					false
+				)`); err != nil {
+				connection.Release()
+				t.Fatalf("bind order-history schema revision: %v", err)
+			}
+			if _, err := connection.Exec(ctx, `
+				INSERT INTO engine.input_receipts (
+					shard_id, input_id, stream_sequence, schema_version,
+					input_hash_version, input_hash, decision_hash_version,
+					decision_hash, resulting_state_hash, envelope, decision,
+					business_input_hash, business_input_hash_version
+				) VALUES (
+					8,
+					'00000000-0000-4000-8000-000000000834',
+					1,
+					1,
+					1,
+					decode(repeat('91', 32), 'hex'),
+					2,
+					decode(repeat('92', 32), 'hex'),
+					decode(repeat('93', 32), 'hex'),
+					'{}',
+					$1::jsonb,
+					decode(repeat('94', 32), 'hex'),
+					1
+				)`,
+				test.decision,
+			); err != nil {
+				connection.Release()
+				t.Fatalf("seed order history: %v", err)
+			}
+			connection.Release()
+
+			err = current.Migrate(ctx)
+			if !test.reject {
+				if err != nil {
+					t.Fatalf("migrate compatible order history: %v", err)
+				}
+				assertFinalMigrationHistory(t, pool)
+				return
+			}
+			var postgresError *pgconn.PgError
+			if !errors.As(err, &postgresError) ||
+				postgresError.Code != "55000" {
+				t.Fatalf("malformed order history error = %v, want 55000", err)
+			}
+			var (
+				lastMigration  string
+				receiptCount   int
+				markNotNull    bool
+				registryExists bool
+				triggerCount   int
+			)
+			if err := pool.QueryRow(ctx, `
+				SELECT
+					(SELECT max(filename) FROM engine.schema_migrations),
+					(SELECT count(*) FROM engine.input_receipts),
+					(
+						SELECT attnotnull
+						  FROM pg_attribute
+						 WHERE attrelid = 'market.books'::regclass
+						   AND attname = 'mark_price'
+						   AND NOT attisdropped
+					),
+					to_regclass('trading.currency_scales') IS NOT NULL,
+					(
+						SELECT count(*)
+						  FROM pg_trigger
+						 WHERE tgname IN (
+							'input_receipts_require_balance_projection_hash_v3',
+							'duplicate_receipts_require_decision_hash_v3',
+							'instruments_require_currency_scale_consistency'
+						 )
+						   AND NOT tgisinternal
+					)`,
+			).Scan(
+				&lastMigration,
+				&receiptCount,
+				&markNotNull,
+				&registryExists,
+				&triggerCount,
+			); err != nil {
+				t.Fatalf("inspect malformed order rollback: %v", err)
+			}
+			if lastMigration !=
+				"20260726000700_phase3_user_api_keys.up.sql" ||
+				receiptCount != 1 ||
+				!markNotNull ||
+				registryExists ||
+				triggerCount != 0 {
+				t.Fatalf(
+					"rollback last=%q receipts=%d mark-not-null=%t registry=%t triggers=%d",
+					lastMigration,
+					receiptCount,
+					markNotNull,
+					registryExists,
+					triggerCount,
+				)
+			}
+		})
+	}
+}
+
 func TestCurrencyScaleRegistrySerializesConcurrentFirstUse(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
