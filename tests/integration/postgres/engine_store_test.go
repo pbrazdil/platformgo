@@ -2965,6 +2965,116 @@ func TestEngineStoreRecoversDecisionHashV2AndExtendsTheChainWithV3(
 			legacyState.Hash(),
 		)
 	}
+
+	duplicateInput := legacyInput
+	duplicateInput.StreamSequence = recovered.NextStreamSequence()
+	_, currentDuplicateDecision, duplicate, err :=
+		store.ApplyTrading(
+			ctx,
+			recovered,
+			duplicateInput,
+			legacyAction,
+			platformpostgres.ApplyOptions{},
+		)
+	if err != nil || !duplicate {
+		t.Fatalf(
+			"persist current duplicate = duplicate %t error %v",
+			duplicate,
+			err,
+		)
+	}
+	if currentDuplicateDecision.DecisionHashVersion != 3 {
+		t.Fatalf(
+			"persisted duplicate version = %d, want 3",
+			currentDuplicateDecision.DecisionHashVersion,
+		)
+	}
+	legacyDuplicateState, legacyDuplicateDecision, err :=
+		engine.ApplyDuplicateDeliveryAtDecisionHashVersion(
+			legacyState,
+			duplicateInput,
+			engine.NewReceipt(legacyInput, legacyDecision),
+			2,
+		)
+	if err != nil {
+		t.Fatalf("derive legacy duplicate decision: %v", err)
+	}
+	legacyDuplicateStateHash := legacyDuplicateState.Hash()
+	legacyDuplicateJSON, err := json.Marshal(legacyDuplicateDecision)
+	if err != nil {
+		t.Fatalf("encode legacy duplicate decision: %v", err)
+	}
+	duplicateConnection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire legacy duplicate connection: %v", err)
+	}
+	if _, err := duplicateConnection.Exec(
+		ctx,
+		"ALTER TABLE engine.duplicate_delivery_receipts DISABLE TRIGGER USER",
+	); err != nil {
+		duplicateConnection.Release()
+		t.Fatalf("disable immutable duplicate triggers: %v", err)
+	}
+	defer func() {
+		_, _ = pool.Exec(
+			context.Background(),
+			"ALTER TABLE engine.duplicate_delivery_receipts ENABLE TRIGGER USER",
+		)
+	}()
+	if _, err := duplicateConnection.Exec(ctx, `
+		UPDATE engine.duplicate_delivery_receipts
+		   SET decision_hash = $1,
+		       resulting_state_hash = $2,
+		       decision = $3
+		 WHERE shard_id = 8
+		   AND stream_sequence = $4`,
+		legacyDuplicateDecision.DecisionHash[:],
+		legacyDuplicateStateHash[:],
+		legacyDuplicateJSON,
+		duplicateInput.StreamSequence,
+	); err != nil {
+		duplicateConnection.Release()
+		t.Fatalf("install immutable legacy duplicate fixture: %v", err)
+	}
+	if _, err := duplicateConnection.Exec(ctx, `
+		UPDATE engine.shard_checkpoints
+		   SET state_hash = $1,
+		       next_stream_sequence = $2
+		 WHERE shard_id = 8`,
+		legacyDuplicateStateHash[:],
+		legacyDuplicateState.NextStreamSequence(),
+	); err != nil {
+		duplicateConnection.Release()
+		t.Fatalf("install legacy duplicate checkpoint fixture: %v", err)
+	}
+	if _, err := duplicateConnection.Exec(
+		ctx,
+		"ALTER TABLE engine.duplicate_delivery_receipts ENABLE TRIGGER USER",
+	); err != nil {
+		duplicateConnection.Release()
+		t.Fatalf("reenable immutable duplicate triggers: %v", err)
+	}
+	duplicateConnection.Release()
+
+	recoveredDuplicate, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover v2 business and duplicate history: %v", err)
+	}
+	if recoveredDuplicate.Hash() != legacyDuplicateState.Hash() ||
+		recoveredDuplicate.NextStreamSequence() !=
+			legacyDuplicateState.NextStreamSequence() ||
+		!recoveredDuplicate.Ready() {
+		t.Fatalf(
+			"recovered v2 duplicate ready=%t hash=%s next=%d, want %s/%d",
+			recoveredDuplicate.Ready(),
+			recoveredDuplicate.Hash(),
+			recoveredDuplicate.NextStreamSequence(),
+			legacyDuplicateState.Hash(),
+			legacyDuplicateState.NextStreamSequence(),
+		)
+	}
+	recovered = recoveredDuplicate
+
 	next, v3Decision, _, _ := applyStoredTrading(
 		t,
 		pool,
