@@ -342,6 +342,80 @@
         ],
         "type": "object"
       },
+      "MyAccountView": {
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "baseCurrency": {
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "login": {
+            "type": "integer"
+          },
+          "marginMode": {
+            "enum": [
+              "cross",
+              "isolated"
+            ],
+            "type": "string"
+          },
+          "marketVenue": {
+            "enum": [
+              "hyperliquid"
+            ],
+            "type": "string"
+          },
+          "omsMode": {
+            "enum": [
+              "netting",
+              "hedging"
+            ],
+            "type": "string"
+          },
+          "permittedClasses": {
+            "items": {
+              "enum": [
+                "perps"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "active",
+              "close_only",
+              "frozen",
+              "read_only",
+              "suspended",
+              "closed"
+            ],
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId",
+          "login",
+          "userId",
+          "baseCurrency",
+          "marginMode",
+          "omsMode",
+          "marketVenue",
+          "permittedClasses",
+          "status",
+          "createdAt"
+        ],
+        "type": "object"
+      },
       "OrderAccepted": {
         "properties": {
           "intentId": {
@@ -1242,11 +1316,46 @@
       "get": {
         "operationId": "get_v1_me_accounts",
         "responses": {
-          "default": {
-            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MyAccountView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid credentials"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
           }
         },
-        "x-platformgo-contract-status": "source-route-inventory"
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
       }
     },
     "/v1/me/api-keys": {

@@ -158,6 +158,11 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "statuses": [200, 401, 404, 503],
         "success": "UserProfile",
     },
+    ("GET", "/v1/me/accounts"): {
+        "statuses": [200, 401, 503],
+        "success_array": "MyAccountView",
+        "security": "bearer",
+    },
     ("GET", "/v1/instruments"): {
         "statuses": [200, 503],
         "success_array": "InstrumentView",
@@ -379,6 +384,59 @@ def schemas(client: bool) -> dict[str, object]:
                 "status": {"type": "string"},
             },
         },
+        **({
+        "MyAccountView": {
+            "type": "object",
+            "required": [
+                "accountId",
+                "login",
+                "userId",
+                "baseCurrency",
+                "marginMode",
+                "omsMode",
+                "marketVenue",
+                "permittedClasses",
+                "status",
+                "createdAt",
+            ],
+            "properties": {
+                "accountId": {"type": "string"},
+                "login": {"type": "integer"},
+                "userId": {"type": "string"},
+                "baseCurrency": {"type": "string"},
+                "marginMode": {
+                    "type": "string",
+                    "enum": ["cross", "isolated"],
+                },
+                "omsMode": {
+                    "type": "string",
+                    "enum": ["netting", "hedging"],
+                },
+                "marketVenue": {
+                    "type": "string",
+                    "enum": ["hyperliquid"],
+                },
+                "permittedClasses": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["perps"]},
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "pending",
+                        "active",
+                        "close_only",
+                        "frozen",
+                        "read_only",
+                        "suspended",
+                        "closed",
+                    ],
+                },
+                "createdAt": {"type": "string", "format": "date-time"},
+            },
+        }}
+        if client
+        else {}),
         "SubmitOrderRequest": {
             "type": "object",
             "required": ["intentId", "symbol", "side", "quantity"],

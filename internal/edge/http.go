@@ -85,6 +85,8 @@ func (server *Server) route(writer http.ResponseWriter, request *http.Request) {
 		server.handleOpenAPI(writer, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/auth/login":
 		server.handleLogin(writer, request)
+	case request.Method == http.MethodGet && request.URL.Path == "/v1/me/accounts":
+		server.handleMyAccounts(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/me":
 		server.handleProfile(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/instruments":
@@ -162,6 +164,38 @@ func (server *Server) handleProfile(writer http.ResponseWriter, request *http.Re
 	}
 	if err != nil {
 		writeError(writer, request, http.StatusServiceUnavailable, "unavailable", "identity unavailable")
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) handleMyAccounts(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	principal, ok := server.clientPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	if server.identity == nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"identity unavailable",
+		)
+		return
+	}
+	response, err := server.identity.MyAccounts(request.Context(), principal)
+	if err != nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"identity unavailable",
+		)
 		return
 	}
 	writeJSON(writer, http.StatusOK, response)

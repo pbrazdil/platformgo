@@ -61,17 +61,15 @@ func TestTraderListsOwnAccounts(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO identity.users (
 			user_id, login, normalized_login, email, normalized_email,
-			password_hash, broker_subject
+			password_hash
 		) VALUES
 			(
 				'urn:xb:user:owner-1', 'owner1', 'owner1',
-				'owner1@example.com', 'owner1@example.com', $1,
-				'urn:xb:tenant:owner'
+				'owner1@example.com', 'owner1@example.com', $1
 			),
 			(
 				'urn:xb:user:other-1', 'other1', 'other1',
-				'other1@example.com', 'other1@example.com', $1,
-				'urn:xb:tenant:other'
+				'other1@example.com', 'other1@example.com', $1
 			)`,
 		passwordHash,
 	); err != nil {
@@ -88,15 +86,15 @@ func TestTraderListsOwnAccounts(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO identity.user_accounts (
-			user_id, account_id, created_at, broker_subject
+			user_id, account_id, created_at
 		) VALUES
 			(
 				'urn:xb:user:owner-1', 'urn:xb:account:owner-1',
-				'2026-07-26T08:09:10Z', 'urn:xb:tenant:owner'
+				'2026-07-26T08:09:10Z'
 			),
 			(
 				'urn:xb:user:other-1', 'urn:xb:account:other-1',
-				'2026-07-26T09:10:11Z', 'urn:xb:tenant:other'
+				'2026-07-26T09:10:11Z'
 			)`,
 	); err != nil {
 		t.Fatal(err)
@@ -119,6 +117,18 @@ func TestTraderListsOwnAccounts(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	apiDatabaseURL := provisionRuntimeLogin(
+		t,
+		ctx,
+		pool,
+		databaseURL,
+		"platformgo_api",
+	)
+	apiPool, err := pgxpool.New(ctx, apiDatabaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer apiPool.Close()
 
 	authenticator, err := edge.NewHMACAuthenticator(edge.HMACAuthenticatorConfig{
 		ClientTokenSecret: []byte("phase3-my-accounts-client-secret"),
@@ -126,7 +136,7 @@ func TestTraderListsOwnAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := platformpostgres.NewCompatibilityStore(pool)
+	store := platformpostgres.NewCompatibilityStore(apiPool)
 	identity, err := application.NewIdentity(
 		store,
 		authenticator,
@@ -207,5 +217,28 @@ func TestTraderListsOwnAccounts(t *testing.T) {
 	}
 	if !bytes.Equal(got, expected) {
 		t.Fatalf("account = %s, want %s", got, expected)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM identity.account_profiles
+		 WHERE account_id = 'urn:xb:account:owner-1'`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	incomplete := requestJSON(
+		t,
+		http.MethodGet,
+		server.URL+"/v1/me/accounts",
+		"",
+		map[string]string{
+			"authorization": "Bearer " + authenticated.AccessToken,
+		},
+	)
+	defer incomplete.Body.Close()
+	if incomplete.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"incomplete account status = %d, want 503",
+			incomplete.StatusCode,
+		)
 	}
 }

@@ -17,6 +17,7 @@ import (
 type memoryIdentityStore struct {
 	users                map[string]IdentityRecord
 	accounts             map[string][]string
+	accountRecords       map[string][]AccountRecord
 	brokerRequests       map[string][sha256.Size]byte
 	brokerResults        map[string]edge.BrokerAccountAdmission
 	session              engine.ID
@@ -60,6 +61,13 @@ func (store *memoryIdentityStore) UserAccounts(
 	userID string,
 ) ([]string, error) {
 	return append([]string(nil), store.accounts[userID]...), nil
+}
+
+func (store *memoryIdentityStore) AccountsByUser(
+	_ context.Context,
+	userID string,
+) ([]AccountRecord, error) {
+	return append([]AccountRecord(nil), store.accountRecords[userID]...), nil
 }
 
 func (store *memoryIdentityStore) BrokerUserAccounts(
@@ -188,6 +196,33 @@ func TestIdentityPasswordLoginProfileAndBrokerDelegation(t *testing.T) {
 		accounts: map[string][]string{
 			"urn:xb:user:trader-1": {"urn:xb:account:acct-1"},
 		},
+		accountRecords: map[string][]AccountRecord{
+			"urn:xb:user:trader-1": {
+				{
+					AccountID:    "urn:xb:account:acct-1",
+					Login:        73000001,
+					UserID:       "urn:xb:user:trader-1",
+					BaseCurrency: "USDC",
+					MarginMode:   "CROSS",
+					OmsMode:      "NETTING",
+					MarketVenue:  "HYPERLIQUID",
+					PermittedClasses: []string{
+						"CRYPTOCURRENCY",
+					},
+					Status: "ACTIVE",
+					CreatedAt: time.Date(
+						2026,
+						time.July,
+						26,
+						8,
+						9,
+						10,
+						0,
+						time.UTC,
+					),
+				},
+			},
+		},
 	}
 	identity, err := NewIdentity(store, authenticator, IdentityConfig{
 		Clock:   fixedClock{value: now},
@@ -222,6 +257,21 @@ func TestIdentityPasswordLoginProfileAndBrokerDelegation(t *testing.T) {
 	profile, err := identity.Profile(context.Background(), principal)
 	if err != nil || profile.Login != "trader1" {
 		t.Fatalf("profile=%#v err=%v", profile, err)
+	}
+	accounts, err := identity.MyAccounts(context.Background(), principal)
+	if err != nil || !reflect.DeepEqual(accounts, []edge.MyAccountView{{
+		AccountID:        "urn:xb:account:acct-1",
+		Login:            73000001,
+		UserID:           "urn:xb:user:trader-1",
+		BaseCurrency:     "USDC",
+		MarginMode:       "cross",
+		OmsMode:          "netting",
+		MarketVenue:      "hyperliquid",
+		PermittedClasses: []string{"perps"},
+		Status:           "active",
+		CreatedAt:        "2026-07-26T08:09:10Z",
+	}}) {
+		t.Fatalf("accounts=%#v err=%v", accounts, err)
 	}
 	created, err := identity.CreateBrokerUser(
 		context.Background(),

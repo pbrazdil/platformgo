@@ -78,6 +78,9 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 		manifest.GRPCSurface.Status != "additive-versioned-go-contract" {
 		t.Fatalf("gRPC surface = %#v", manifest.GRPCSurface)
 	}
+	if !contains(manifest.ImplementedHTTPRoutes, "GET /v1/me/accounts") {
+		t.Fatal("GET /v1/me/accounts missing from compatibility manifest")
+	}
 }
 
 func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
@@ -94,6 +97,18 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 	assertPointer(t, admin, "components", "securitySchemes", "bearer")
 
 	client := decodeDocument(t, documents["/v1/openapi.json"])
+	myAccounts := assertMethod(t, client, "/v1/me/accounts", "get")
+	assertPointer(t, client, "components", "schemas", "MyAccountView")
+	assertResponse(t, myAccounts, "200")
+	assertResponse(t, myAccounts, "401")
+	assertResponse(t, myAccounts, "503")
+	if myAccounts["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
+		t.Fatalf(
+			"my accounts contract status = %v",
+			myAccounts["x-platformgo-contract-status"],
+		)
+	}
+	assertOperationSecurity(t, myAccounts, "bearer")
 	funding := assertMethod(t, client, "/v1/accounts/{accountId}/funding", "get")
 	assertPointer(t, client, "components", "schemas", "FundingView")
 	assertPointer(t, client, "components", "schemas", "FundingPage")

@@ -120,6 +120,98 @@ func (store *CompatibilityStore) UserAccounts(
 	return store.userAccounts(ctx, userID, nil)
 }
 
+// AccountsByUser loads complete account summaries for one durable owner.
+func (store *CompatibilityStore) AccountsByUser(
+	ctx context.Context,
+	userID string,
+) ([]application.AccountRecord, error) {
+	if store == nil || store.pool == nil {
+		return nil, errors.New("identity store: PostgreSQL pool is required")
+	}
+	rows, err := store.pool.Query(ctx, `
+		SELECT
+			ownership.account_id,
+			profile.login,
+			ownership.user_id,
+			profile.base_currency,
+			account.margin_mode,
+			account.oms_mode,
+			profile.market_venue,
+			profile.permitted_classes,
+			account.status,
+			profile.created_at
+		  FROM identity.user_accounts AS ownership
+		  LEFT JOIN trading.accounts AS account
+		    ON account.account_id = ownership.account_id
+		  LEFT JOIN identity.account_profiles AS profile
+		    ON profile.account_id = ownership.account_id
+		 WHERE ownership.user_id = $1
+		 ORDER BY profile.login, ownership.account_id`,
+		userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list account summaries: %w", err)
+	}
+	defer rows.Close()
+	accounts := make([]application.AccountRecord, 0)
+	for rows.Next() {
+		var (
+			record           application.AccountRecord
+			login            *int64
+			baseCurrency     *string
+			marginMode       *string
+			omsMode          *string
+			marketVenue      *string
+			permittedClasses []string
+			status           *string
+			createdAt        *time.Time
+		)
+		if err := rows.Scan(
+			&record.AccountID,
+			&login,
+			&record.UserID,
+			&baseCurrency,
+			&marginMode,
+			&omsMode,
+			&marketVenue,
+			&permittedClasses,
+			&status,
+			&createdAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan account summary: %w", err)
+		}
+		if login == nil ||
+			baseCurrency == nil ||
+			marginMode == nil ||
+			omsMode == nil ||
+			marketVenue == nil ||
+			permittedClasses == nil ||
+			status == nil ||
+			createdAt == nil {
+			return nil, fmt.Errorf(
+				"account summary %q is incomplete",
+				record.AccountID,
+			)
+		}
+		record.Login = *login
+		record.BaseCurrency = *baseCurrency
+		record.MarginMode = *marginMode
+		record.OmsMode = *omsMode
+		record.MarketVenue = *marketVenue
+		record.PermittedClasses = append(
+			[]string(nil),
+			permittedClasses...,
+		)
+		record.Status = *status
+		record.CreatedAt = *createdAt
+		accounts = append(accounts, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list account summaries: %w", err)
+	}
+	return accounts, nil
+}
+
 func (store *CompatibilityStore) userAccounts(
 	ctx context.Context,
 	userID string,

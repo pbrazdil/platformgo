@@ -2599,6 +2599,152 @@ func TestMigratorRejectsDisposableEightFileHistoryWithoutChangingData(t *testing
 	}
 }
 
+func TestAccountSummaryMigrationUsesBoundedLockAndPreservesExistingAccounts(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000300_phase3_fill_filter_read_model.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 43); err != nil {
+		t.Fatalf("apply previous account schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:summary-upgrade', 'HEDGING')`,
+	); err != nil {
+		t.Fatalf("seed existing account: %v", err)
+	}
+
+	lockingTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin account-summary lock: %v", err)
+	}
+	defer func() { _ = lockingTx.Rollback(context.Background()) }()
+	if _, err := lockingTx.Exec(ctx, `
+		SELECT account_id
+		  FROM trading.accounts
+		 WHERE account_id = 'urn:xb:account:summary-upgrade'`,
+	); err != nil {
+		t.Fatalf("hold account read lock: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	startedAt := time.Now()
+	err = current.Migrate(ctx)
+	elapsed := time.Since(startedAt)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55P03" {
+		t.Fatalf(
+			"contended account-summary upgrade error = %v, want SQLSTATE 55P03",
+			err,
+		)
+	}
+	if elapsed < 4*time.Second || elapsed > 8*time.Second {
+		t.Fatalf(
+			"bounded account-summary lock wait = %s, want approximately 5s",
+			elapsed,
+		)
+	}
+	var (
+		lastMigration    string
+		statusExists     bool
+		marginModeExists bool
+		accountCount     int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			EXISTS (
+				SELECT 1
+				  FROM information_schema.columns
+				 WHERE table_schema = 'trading'
+				   AND table_name = 'accounts'
+				   AND column_name = 'status'
+			),
+			EXISTS (
+				SELECT 1
+				  FROM information_schema.columns
+				 WHERE table_schema = 'trading'
+				   AND table_name = 'accounts'
+				   AND column_name = 'margin_mode'
+			),
+			(SELECT count(*) FROM trading.accounts)`,
+	).Scan(
+		&lastMigration,
+		&statusExists,
+		&marginModeExists,
+		&accountCount,
+	); err != nil {
+		t.Fatalf("inspect rolled-back account-summary migration: %v", err)
+	}
+	if lastMigration != "20260726000300_phase3_fill_filter_read_model.up.sql" ||
+		statusExists ||
+		marginModeExists ||
+		accountCount != 1 {
+		t.Fatalf(
+			"contended account-summary state = last %q status %t margin %t accounts %d",
+			lastMigration,
+			statusExists,
+			marginModeExists,
+			accountCount,
+		)
+	}
+
+	if err := lockingTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry uncontended account-summary upgrade: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify retried account-summary upgrade: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+
+	var statusValue string
+	var marginMode string
+	var omsMode string
+	if err := pool.QueryRow(ctx, `
+		SELECT status, margin_mode, oms_mode
+		  FROM trading.accounts
+		 WHERE account_id = 'urn:xb:account:summary-upgrade'`,
+	).Scan(&statusValue, &marginMode, &omsMode); err != nil {
+		t.Fatalf("read upgraded account: %v", err)
+	}
+	if statusValue != "ACTIVE" ||
+		marginMode != "CROSS" ||
+		omsMode != "HEDGING" {
+		t.Fatalf(
+			"upgraded account = status %q margin %q oms %q",
+			statusValue,
+			marginMode,
+			omsMode,
+		)
+	}
+	for name, statement := range map[string]string{
+		"invalid status": `
+			UPDATE trading.accounts
+			   SET status = 'active'
+			 WHERE account_id = 'urn:xb:account:summary-upgrade'`,
+		"invalid margin mode": `
+			UPDATE trading.accounts
+			   SET margin_mode = 'cross'
+			 WHERE account_id = 'urn:xb:account:summary-upgrade'`,
+	} {
+		if _, err := pool.Exec(ctx, statement); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+	}
+}
+
 func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	var count int
@@ -2610,9 +2756,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 15 ||
+	if count != 16 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260726000300_phase3_fill_filter_read_model.up.sql" {
+		last != "20260726000400_phase3_account_summary_read_model.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,
