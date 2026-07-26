@@ -45,7 +45,11 @@ Tests added/changed:
   a later market input cannot re-reject the order or change its reason/version.
 - The same PostgreSQL 17 test proves exact reservation and release, injected
   pre-commit rollback, stable duplicate replay, restart recovery,
-  reconciliation, and an unchanged frozen external contract.
+  and reconciliation.
+- That PostgreSQL test does not exercise the external order view. The unchanged
+  frozen external contract is established separately by the absence of
+  contract/edge changes and the passing frozen contract suite; this decision
+  does not activate a rejection-reason field.
 
 Approver: Petr Brazdil, through the active owner instruction:
 "Zachovej soucasne chovani jako zdroj."

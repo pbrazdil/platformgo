@@ -44,7 +44,11 @@ import (
 //     engine and PostgreSQL projections before terminal no-rewrite is checked.
 //   - The durable order version must also remain unchanged after the later
 //     market input.
-//   - The frozen external order contract remains unchanged.
+//
+// External contract boundary:
+//   - This PostgreSQL test does not exercise or activate the frozen external
+//     order contract. Contract artifacts and their separate contract suite
+//     remain the evidence for that unchanged boundary.
 func TestRejectedOrderPersistsReason(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
