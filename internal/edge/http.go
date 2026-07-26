@@ -223,6 +223,23 @@ func (server *Server) handleCreateMyAPIKey(
 	}
 	idempotencyKey := request.Header.Get("idempotency-key")
 	if strings.TrimSpace(idempotencyKey) == "" {
+		if err := server.identity.CheckClientRate(
+			request.Context(),
+			principal,
+		); err != nil {
+			if errors.Is(err, ErrRateLimited) {
+				writeClientRateLimit(writer, request, err)
+			} else {
+				writeError(
+					writer,
+					request,
+					http.StatusServiceUnavailable,
+					"unavailable",
+					"identity unavailable",
+				)
+			}
+			return
+		}
 		writeError(
 			writer,
 			request,

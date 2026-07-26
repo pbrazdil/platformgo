@@ -701,7 +701,7 @@ func TestUserAPIKeyCreationIsRateLimitedPerPrincipal(t *testing.T) {
 	defer apiPool.Close()
 	if _, err := admin.Exec(ctx, `
 		UPDATE identity.api_key_policy
-		   SET client_rate_limit_max_requests = 2,
+		   SET client_rate_limit_max_requests = 3,
 		       client_rate_limit_window_seconds = 60,
 		       version = version + 1
 		 WHERE singleton`); err != nil {
@@ -739,6 +739,20 @@ func TestUserAPIKeyCreationIsRateLimitedPerPrincipal(t *testing.T) {
 	_ = protectedRead.Body.Close()
 	if protectedRead.StatusCode != http.StatusOK {
 		t.Fatalf("protected read status = %d", protectedRead.StatusCode)
+	}
+	missingIdempotency := requestJSON(
+		t,
+		http.MethodPost,
+		serverURL+"/v1/me/api-keys",
+		`{"name":"missing-idempotency"}`,
+		map[string]string{"authorization": "Bearer " + accessToken},
+	)
+	_ = missingIdempotency.Body.Close()
+	if missingIdempotency.StatusCode != http.StatusBadRequest {
+		t.Fatalf(
+			"missing-idempotency status = %d, want 400",
+			missingIdempotency.StatusCode,
+		)
 	}
 	admitted := createMyAPIKey(
 		t,

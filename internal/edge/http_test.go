@@ -184,12 +184,18 @@ func (testIdentity) CreateMyAPIKey(
 type rateLimitedIdentity struct {
 	testIdentity
 	createCalls int
+	rateCalls   int
+	allowRate   bool
 }
 
 func (identity *rateLimitedIdentity) CheckClientRate(
 	_ context.Context,
 	_ Principal,
 ) error {
+	identity.rateCalls++
+	if identity.allowRate {
+		return nil
+	}
 	return ErrRateLimited
 }
 
@@ -432,7 +438,7 @@ func TestAPIKeyRateLimitResponseComesFromAtomicCredentialAdmission(t *testing.T)
 }
 
 func TestAPIKeyRequiresIdempotencyBeforeRequestDecoding(t *testing.T) {
-	identity := &rateLimitedIdentity{}
+	identity := &rateLimitedIdentity{allowRate: true}
 	handler := NewServer(ServerConfig{
 		Authenticator: testAuthenticator{},
 		Identity:      identity,
@@ -463,6 +469,12 @@ func TestAPIKeyRequiresIdempotencyBeforeRequestDecoding(t *testing.T) {
 		t.Fatalf(
 			"credential admission calls = %d, want 0",
 			identity.createCalls,
+		)
+	}
+	if identity.rateCalls != 1 {
+		t.Fatalf(
+			"protected-client rate calls = %d, want 1",
+			identity.rateCalls,
 		)
 	}
 }
