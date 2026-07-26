@@ -3610,35 +3610,154 @@ func TestEngineStoreRejectsCurrencyScaleAliasesAndRecoversExactly(
 	if _, err := pool.Exec(ctx, `
 		UPDATE trading.currency_scales
 		   SET scale = 8
-		 WHERE currency = 'USDC'`); err != nil {
-		t.Fatalf("corrupt retained currency scale: %v", err)
+		 WHERE currency = 'USDC'`); !isPostgresCode(err, "55000") {
+		t.Fatalf("currency registry update error = %v, want 55000", err)
 	}
-	if _, err := store.RecoverTradingState(ctx, 8); !errors.Is(
-		err,
-		platformpostgres.ErrCheckpointMismatch,
-	) {
-		t.Fatalf("corrupt registry recovery error = %v, want checkpoint mismatch", err)
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM trading.currency_scales
+		 WHERE currency = 'USDC'`); !isPostgresCode(err, "55000") {
+		t.Fatalf("currency registry delete error = %v, want 55000", err)
 	}
-	report, err := store.ReconcileShard(ctx, 8)
-	if !errors.Is(err, platformpostgres.ErrReconciliationMismatch) ||
-		report.Ready ||
-		report.ConfigurationMismatchCount != 1 {
+	if _, err := pool.Exec(ctx, `
+		TRUNCATE trading.currency_scales`); !isPostgresCode(err, "55000") {
+		t.Fatalf("currency registry truncate error = %v, want 55000", err)
+	}
+	recoveredImmutable, err := store.RecoverTradingState(ctx, 8)
+	if err != nil ||
+		recoveredImmutable.Hash() != finalState.Hash() ||
+		!recoveredImmutable.Ready() {
 		t.Fatalf(
-			"corrupt registry reconciliation = %+v, error %v",
-			report,
+			"immutable registry recovery ready=%t hash=%s error=%v",
+			recoveredImmutable.Ready(),
+			recoveredImmutable.Hash(),
 			err,
 		)
 	}
-	var checkpointReady bool
-	if err := pool.QueryRow(ctx, `
-		SELECT ready
-		  FROM engine.shard_checkpoints
-		 WHERE shard_id = 8`).Scan(&checkpointReady); err != nil ||
-		checkpointReady {
+	if report, err := store.ReconcileShard(ctx, 8); err != nil || !report.Ready {
+		t.Fatalf("immutable registry reconciliation = %+v, error %v", report, err)
+	}
+}
+
+func TestEngineStoreRetainsMigratedCatalogCurrencyAfterReconfiguration(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("apply pre-registry schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2, 0.1, 0.05, 10, 0, 0
+		)`); err != nil {
+		t.Fatalf("seed catalog-only currency identity: %v", err)
+	}
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("migrate catalog-only currency identity: %v", err)
+	}
+
+	store := platformpostgres.NewEngineStore(pool)
+	state, err := store.RecoverTradingState(ctx, 8)
+	if err != nil || !state.Ready() {
+		t.Fatalf("recover catalog-only currency ready=%t error=%v", state.Ready(), err)
+	}
+	ids := testkit.NewShardIDSequence(8)
+	clock := testkit.NewManualClock(
+		engine.NewLogicalTime(time.Date(2026, time.July, 26, 18, 0, 0, 0, time.UTC)),
+	)
+	instrument := func(
+		instrumentID string,
+		revision uint64,
+		currency string,
+		scale uint8,
+	) engine.TradingAction {
+		return engine.TradingAction{
+			Kind: engine.TradingActionConfigureInstrument,
+			ConfigureInstrument: &engine.ConfigureInstrument{
+				InstrumentID:            instrumentID,
+				Revision:                revision,
+				PriceScale:              2,
+				QuantityScale:           3,
+				SettlementCurrency:      currency,
+				SettlementCurrencyScale: scale,
+				InitialMarginRate:       "0.1",
+				MaintenanceMarginRate:   "0.05",
+				MaxLeverage:             "10",
+				MakerFeeRate:            "0",
+				TakerFeeRate:            "0",
+			},
+		}
+	}
+	liveState, reconfigured, _, _ := applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		instrument("BTC-PERP", 2, "EUR", 2),
+		platformpostgres.ApplyOptions{},
+	)
+	if reconfigured.CommandResult.Status != engine.CommandStatusAccepted {
+		t.Fatalf("catalog currency reconfiguration = %+v", reconfigured)
+	}
+	restarted, err := store.RecoverTradingState(ctx, 8)
+	if err != nil ||
+		!restarted.Ready() ||
+		restarted.Hash() != liveState.Hash() {
 		t.Fatalf(
-			"currency registry mismatch checkpoint ready=%t error=%v",
-			checkpointReady,
+			"restart after catalog reconfiguration ready=%t hash=%s error=%v",
+			restarted.Ready(),
+			restarted.Hash(),
 			err,
+		)
+	}
+
+	conflictAction := instrument("ETH-PERP", 1, "USDC", 8)
+	conflictInput := nextStoredInput(t, liveState, ids, clock, conflictAction)
+	liveNext, liveDecision, err := engine.ApplyTrading(
+		liveState,
+		conflictInput,
+		conflictAction,
+	)
+	if err != nil {
+		t.Fatalf("live catalog-history conflict: %v", err)
+	}
+	restartedNext, restartedDecision, err := engine.ApplyTrading(
+		restarted,
+		conflictInput,
+		conflictAction,
+	)
+	if err != nil {
+		t.Fatalf("restarted catalog-history conflict: %v", err)
+	}
+	if liveDecision.CommandResult.Status != engine.CommandStatusRejected ||
+		liveDecision.CommandResult.Reason != engine.RejectionInvalidInstrument ||
+		restartedDecision.CommandResult != liveDecision.CommandResult ||
+		restartedDecision.DecisionHash != liveDecision.DecisionHash ||
+		restartedNext.Hash() != liveNext.Hash() ||
+		len(liveDecision.InstrumentChanges) != 0 ||
+		len(liveDecision.BalanceChanges) != 0 ||
+		len(liveDecision.LedgerChanges) != 0 ||
+		len(liveDecision.Events) != 0 {
+		t.Fatalf(
+			"catalog-history conflict live=%+v restarted=%+v",
+			liveDecision,
+			restartedDecision,
 		)
 	}
 }

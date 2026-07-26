@@ -29,6 +29,17 @@ DO $$
 BEGIN
     IF EXISTS (
         SELECT 1
+          FROM engine.input_receipts
+         WHERE jsonb_typeof(decision) <> 'object'
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'receipt decision history is not a canonical object',
+            HINT = 'keep writers halted; preserve the database and resolve the malformed receipt through an owner-reviewed forward repair or restore/reset';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
          FROM engine.input_receipts
          WHERE decision ? 'InstrumentChanges'
            AND jsonb_typeof(decision -> 'InstrumentChanges')
@@ -257,5 +268,25 @@ FROM PUBLIC;
 CREATE TRIGGER instruments_require_currency_scale_consistency
 BEFORE INSERT OR UPDATE ON trading.instruments
 FOR EACH ROW EXECUTE FUNCTION trading.require_currency_scale_consistency();
+
+CREATE FUNCTION trading.reject_currency_scale_registry_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    RAISE EXCEPTION USING
+        ERRCODE = '55000',
+        MESSAGE = 'currency scale registry is append-only';
+END
+$$;
+
+REVOKE ALL ON FUNCTION trading.reject_currency_scale_registry_mutation()
+FROM PUBLIC;
+
+CREATE TRIGGER currency_scale_registry_is_append_only
+BEFORE UPDATE OR DELETE OR TRUNCATE ON trading.currency_scales
+FOR EACH STATEMENT
+EXECUTE FUNCTION trading.reject_currency_scale_registry_mutation();
 
 GRANT SELECT ON trading.currency_scales TO platformgo_engine;

@@ -62,9 +62,9 @@ func (state State) CurrencyScales() []CurrencyScaleSnapshot {
 	return scales
 }
 
-// SeedCurrencyScales installs the current durable catalog identities before
-// receipt replay. The PostgreSQL adapter must verify the resulting monotonic
-// registry against durable authority before making the shard ready.
+// SeedCurrencyScales installs the append-only durable registry before receipt
+// replay. Replayed configuration decisions then independently verify every
+// historical code-to-scale binding before the shard becomes ready.
 func SeedCurrencyScales(
 	state State,
 	scales []CurrencyScaleSnapshot,

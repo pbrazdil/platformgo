@@ -1944,14 +1944,14 @@ type postgresQuerier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-func loadCatalogCurrencyScales(
+func loadDurableCurrencyScales(
 	ctx context.Context,
 	querier postgresQuerier,
 ) ([]engine.CurrencyScaleSnapshot, error) {
 	rows, err := querier.Query(ctx, `
-		SELECT DISTINCT settlement_currency, settlement_currency_scale
-		  FROM trading.instruments
-		 ORDER BY settlement_currency, settlement_currency_scale`)
+		SELECT currency, scale
+		  FROM trading.currency_scales
+		 ORDER BY currency`)
 	if err != nil {
 		return nil, err
 	}
@@ -1985,21 +1985,21 @@ func recoverTradingState(
 	shardID engine.ShardID,
 	verifyCurrencyScaleAuthority bool,
 ) (engine.State, error) {
-	catalogScales, err := loadCatalogCurrencyScales(ctx, querier)
+	durableScales, err := loadDurableCurrencyScales(ctx, querier)
 	if err != nil {
 		return engine.State{}, fmt.Errorf(
-			"load shard %d catalog currency scales: %w",
+			"load shard %d durable currency scales: %w",
 			shardID,
 			err,
 		)
 	}
 	state, err := engine.SeedCurrencyScales(
 		engine.NewState(shardID),
-		catalogScales,
+		durableScales,
 	)
 	if err != nil {
 		return engine.State{}, fmt.Errorf(
-			"seed shard %d catalog currency scales: %w",
+			"seed shard %d durable currency scales: %w",
 			shardID,
 			err,
 		)

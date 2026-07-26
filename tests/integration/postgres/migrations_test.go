@@ -4215,6 +4215,11 @@ func TestBalanceProjectionHashV3MigrationValidatesOrderHistoryShape(
 		decision string
 		reject   bool
 	}{
+		{name: "null decision", decision: `null`, reject: true},
+		{name: "string decision", decision: `"bad"`, reject: true},
+		{name: "number decision", decision: `1`, reject: true},
+		{name: "boolean decision", decision: `true`, reject: true},
+		{name: "array decision", decision: `[]`, reject: true},
 		{name: "string", decision: `{"OrderChanges":"bad"}`, reject: true},
 		{name: "object", decision: `{"OrderChanges":{}}`, reject: true},
 		{name: "number", decision: `{"OrderChanges":1}`, reject: true},
