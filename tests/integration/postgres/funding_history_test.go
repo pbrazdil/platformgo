@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/upcomers-org/platformgo/internal/edge"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Ported from:
@@ -96,6 +98,26 @@ func TestFundingHistoryReadsPaginatesAndAggregates(t *testing.T) {
 	if len(pageTwo.Items) != 1 || pageTwo.Items[0].FundingAmount != "-10" {
 		t.Fatalf("second funding page = %#v", pageTwo)
 	}
+	if pageTwo.Total != nil || pageTwo.PrevCursor == nil {
+		t.Fatalf("second funding page cursors = %#v", pageTwo)
+	}
+	backward, err := store.Funding(
+		ctx,
+		accountOne,
+		edge.PageParams{
+			Limit:     2,
+			Cursor:    *pageTwo.PrevCursor,
+			Direction: "prev",
+		},
+	)
+	if err != nil {
+		t.Fatalf("read previous funding page: %v", err)
+	}
+	if len(backward.Items) != 2 ||
+		backward.Items[0].FundingAmount != "-2" ||
+		backward.Items[1].FundingAmount != "5" {
+		t.Fatalf("previous funding page = %#v", backward)
+	}
 
 	allTime, err := store.FundingPaidByPosition(
 		ctx,
@@ -140,22 +162,116 @@ func TestFundingHistoryReadsPaginatesAndAggregates(t *testing.T) {
 	}
 }
 
+func TestFundingHistoryReadsPersistedEngineLogicalTime(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).MigrateAndProvision(ctx, 41); err != nil {
+		t.Fatalf("migrate engine-role funding database: %v", err)
+	}
+	enginePool := postgresRolePool(t, "platformgo_engine")
+	seedReconciliationFixtureWithStorePool(t, pool, enginePool, 41)
+
+	var (
+		logicalTimeType string
+		hasLegacyKey    bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			jsonb_typeof(receipt.envelope -> 'LogicalTime'),
+			receipt.envelope ? 'logicalTime'
+		  FROM trading.funding_settlements AS funding
+		  JOIN engine.input_receipts AS receipt
+		    ON receipt.input_id = funding.input_id
+		   AND receipt.shard_id = 41
+		 LIMIT 1`,
+	).Scan(&logicalTimeType, &hasLegacyKey); err != nil {
+		t.Fatalf("inspect persisted funding receipt: %v", err)
+	}
+	if logicalTimeType != "number" || hasLegacyKey {
+		t.Fatalf(
+			"persisted logical time shape = type %q legacy-key %t",
+			logicalTimeType,
+			hasLegacyKey,
+		)
+	}
+
+	page, err := platformpostgres.NewCompatibilityStore(pool).Funding(
+		ctx,
+		"account-1",
+		edge.PageParams{Limit: 1},
+	)
+	if err != nil {
+		t.Fatalf("read EngineStore-backed funding: %v", err)
+	}
+	wantTime := time.Date(
+		2026,
+		time.July,
+		24,
+		14,
+		0,
+		6,
+		123456789,
+		time.UTC,
+	).Format(time.RFC3339Nano)
+	if len(page.Items) != 1 || page.Items[0].FundingTime != wantTime {
+		t.Fatalf("EngineStore-backed funding page = %#v, want time %q", page, wantTime)
+	}
+}
+
+func TestFundingHistoryRejectsSettlementWithoutProjection(t *testing.T) {
+	pool := postgresPool(t)
+	seedReconciliationFixture(t, pool, 41)
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO trading.funding_settlements (
+			funding_id, settlement_id, position_id, input_id,
+			account_id, instrument_id, signed_quantity, oracle_price,
+			rate, amount, settlement_currency
+		)
+		SELECT
+			'40000000-0000-0000-0000-000000000001',
+			'40000000-0000-0000-0000-000000000002',
+			position_id,
+			input_id,
+			account_id,
+			instrument_id,
+			signed_quantity,
+			oracle_price,
+			rate,
+			amount,
+			settlement_currency
+		  FROM trading.funding_settlements
+		 LIMIT 1`)
+	var pgError *pgconn.PgError
+	if !errors.As(err, &pgError) || pgError.Code != "55000" {
+		t.Fatalf("settlement without projection error = %v, want SQLSTATE 55000", err)
+	}
+}
+
 func seedFundingHistory(
 	t *testing.T,
-	pool interface {
-		Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-	},
+	pool *pgxpool.Pool,
 	baseTime time.Time,
 ) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin funding history seed: %v", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `
 		SELECT set_config(
 			'platformgo.runtime_schema_revision',
 			'20260725001100_phase3_committed_realtime_outbox',
-			false
+			true
 		);
-		INSERT INTO engine.deployment_shard (shard_id) VALUES (41);
+		INSERT INTO engine.deployment_shard (shard_id)
+		VALUES (41)
+		ON CONFLICT DO NOTHING;
 		INSERT INTO trading.instruments (
 			instrument_id, revision, price_scale, quantity_scale,
 			settlement_currency, settlement_currency_scale,
@@ -171,24 +287,50 @@ func seedFundingHistory(
 		INSERT INTO engine.account_shards (account_id, shard_id) VALUES
 			('urn:xb:account:funding-one', 41),
 			('urn:xb:account:funding-two', 41);
-		INSERT INTO identity.users (user_id, login, normalized_login) VALUES
-			('urn:xb:user:funding-one', 'funding-one', 'funding-one'),
-			('urn:xb:user:funding-two', 'funding-two', 'funding-two');
-		INSERT INTO identity.user_accounts (user_id, account_id) VALUES
-			('urn:xb:user:funding-one', 'urn:xb:account:funding-one'),
-			('urn:xb:user:funding-two', 'urn:xb:account:funding-two');
+		INSERT INTO identity.users (
+			user_id, login, normalized_login, broker_subject
+		) VALUES
+			(
+				'urn:xb:user:funding-one', 'funding-one', 'funding-one',
+				'urn:xb:tenant:funding-proof'
+			),
+			(
+				'urn:xb:user:funding-two', 'funding-two', 'funding-two',
+				'urn:xb:tenant:funding-proof'
+			);
+		INSERT INTO identity.user_accounts (
+			user_id, account_id, broker_subject
+		) VALUES
+			(
+				'urn:xb:user:funding-one', 'urn:xb:account:funding-one',
+				'urn:xb:tenant:funding-proof'
+			),
+			(
+				'urn:xb:user:funding-two', 'urn:xb:account:funding-two',
+				'urn:xb:tenant:funding-proof'
+			)`); err != nil {
+		t.Fatalf("seed funding identities: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO identity.account_profiles (
 			account_id, login, base_currency, market_venue,
-			permitted_classes, created_at
+			permitted_classes, created_at, broker_subject
 		) VALUES
 			(
 				'urn:xb:account:funding-one', 1001, 'USDC',
-				'HYPERLIQUID', ARRAY['PERPETUAL'], $1
+				'HYPERLIQUID', ARRAY['CRYPTOCURRENCY'], $1,
+				'urn:xb:tenant:funding-proof'
 			),
 			(
 				'urn:xb:account:funding-two', 1002, 'USDC',
-				'HYPERLIQUID', ARRAY['PERPETUAL'], $1
-			);
+				'HYPERLIQUID', ARRAY['CRYPTOCURRENCY'], $1,
+				'urn:xb:tenant:funding-proof'
+			)`,
+		baseTime,
+	); err != nil {
+		t.Fatalf("seed funding profiles: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO engine.input_receipts (
 			shard_id, input_id, stream_sequence, schema_version,
 			input_hash_version, input_hash, decision_hash_version,
@@ -205,7 +347,7 @@ func seedFundingHistory(
 			2,
 			decode(repeat(lpad((stream_sequence + 10)::text, 2, '0'), 32), 'hex'),
 			decode(repeat(lpad((stream_sequence + 20)::text, 2, '0'), 32), 'hex'),
-			jsonb_build_object('logicalTime', logical_time),
+			jsonb_build_object('LogicalTime', logical_time),
 			'{}'::jsonb,
 			decode(repeat(lpad((stream_sequence + 30)::text, 2, '0'), 32), 'hex'),
 			1
@@ -214,24 +356,31 @@ func seedFundingHistory(
 				(
 					'019f9b6d-3154-4db1-b639-57c246e92301'::uuid,
 					1::bigint,
-					$2::text
+					$1::bigint
 				),
 				(
 					'019f9b6d-3154-4db1-b639-57c246e92302'::uuid,
 					2::bigint,
-					$3::text
+					$2::bigint
 				),
 				(
 					'019f9b6d-3154-4db1-b639-57c246e92303'::uuid,
 					3::bigint,
-					$4::text
+					$3::bigint
 				),
 				(
 					'019f9b6d-3154-4db1-b639-57c246e92304'::uuid,
 					4::bigint,
-					$4::text
+					$3::bigint
 				)
-		  ) AS receipts(input_id, stream_sequence, logical_time);
+		  ) AS receipts(input_id, stream_sequence, logical_time)`,
+		baseTime.Add(-300*time.Second).UnixNano(),
+		baseTime.Add(-200*time.Second).UnixNano(),
+		baseTime.Add(-100*time.Second).UnixNano(),
+	); err != nil {
+		t.Fatalf("seed funding receipts: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO trading.funding_settlements (
 			funding_id, settlement_id, position_id, input_id,
 			account_id, instrument_id, signed_quantity, oracle_price,
@@ -268,12 +417,48 @@ func seedFundingHistory(
 				'019f9b6d-3154-4db1-b639-57c246e92304',
 				'urn:xb:account:funding-two', 'BTC-PERP',
 				1, 1000, 0.0000125, -3, 'USDC'
+			)`); err != nil {
+		t.Fatalf("seed funding settlements: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO trading.funding_history_projection (
+			funding_id, account_id, instrument_id, position_id, logical_time
+		) VALUES
+			(
+				'019f9b6d-3154-4db1-b639-57c246e92401',
+				'urn:xb:account:funding-one',
+				'BTC-PERP',
+				'019f9b6d-3154-4db1-b639-57c246e92201',
+				$1
+			),
+			(
+				'019f9b6d-3154-4db1-b639-57c246e92402',
+				'urn:xb:account:funding-one',
+				'BTC-PERP',
+				'019f9b6d-3154-4db1-b639-57c246e92201',
+				$2
+			),
+			(
+				'019f9b6d-3154-4db1-b639-57c246e92403',
+				'urn:xb:account:funding-one',
+				'BTC-PERP',
+				'019f9b6d-3154-4db1-b639-57c246e92201',
+				$3
+			),
+			(
+				'019f9b6d-3154-4db1-b639-57c246e92404',
+				'urn:xb:account:funding-two',
+				'BTC-PERP',
+				'019f9b6d-3154-4db1-b639-57c246e92202',
+				$3
 			)`,
-		baseTime,
-		baseTime.Add(-300*time.Second).Format(time.RFC3339Nano),
-		baseTime.Add(-200*time.Second).Format(time.RFC3339Nano),
-		baseTime.Add(-100*time.Second).Format(time.RFC3339Nano),
+		baseTime.Add(-300*time.Second).UnixNano(),
+		baseTime.Add(-200*time.Second).UnixNano(),
+		baseTime.Add(-100*time.Second).UnixNano(),
 	); err != nil {
-		t.Fatalf("seed funding history: %v", err)
+		t.Fatalf("seed funding history projection: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit funding history seed: %v", err)
 	}
 }

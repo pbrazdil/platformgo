@@ -226,6 +226,30 @@ func (testTradingReader) Balances(context.Context, string) ([]BalanceView, error
 	return []BalanceView{{Currency: "USDC", Total: "1000", Free: "1000", Equity: "1000"}}, nil
 }
 
+func (testTradingReader) Funding(
+	_ context.Context,
+	_ string,
+	params PageParams,
+) (FundingPage, error) {
+	cursor := "next-funding"
+	total := int64(1)
+	return FundingPage{
+		Items: []FundingView{{
+			FundingID:              "019f9b6d-3154-4db1-b639-57c246e92403",
+			Symbol:                 "BTC-PERP",
+			PositionID:             "706f732d31",
+			PositionSignedQuantity: "1",
+			OraclePrice:            "1000",
+			FundingRate:            "0.0000125",
+			FundingAmount:          "-2",
+			Currency:               "USDC",
+			FundingTime:            "2026-07-26T00:58:20Z",
+		}},
+		NextCursor: &cursor,
+		Total:      &total,
+	}, nil
+}
+
 func newTestServer(commands CommandSubmitter) *Server {
 	return NewServer(ServerConfig{
 		Authenticator: testAuthenticator{},
@@ -374,7 +398,7 @@ func TestSubmitOrderAuthenticatesOwnsAndReplaysExactly(t *testing.T) {
 	if accepted.IntentID != "intent-7" || accepted.OrderID == "" {
 		t.Fatalf("accepted = %#v", accepted)
 	}
-	for _, resource := range []string{"orders", "positions", "balances"} {
+	for _, resource := range []string{"orders", "positions", "balances", "funding"} {
 		response := performRequest(
 			t,
 			handler,
@@ -395,6 +419,25 @@ func TestSubmitOrderAuthenticatesOwnsAndReplaysExactly(t *testing.T) {
 		if resource == "balances" && !strings.Contains(response.Body.String(), `"currency":"USDC"`) {
 			t.Fatalf("balances = %s", response.Body.String())
 		}
+		if resource == "funding" &&
+			(!strings.Contains(response.Body.String(), `"fundingAmount":"-2"`) ||
+				!strings.Contains(response.Body.String(), `"total":1`)) {
+			t.Fatalf("funding = %s", response.Body.String())
+		}
+	}
+	invalidFundingPage := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/v1/accounts/urn:xb:account:acct-7/funding?limit=not-a-number",
+		nil,
+		headers,
+	)
+	if invalidFundingPage.Code != http.StatusBadRequest {
+		t.Fatalf(
+			"invalid funding page status = %d, want 400",
+			invalidFundingPage.Code,
+		)
 	}
 
 	unauthenticated := performRequest(t, handler, http.MethodPost, "/v1/accounts/urn:xb:account:acct-7/orders", body, nil)

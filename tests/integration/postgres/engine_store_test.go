@@ -899,7 +899,7 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 				fundingID := engine.IDFromSequence(engine.ID{}, 8993)
 				settlementID := engine.IDFromSequence(engine.ID{}, 8994)
 				inputID := engine.IDFromSequence(engine.ID{}, 8995)
-				_, err := pool.Exec(context.Background(), `
+				corruptAsReplicationAuthority(t, pool, `
 					INSERT INTO trading.funding_settlements (
 						funding_id, settlement_id, position_id, input_id,
 						account_id, instrument_id, signed_quantity, oracle_price,
@@ -917,9 +917,53 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 					settlementID.String(),
 					inputID.String(),
 				)
-				if err != nil {
-					t.Fatalf("insert unexplained funding effect: %v", err)
-				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.FundingMismatchCount
+			},
+		},
+		{
+			name: "missing funding history projection",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				corruptAsReplicationAuthority(t, pool, `
+					DELETE FROM trading.funding_history_projection
+					 WHERE account_id = 'account-1'`)
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.FundingMismatchCount
+			},
+		},
+		{
+			name: "wrong funding history account",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				corruptAsReplicationAuthority(t, pool, `
+					UPDATE trading.funding_history_projection
+					   SET account_id = 'wrong-account'
+					 WHERE account_id = 'account-1'`)
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.FundingMismatchCount
+			},
+		},
+		{
+			name: "wrong funding history position",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				corruptAsReplicationAuthority(t, pool, `
+					UPDATE trading.funding_history_projection
+					   SET position_id = $1`,
+					engine.IDFromSequence(engine.ID{}, 8996).String(),
+				)
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.FundingMismatchCount
+			},
+		},
+		{
+			name: "wrong funding history logical time",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				corruptAsReplicationAuthority(t, pool, `
+					UPDATE trading.funding_history_projection
+					   SET logical_time = logical_time + 1`)
 			},
 			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
 				return report.FundingMismatchCount
@@ -1579,7 +1623,17 @@ func seedReconciliationFixture(
 	).MigrateAndProvision(context.Background(), shardID); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	store := platformpostgres.NewEngineStore(pool)
+	return seedReconciliationFixtureWithStorePool(t, pool, pool, shardID)
+}
+
+func seedReconciliationFixtureWithStorePool(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	storePool *pgxpool.Pool,
+	shardID engine.ShardID,
+) reconciliationFixture {
+	t.Helper()
+	store := platformpostgres.NewEngineStore(storePool)
 	state := engine.NewState(shardID)
 	ids := testkit.NewShardIDSequence(shardID)
 	clock := testkit.NewManualClock(

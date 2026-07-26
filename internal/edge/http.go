@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -210,11 +211,38 @@ func (server *Server) handleAccountRead(
 		response, err = server.trading.Positions(request.Context(), accountID)
 	case "balances":
 		response, err = server.trading.Balances(request.Context(), accountID)
+	case "funding":
+		params, parseErr := fundingPageParams(request)
+		if parseErr != nil {
+			writeError(
+				writer,
+				request,
+				http.StatusBadRequest,
+				"invalid_request",
+				"invalid funding page",
+			)
+			return
+		}
+		response, err = server.trading.Funding(
+			request.Context(),
+			accountID,
+			params,
+		)
 	default:
 		writeError(writer, request, http.StatusNotFound, "not_found", "route not found")
 		return
 	}
 	if err != nil {
+		if errors.Is(err, ErrInvalidRequest) {
+			writeError(
+				writer,
+				request,
+				http.StatusBadRequest,
+				"invalid_request",
+				"invalid funding page",
+			)
+			return
+		}
 		writeError(writer, request, http.StatusServiceUnavailable, "unavailable", "trading views unavailable")
 		return
 	}
@@ -547,7 +575,7 @@ func accountReadRoute(path string) (string, string, bool) {
 		return "", "", false
 	}
 	remainder := strings.TrimPrefix(path, prefix)
-	for _, resource := range []string{"orders", "positions", "balances"} {
+	for _, resource := range []string{"orders", "positions", "balances", "funding"} {
 		suffix := "/" + resource
 		if strings.HasSuffix(remainder, suffix) {
 			accountID := strings.TrimSuffix(remainder, suffix)
@@ -555,6 +583,23 @@ func accountReadRoute(path string) (string, string, bool) {
 		}
 	}
 	return "", "", false
+}
+
+func fundingPageParams(request *http.Request) (PageParams, error) {
+	params := PageParams{
+		Cursor:    request.URL.Query().Get("cursor"),
+		Direction: request.URL.Query().Get("direction"),
+	}
+	rawLimit := request.URL.Query().Get("limit")
+	if rawLimit == "" {
+		return params, nil
+	}
+	limit, err := strconv.ParseInt(rawLimit, 10, 32)
+	if err != nil {
+		return PageParams{}, err
+	}
+	params.Limit = int(limit)
+	return params, nil
 }
 
 func decodeJSON(reader io.Reader, target any) error {

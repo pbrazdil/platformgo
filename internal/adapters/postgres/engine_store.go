@@ -1465,6 +1465,22 @@ func persistFunding(
 				err,
 			)
 		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO trading.funding_history_projection (
+				funding_id, account_id, instrument_id, position_id, logical_time
+			) VALUES ($1,$2,$3,$4,$5)`,
+			change.FundingID.String(),
+			change.AccountID,
+			change.InstrumentID,
+			change.PositionID.String(),
+			input.LogicalTime.UnixNano(),
+		); err != nil {
+			return fmt.Errorf(
+				"persist funding history projection %s: %w",
+				change.FundingID,
+				err,
+			)
+		}
 	}
 	return nil
 }

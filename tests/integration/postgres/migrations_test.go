@@ -15,7 +15,10 @@ import (
 	"time"
 
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
+	"github.com/upcomers-org/platformgo/internal/edge"
+	"github.com/upcomers-org/platformgo/internal/engine"
 	"github.com/upcomers-org/platformgo/internal/testsupport/postgresfixture"
+	"github.com/upcomers-org/platformgo/testkit"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -46,6 +49,7 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 		"trading.orders",
 		"trading.fills",
 		"trading.positions",
+		"trading.funding_history_projection",
 		"market.books",
 		"ledger.transactions",
 		"ledger.entries",
@@ -594,6 +598,195 @@ func TestRealtimeMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 	}
 	if err := current.VerifyCurrent(ctx); err != nil {
 		t.Fatalf("verify retried realtime upgrade: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
+func TestFundingHistoryMigrationUpgradesPopulatedRealtimeSchema(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260725001100_phase3_committed_realtime_outbox.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 41); err != nil {
+		t.Fatalf("apply previous realtime schema: %v", err)
+	}
+	store := platformpostgres.NewEngineStore(pool)
+	state := engine.NewState(41)
+	ids := testkit.NewShardIDSequence(41)
+	clock := testkit.NewManualClock(engine.NewLogicalTime(time.Date(
+		2026,
+		time.July,
+		24,
+		14,
+		0,
+		0,
+		123456789,
+		time.UTC,
+	)))
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		engine.TradingAction{
+			Kind: engine.TradingActionConfigureInstrument,
+			ConfigureInstrument: &engine.ConfigureInstrument{
+				InstrumentID:            "BTC-PERP",
+				Revision:                1,
+				PriceScale:              2,
+				QuantityScale:           3,
+				SettlementCurrency:      "USDC",
+				SettlementCurrencyScale: 2,
+				InitialMarginRate:       "0.1",
+				MaintenanceMarginRate:   "0.05",
+				MaxLeverage:             "10",
+				MakerFeeRate:            "0",
+				TakerFeeRate:            "0",
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	_, _, fundingInput, _ := applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		engine.TradingAction{
+			Kind: engine.TradingActionConfigureAccount,
+			ConfigureAccount: &engine.ConfigureAccount{
+				AccountID: "account-1",
+				OmsMode:   engine.OmsModeNetting,
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	const positionID = "019f9b6d-3154-4db1-b639-57c246e92201"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.funding_settlements (
+			funding_id, settlement_id, position_id, input_id,
+			account_id, instrument_id, signed_quantity, oracle_price,
+			rate, amount, settlement_currency
+		) VALUES (
+			'019f9b6d-3154-4db1-b639-57c246e92401',
+			'019f9b6d-3154-4db1-b639-57c246e92501',
+			$1,
+			$2,
+			'account-1',
+			'BTC-PERP',
+			3,
+			100,
+			0.01,
+			-3,
+			'USDC'
+		)`,
+		positionID,
+		fundingInput.InputID.String(),
+	); err != nil {
+		t.Fatalf("seed previous-schema funding settlement: %v", err)
+	}
+	var (
+		preUpgradeAmount string
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT trim_scale(amount)::text
+		  FROM trading.funding_settlements
+		 WHERE account_id = 'account-1'`,
+	).Scan(&preUpgradeAmount); err != nil {
+		t.Fatalf("read pre-upgrade EngineStore funding: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("upgrade funding history read model: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify funding history migration: %v", err)
+	}
+	var (
+		rowCount        int
+		accountIndex    bool
+		instrumentIndex bool
+		positionIndex   bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM trading.funding_settlements),
+			to_regclass(
+				'trading.funding_history_projection_account_idx'
+			) IS NOT NULL,
+			to_regclass(
+				'trading.funding_history_projection_instrument_idx'
+			) IS NOT NULL,
+			to_regclass(
+				'trading.funding_history_projection_account_position_idx'
+			) IS NOT NULL`,
+	).Scan(
+		&rowCount,
+		&accountIndex,
+		&instrumentIndex,
+		&positionIndex,
+	); err != nil {
+		t.Fatalf("read upgraded funding history: %v", err)
+	}
+	if rowCount != 1 || !accountIndex || !instrumentIndex || !positionIndex {
+		t.Fatalf(
+			"upgraded funding rows = %d indexes = %t/%t/%t",
+			rowCount,
+			accountIndex,
+			instrumentIndex,
+			positionIndex,
+		)
+	}
+
+	compatibilityStore := platformpostgres.NewCompatibilityStore(pool)
+	page, err := compatibilityStore.Funding(
+		ctx,
+		"account-1",
+		edge.PageParams{Limit: 1},
+	)
+	if err != nil {
+		t.Fatalf("read upgraded EngineStore funding page: %v", err)
+	}
+	fundingTime := time.Date(
+		2026,
+		time.July,
+		24,
+		14,
+		0,
+		1,
+		123456789,
+		time.UTC,
+	)
+	if len(page.Items) != 1 ||
+		page.Items[0].FundingAmount != preUpgradeAmount ||
+		page.Items[0].FundingTime != fundingTime.Format(time.RFC3339Nano) {
+		t.Fatalf("upgraded EngineStore funding page = %#v", page)
+	}
+	since := fundingTime.Add(-time.Nanosecond)
+	total, err := compatibilityStore.FundingPaidByPosition(
+		ctx,
+		"account-1",
+		positionID,
+		&since,
+	)
+	if err != nil || total != preUpgradeAmount {
+		t.Fatalf(
+			"upgraded since-scoped total = %q, want %q, error %v",
+			total,
+			preUpgradeAmount,
+			err,
+		)
 	}
 	assertFinalMigrationHistory(t, pool)
 }
@@ -2064,9 +2257,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 12 ||
+	if count != 13 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260725001100_phase3_committed_realtime_outbox.up.sql" {
+		last != "20260726000100_phase3_funding_history_read_model.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,

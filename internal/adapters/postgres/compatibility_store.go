@@ -3,9 +3,12 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -676,4 +679,271 @@ func (store *CompatibilityStore) Balances(
 		values = append(values, value)
 	}
 	return values, rows.Err()
+}
+
+// Funding returns one exact, newest-first account funding page.
+func (store *CompatibilityStore) Funding(
+	ctx context.Context,
+	accountID string,
+	params edge.PageParams,
+) (edge.FundingPage, error) {
+	return store.fundingPage(ctx, accountID, "", false, params)
+}
+
+// FundingBySymbol returns a fleet funding page with account login identity.
+func (store *CompatibilityStore) FundingBySymbol(
+	ctx context.Context,
+	symbol string,
+	params edge.PageParams,
+) (edge.FundingPage, error) {
+	return store.fundingPage(ctx, "", symbol, true, params)
+}
+
+// FundingPaidByPosition sums exact funding for one position and optional cycle.
+func (store *CompatibilityStore) FundingPaidByPosition(
+	ctx context.Context,
+	accountID string,
+	positionID string,
+	since *time.Time,
+) (string, error) {
+	if _, err := engine.ParseID(positionID); err != nil {
+		return "", fmt.Errorf("position funding total: invalid position ID: %w", err)
+	}
+	var requestedSince any
+	if since != nil {
+		requestedSince = since.UnixNano()
+	}
+	var total string
+	if err := store.pool.QueryRow(ctx, `
+		SELECT trim_scale(
+			trading.account_position_funding_total(
+				$1,
+				$2,
+				$3::bigint
+			)
+		)::text`,
+		accountID,
+		positionID,
+		requestedSince,
+	).Scan(&total); err != nil {
+		return "", fmt.Errorf("position funding total: %w", err)
+	}
+	return total, nil
+}
+
+type fundingHistoryCursor struct {
+	logicalTime int64
+	fundingID   string
+}
+
+type fundingHistoryRow struct {
+	view        edge.FundingView
+	logicalTime int64
+}
+
+func (store *CompatibilityStore) fundingPage(
+	ctx context.Context,
+	accountID string,
+	symbol string,
+	includeAccountLogin bool,
+	params edge.PageParams,
+) (edge.FundingPage, error) {
+	limit := params.Limit
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	cursor, err := decodeFundingHistoryCursor(params.Cursor)
+	if err != nil {
+		return edge.FundingPage{}, err
+	}
+	forward := params.Direction != "prev" && params.Direction != "backward"
+	var (
+		requestedAccount any
+		requestedSymbol  any
+		cursorTime       any
+		cursorID         any
+	)
+	if accountID != "" {
+		requestedAccount = accountID
+	}
+	if symbol != "" {
+		requestedSymbol = symbol
+	}
+	if cursor != nil {
+		cursorTime = cursor.logicalTime
+		cursorID = cursor.fundingID
+	}
+	query := `
+		SELECT
+			funding_id::text,
+			instrument_id,
+			position_id::text,
+			trim_scale(signed_quantity)::text,
+			trim_scale(oracle_price)::text,
+			trim_scale(funding_rate)::text,
+			trim_scale(funding_amount)::text,
+			settlement_currency,
+			funding_logical_time,
+			account_login
+		  FROM trading.read_account_funding_history(
+			$1::text,
+			$2::bigint,
+			$3::uuid,
+			$4,
+			$5,
+			$6
+		  )`
+	filter := requestedAccount
+	if includeAccountLogin {
+		query = `
+		SELECT
+			funding_id::text,
+			instrument_id,
+			position_id::text,
+			trim_scale(signed_quantity)::text,
+			trim_scale(oracle_price)::text,
+			trim_scale(funding_rate)::text,
+			trim_scale(funding_amount)::text,
+			settlement_currency,
+			funding_logical_time,
+			account_login
+		  FROM trading.read_symbol_funding_history(
+			$1::text,
+			$2::bigint,
+			$3::uuid,
+			$4,
+			$5,
+			$6
+		  )`
+		filter = requestedSymbol
+	}
+	rows, queryErr := store.pool.Query(ctx,
+		query,
+		filter,
+		cursorTime,
+		cursorID,
+		cursor != nil,
+		limit+1,
+		forward,
+	)
+	if queryErr != nil {
+		return edge.FundingPage{}, fmt.Errorf("list funding: %w", queryErr)
+	}
+	defer rows.Close()
+	history := make([]fundingHistoryRow, 0, limit+1)
+	for rows.Next() {
+		var row fundingHistoryRow
+		var rawPositionID string
+		if err := rows.Scan(
+			&row.view.FundingID,
+			&row.view.Symbol,
+			&rawPositionID,
+			&row.view.PositionSignedQuantity,
+			&row.view.OraclePrice,
+			&row.view.FundingRate,
+			&row.view.FundingAmount,
+			&row.view.Currency,
+			&row.logicalTime,
+			&row.view.AccountLogin,
+		); err != nil {
+			return edge.FundingPage{}, fmt.Errorf("scan funding: %w", err)
+		}
+		row.view.PositionID = hex.EncodeToString([]byte(rawPositionID))
+		row.view.FundingTime = time.Unix(0, row.logicalTime).
+			UTC().
+			Format(time.RFC3339Nano)
+		if !includeAccountLogin {
+			row.view.AccountLogin = nil
+		}
+		history = append(history, row)
+	}
+	if err := rows.Err(); err != nil {
+		return edge.FundingPage{}, fmt.Errorf("list funding: %w", err)
+	}
+	hasMore := len(history) > limit
+	if hasMore {
+		history = history[:limit]
+	}
+	if !forward && cursor != nil {
+		for left, right := 0, len(history)-1; left < right; left, right = left+1, right-1 {
+			history[left], history[right] = history[right], history[left]
+		}
+	}
+	page := edge.FundingPage{
+		Items: make([]edge.FundingView, len(history)),
+	}
+	for index := range history {
+		page.Items[index] = history[index].view
+	}
+	if len(history) != 0 {
+		newest := encodeFundingHistoryCursor(history[0])
+		oldest := encodeFundingHistoryCursor(history[len(history)-1])
+		if forward {
+			if hasMore {
+				page.NextCursor = &oldest
+			}
+			if cursor != nil {
+				page.PrevCursor = &newest
+			}
+		} else {
+			page.NextCursor = &oldest
+			if hasMore {
+				page.PrevCursor = &newest
+			}
+		}
+	}
+	if cursor == nil {
+		var total int64
+		countQuery := `SELECT trading.account_funding_history_count($1::text)`
+		countFilter := requestedAccount
+		if includeAccountLogin {
+			countQuery = `SELECT trading.symbol_funding_history_count($1::text)`
+			countFilter = requestedSymbol
+		}
+		if err := store.pool.QueryRow(
+			ctx,
+			countQuery,
+			countFilter,
+		).Scan(&total); err != nil {
+			return edge.FundingPage{}, fmt.Errorf("count funding: %w", err)
+		}
+		page.Total = &total
+	}
+	return page, nil
+}
+
+func encodeFundingHistoryCursor(row fundingHistoryRow) string {
+	raw := strconv.FormatInt(row.logicalTime, 10) + ":" + row.view.FundingID
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+func decodeFundingHistoryCursor(encoded string) (*fundingHistoryCursor, error) {
+	if encoded == "" {
+		return nil, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, edge.ErrInvalidRequest
+	}
+	parts := strings.SplitN(string(raw), ":", 2)
+	if len(parts) != 2 {
+		return nil, edge.ErrInvalidRequest
+	}
+	nanoseconds, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return nil, edge.ErrInvalidRequest
+	}
+	if _, err := engine.ParseID(parts[1]); err != nil {
+		return nil, edge.ErrInvalidRequest
+	}
+	return &fundingHistoryCursor{
+		logicalTime: nanoseconds,
+		fundingID:   parts[1],
+	}, nil
 }
