@@ -3532,6 +3532,50 @@ func TestEngineStoreRejectsCurrencyScaleAliasesAndRecoversExactly(
 		t.Fatalf("currency-scale rejection reconciliation = %+v, error %v", report, err)
 	}
 
+	restartConflictAction := instrument("SOL-PERP", 1, "USDC", 8)
+	restartConflictInput := nextStoredInput(
+		t,
+		duplicateState,
+		ids,
+		clock,
+		restartConflictAction,
+	)
+	liveConflictState, liveConflict, err := engine.ApplyTrading(
+		duplicateState,
+		restartConflictInput,
+		restartConflictAction,
+	)
+	if err != nil {
+		t.Fatalf("live post-reconfiguration conflict: %v", err)
+	}
+	restartedConflictState, restartedConflict, err := engine.ApplyTrading(
+		recovered,
+		restartConflictInput,
+		restartConflictAction,
+	)
+	if err != nil {
+		t.Fatalf("restarted post-reconfiguration conflict: %v", err)
+	}
+	if liveConflict.CommandResult.Status != engine.CommandStatusRejected ||
+		liveConflict.CommandResult.Reason != engine.RejectionInvalidInstrument ||
+		restartedConflict.CommandResult != liveConflict.CommandResult ||
+		restartedConflict.DecisionHash != liveConflict.DecisionHash ||
+		restartedConflictState.Hash() != liveConflictState.Hash() ||
+		len(liveConflict.InstrumentChanges) != 0 ||
+		len(liveConflict.BalanceChanges) != 0 ||
+		len(liveConflict.LedgerChanges) != 0 ||
+		len(liveConflict.Events) != 0 ||
+		len(restartedConflict.InstrumentChanges) != 0 ||
+		len(restartedConflict.BalanceChanges) != 0 ||
+		len(restartedConflict.LedgerChanges) != 0 ||
+		len(restartedConflict.Events) != 0 {
+		t.Fatalf(
+			"post-restart currency conflict live=%+v restarted=%+v",
+			liveConflict,
+			restartedConflict,
+		)
+	}
+
 	finalState, sameScale, _, _ := applyStoredTrading(
 		t,
 		pool,
@@ -3561,6 +3605,41 @@ func TestEngineStoreRejectsCurrencyScaleAliasesAndRecoversExactly(
 	}
 	if report, err := store.ReconcileShard(ctx, 8); err != nil || !report.Ready {
 		t.Fatalf("same-scale reconciliation = %+v, error %v", report, err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE trading.currency_scales
+		   SET scale = 8
+		 WHERE currency = 'USDC'`); err != nil {
+		t.Fatalf("corrupt retained currency scale: %v", err)
+	}
+	if _, err := store.RecoverTradingState(ctx, 8); !errors.Is(
+		err,
+		platformpostgres.ErrCheckpointMismatch,
+	) {
+		t.Fatalf("corrupt registry recovery error = %v, want checkpoint mismatch", err)
+	}
+	report, err := store.ReconcileShard(ctx, 8)
+	if !errors.Is(err, platformpostgres.ErrReconciliationMismatch) ||
+		report.Ready ||
+		report.ConfigurationMismatchCount != 1 {
+		t.Fatalf(
+			"corrupt registry reconciliation = %+v, error %v",
+			report,
+			err,
+		)
+	}
+	var checkpointReady bool
+	if err := pool.QueryRow(ctx, `
+		SELECT ready
+		  FROM engine.shard_checkpoints
+		 WHERE shard_id = 8`).Scan(&checkpointReady); err != nil ||
+		checkpointReady {
+		t.Fatalf(
+			"currency registry mismatch checkpoint ready=%t error=%v",
+			checkpointReady,
+			err,
+		)
 	}
 }
 

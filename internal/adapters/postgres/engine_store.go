@@ -1936,7 +1936,7 @@ func (store *EngineStore) RecoverTradingState(
 			"recover trading state: PostgreSQL pool is required",
 		)
 	}
-	return recoverTradingState(ctx, store.pool, shardID)
+	return recoverTradingState(ctx, store.pool, shardID, true)
 }
 
 type postgresQuerier interface {
@@ -1944,11 +1944,66 @@ type postgresQuerier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
+func loadCatalogCurrencyScales(
+	ctx context.Context,
+	querier postgresQuerier,
+) ([]engine.CurrencyScaleSnapshot, error) {
+	rows, err := querier.Query(ctx, `
+		SELECT DISTINCT settlement_currency, settlement_currency_scale
+		  FROM trading.instruments
+		 ORDER BY settlement_currency, settlement_currency_scale`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	scales := make([]engine.CurrencyScaleSnapshot, 0)
+	for rows.Next() {
+		var snapshot engine.CurrencyScaleSnapshot
+		var scale int16
+		if err := rows.Scan(&snapshot.Currency, &scale); err != nil {
+			return nil, err
+		}
+		if scale < 0 || scale > 255 {
+			return nil, fmt.Errorf(
+				"catalog currency %s scale %d is out of range",
+				snapshot.Currency,
+				scale,
+			)
+		}
+		snapshot.Scale = uint8(scale)
+		scales = append(scales, snapshot)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return scales, nil
+}
+
 func recoverTradingState(
 	ctx context.Context,
 	querier postgresQuerier,
 	shardID engine.ShardID,
+	verifyCurrencyScaleAuthority bool,
 ) (engine.State, error) {
+	catalogScales, err := loadCatalogCurrencyScales(ctx, querier)
+	if err != nil {
+		return engine.State{}, fmt.Errorf(
+			"load shard %d catalog currency scales: %w",
+			shardID,
+			err,
+		)
+	}
+	state, err := engine.SeedCurrencyScales(
+		engine.NewState(shardID),
+		catalogScales,
+	)
+	if err != nil {
+		return engine.State{}, fmt.Errorf(
+			"seed shard %d catalog currency scales: %w",
+			shardID,
+			err,
+		)
+	}
 	rows, err := querier.Query(ctx, `
 		SELECT receipt_kind, envelope, decision_hash, resulting_state_hash,
 		       decision_hash_version,
@@ -1989,7 +2044,6 @@ func recoverTradingState(
 	}
 	defer rows.Close()
 
-	state := engine.NewState(shardID)
 	receipts := engine.NewMemoryReceiptIndex()
 	for rows.Next() {
 		var receiptKind string
@@ -2109,6 +2163,27 @@ func recoverTradingState(
 	}
 	if err := verifyRecoveredCheckpoint(ctx, querier, state); err != nil {
 		return engine.State{}, err
+	}
+	if verifyCurrencyScaleAuthority {
+		mismatches, compareErr := compareRecoveredCurrencyScales(
+			ctx,
+			querier,
+			state,
+		)
+		if compareErr != nil {
+			return engine.State{}, fmt.Errorf(
+				"verify recovered shard %d currency-scale authority: %w",
+				shardID,
+				compareErr,
+			)
+		}
+		if mismatches != 0 {
+			return engine.State{}, fmt.Errorf(
+				"%w: recovered shard %d currency-scale authority differs",
+				ErrCheckpointMismatch,
+				shardID,
+			)
+		}
 	}
 	return state, nil
 }

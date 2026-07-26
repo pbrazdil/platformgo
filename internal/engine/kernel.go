@@ -1,10 +1,12 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 
 	decimal "github.com/upcomers-org/platformgo/internal/decimal/economic"
+	"github.com/upcomers-org/platformgo/internal/domain"
 )
 
 type State struct {
@@ -45,6 +47,57 @@ func (state State) Ready() bool {
 // Hash returns the canonical state-chain hash.
 func (state State) Hash() Hash {
 	return state.hash
+}
+
+// CurrencyScales returns the monotonic currency identities reconstructed by
+// deterministic receipt replay.
+func (state State) CurrencyScales() []CurrencyScaleSnapshot {
+	scales := make([]CurrencyScaleSnapshot, len(state.trading.currencyScales))
+	for index, currency := range state.trading.currencyScales {
+		scales[index] = CurrencyScaleSnapshot{
+			Currency: currency.Code(),
+			Scale:    currency.Scale(),
+		}
+	}
+	return scales
+}
+
+// SeedCurrencyScales installs the current durable catalog identities before
+// receipt replay. The PostgreSQL adapter must verify the resulting monotonic
+// registry against durable authority before making the shard ready.
+func SeedCurrencyScales(
+	state State,
+	scales []CurrencyScaleSnapshot,
+) (State, error) {
+	if state.nextStreamSequence != 1 ||
+		state.hasLastReceipt ||
+		len(state.trading.currencyScales) != 0 {
+		return state, errors.New(
+			"currency scales may only seed an unreplayed shard",
+		)
+	}
+	state.trading = state.trading.clone()
+	for _, snapshot := range scales {
+		currency, err := domain.NewCurrency(snapshot.Currency, snapshot.Scale)
+		if err != nil {
+			return State{}, fmt.Errorf(
+				"seed currency scale %s/%d: %w",
+				snapshot.Currency,
+				snapshot.Scale,
+				err,
+			)
+		}
+		if existing, found := state.trading.currencyScale(
+			currency.Code(),
+		); found && !existing.Equal(currency) {
+			return State{}, fmt.Errorf(
+				"seed currency scale %s conflicts",
+				currency.Code(),
+			)
+		}
+		state.trading.rememberCurrencyScale(currency)
+	}
+	return state, nil
 }
 
 // Apply deterministically returns a new state and recorded decision.

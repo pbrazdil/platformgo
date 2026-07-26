@@ -187,3 +187,10 @@ type Decision struct {
 	PositionChanges         []PositionSnapshot
 	Events                  []DomainEvent
 }
+
+// CurrencyScaleSnapshot is one monotonic currency identity reconstructed from
+// accepted instrument-configuration receipts.
+type CurrencyScaleSnapshot struct {
+	Currency string
+	Scale    uint8
+}
