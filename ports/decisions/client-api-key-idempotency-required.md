@@ -32,12 +32,16 @@ Options considered:
 Decision:
 Choose option 3. It is the smallest fail-closed change, preserves one durable
 credential per logical operation, and provides exact recovery after timeout,
-disconnect, process restart, or post-commit uncertainty. The deviation is
-frozen as `client-api-key-creation-requires-idempotency-key` in the
-compatibility manifest.
+disconnect, process restart, or post-commit uncertainty. The implementation
+acceptance change must freeze the deviation as
+`client-api-key-creation-requires-idempotency-key` in the compatibility
+manifest.
 
-Tests added/changed:
-- Missing header returns `400` before any key, audit, rate, or replay effect.
+Required tests before implementation or port acceptance:
+- Preserve the source-compatible protected-client ordering: authenticate the
+  principal, claim the shared rate bucket, then require the idempotency key.
+- Missing header returns `400` before any credential entropy, key, audit, or
+  replay effect, while consuming the authenticated principal's rate allowance.
 - Same key and canonical request replays the exact stored status, required
   headers, and body.
 - Same key with a changed effective request returns deterministic `409`.

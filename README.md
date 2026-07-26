@@ -56,10 +56,10 @@ validation, and has bounded-lock rollback/retry plus concurrent read/write
 coverage. Its pinned source behavior now has separate port-ledger acceptance.
 
 The owner-approved client API-key decision requires a stable
-`Idempotency-Key` for shown-once credential creation. This intentional
-compatibility deviation prevents a committed credential from becoming active
-when its only plaintext response cannot be recovered; implementation and
-source-port acceptance remain separate follow-up changes.
+`Idempotency-Key` for shown-once credential creation. This owner-approved
+planned compatibility deviation prevents a committed credential from becoming
+active when its only plaintext response cannot be recovered; implementation
+and source-port acceptance remain separate follow-up changes.
 
 Phase 3 is not complete. The runtime must still:
 
