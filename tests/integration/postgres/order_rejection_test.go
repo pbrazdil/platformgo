@@ -15,13 +15,29 @@ import (
 
 // Ported from:
 //
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/trading/e2e_fills.rs:1029
 //	test: rejected_order_persists_reason
 //
-// The accepted Go engine classifies this transition as slippage_exceeded and
-// permits rejection only through the deterministic order lifecycle. It has no
-// unrestricted mark_rejected(reason) persistence operation.
+// Adaptations:
+//   - The accepted Go engine's working state replaces the legacy pending
+//     mirror-row state after admission.
+//   - Deterministic stop-order activation and the exact slippage_exceeded
+//     classification replace the unrestricted legacy mark_rejected(reason)
+//     persistence helper.
+//   - Engine recovery plus a later ordered market input replaces a direct
+//     second mark_rejected call; current Go exposes no arbitrary reason writer.
+//
+// Assertions preserved:
+//   - The admitted order has no rejection reason before rejection.
+//   - Rejection makes the order terminal and persists the exact reason.
+//   - A later rejection opportunity cannot re-reject the terminal order,
+//     rewrite its reason, or change its durable version.
+//
+// Strengthening:
+//   - Restart recovery must reproduce the ready canonical engine state before
+//     terminal no-rewrite behavior is checked.
+//   - The frozen external order contract remains unchanged.
 func TestRejectedOrderPersistsReason(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
