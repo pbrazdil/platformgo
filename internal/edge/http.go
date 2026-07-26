@@ -212,7 +212,7 @@ func (server *Server) handleAccountRead(
 	case "balances":
 		response, err = server.trading.Balances(request.Context(), accountID)
 	case "funding":
-		params, parseErr := historyPageParams(request)
+		params, parseErr := fundingPageParams(request)
 		if parseErr != nil {
 			writeError(
 				writer,
@@ -585,7 +585,7 @@ func accountReadRoute(path string) (string, string, bool) {
 	return "", "", false
 }
 
-func historyPageParams(request *http.Request) (PageParams, error) {
+func fundingPageParams(request *http.Request) (PageParams, error) {
 	params := PageParams{
 		Cursor:    request.URL.Query().Get("cursor"),
 		Direction: request.URL.Query().Get("direction"),
