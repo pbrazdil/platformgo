@@ -27,6 +27,7 @@
     "UZO_REALTIME_TOKEN_TTL_SECS"
   ],
   "intentionalDeviations": [
+    "api-key-idempotent-resolution-precedes-rate-rejection",
     "client-api-key-creation-requires-idempotency-key"
   ],
   "implementedHTTPRoutes": [
@@ -65,7 +66,7 @@
   "openAPIArtifacts": {
     "openapi/admin-v1.json": "615e8a49f9e6a71f6a3ea0108bd71353bd5b7050cc79cee6b17d98af84a6aeb3",
     "openapi/broker-v1.json": "fa8e295fac856f566fb58239a3dcb10ae2288948a7d63131b6d6688d38101e0e",
-    "openapi/client-v1.json": "c9f649251f5646a3150254870e59acdbb4aaa24b6de1db481f9d51b30b2c89b6"
+    "openapi/client-v1.json": "a9afe54d4de6982b8862cd554eb648c8b0c7e54bc806b1560d5ff34a82b0aa18"
   },
   "platformSourceRevision": "50141367492be46ebf5623f6191a14b94af2f2bd",
   "protobufDescriptor": {

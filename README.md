@@ -61,21 +61,26 @@ opaque `xbk_` credential once, persists only its SHA-256 digest, serializes the
 PostgreSQL-authoritative per-owner cap under the durable user-row lock, and
 appends the attributed audit fact atomically. Explicit `Idempotency-Key`
 retries replay an encrypted exact HTTP envelope before new entropy or rate
-capacity is consumed, including after a post-commit unknown outcome. A shared
-PostgreSQL limiter covers the complete protected-client surface and admits a
-new credential in the same transaction only after replay/conflict resolution.
-Legacy source policy inputs are frozen and fail readiness closed when they do
-not match the durable singleton. Replay-key rotation uses an explicit active
-key and distribute-then-promote procedure; expired ciphertext is removed by a
-bounded owned cleanup loop. The additive migration grants the API role only
-execution of bounded authority functions, not direct table mutation. The
-shown-once endpoint requires a client-stable `Idempotency-Key`; this
+capacity is consumed, including after a post-commit unknown outcome; only its
+fixed SHA-256 digest reaches PostgreSQL or replay authentication. A shared
+PostgreSQL limiter covers the complete protected-client surface, rate-accounts
+invalid new requests exactly once, and admits a new credential in the same
+transaction only after replay/conflict resolution. Legacy source policy inputs
+retain their complete numeric domains and fail readiness closed when they do
+not match the durable singleton. New credentials also fail closed whenever
+runtime command readiness is false, while committed replay remains available.
+Replay-key rotation uses an explicit active key and distribute-then-promote
+procedure; startup and readiness verify every live replay key, and expired
+ciphertext is removed by a bounded owned cleanup loop with per-key backlog
+evidence. The additive migration grants the API role only execution of bounded
+authority functions, not direct table mutation, and explicitly requires
+forward repair or full pre-migration restore rather than old-binary rollback.
+The shown-once endpoint requires a client-stable `Idempotency-Key`; this
 owner-approved safety deviation prevents an active credential whose only
 plaintext response was lost. The landed replay-order decision also requires
 exact committed replay and deterministic conflict resolution before new-work
-rate rejection, while invalid new requests remain rate-accounted exactly once.
-Implementation review and source-port acceptance remain separate follow-up
-gates.
+rate rejection. Implementation review and source-port acceptance remain
+separate follow-up gates.
 
 Phase 3 is not complete. The runtime must still:
 

@@ -137,6 +137,51 @@ func Serve(ctx context.Context, config Config) error {
 			policy.IdempotencyTTLSecs,
 		)
 	}
+	verifyAPIKeyReplayCoverage := func(
+		checkContext context.Context,
+		logCoverage bool,
+	) error {
+		coverage, coverageErr := compatibilityStore.APIKeyReplayCoverage(
+			checkContext,
+		)
+		if coverageErr != nil {
+			return coverageErr
+		}
+		configured := make(map[string]struct{}, len(config.APIKeyReplayKeys))
+		for _, replayKey := range config.APIKeyReplayKeys {
+			configured[replayKey.ID] = struct{}{}
+		}
+		for _, item := range coverage {
+			if _, ok := configured[item.KeyID]; !ok {
+				return fmt.Errorf(
+					"live API-key replay requires unavailable key %q",
+					item.KeyID,
+				)
+			}
+		}
+		if logCoverage {
+			for _, replayKey := range config.APIKeyReplayKeys {
+				var (
+					liveCount int64
+					oldest    string
+				)
+				for _, item := range coverage {
+					if item.KeyID == replayKey.ID {
+						liveCount = item.LiveCount
+						oldest = item.OldestExpiresAt
+						break
+					}
+				}
+				slog.Info(
+					"API-key replay key coverage",
+					"key_id", replayKey.ID,
+					"live_count", liveCount,
+					"oldest_expires_at", oldest,
+				)
+			}
+		}
+		return nil
+	}
 	if verifyErr := verifyAPIKeyPolicy(ctx); verifyErr != nil {
 		return fmt.Errorf("serve: %w", verifyErr)
 	}
@@ -145,6 +190,9 @@ func Serve(ctx context.Context, config Config) error {
 		apiKeyReplayCleanupBatch,
 	); purgeErr != nil {
 		return fmt.Errorf("serve: %w", purgeErr)
+	}
+	if coverageErr := verifyAPIKeyReplayCoverage(ctx, true); coverageErr != nil {
+		return fmt.Errorf("serve: %w", coverageErr)
 	}
 	postgresReady := func(checkContext context.Context) error {
 		if pingErr := pool.Ping(checkContext); pingErr != nil {
@@ -156,7 +204,10 @@ func Serve(ctx context.Context, config Config) error {
 		); readyErr != nil {
 			return readyErr
 		}
-		return verifyAPIKeyPolicy(checkContext)
+		if policyErr := verifyAPIKeyPolicy(checkContext); policyErr != nil {
+			return policyErr
+		}
+		return verifyAPIKeyReplayCoverage(checkContext, false)
 	}
 	natsReady := func(checkContext context.Context) error {
 		if flushErr := flushNATS(checkContext, natsConnection); flushErr != nil {
@@ -262,30 +313,21 @@ func Serve(ctx context.Context, config Config) error {
 	go func() {
 		ticker := time.NewTicker(apiKeyReplayCleanupEvery)
 		defer ticker.Stop()
-		for {
-			select {
-			case <-cleanupContext.Done():
-				return
-			case <-ticker.C:
-				deleted, cleanupErr := compatibilityStore.
-					PurgeExpiredAPIKeyReplays(
-						cleanupContext,
-						apiKeyReplayCleanupBatch,
-					)
-				if cleanupErr != nil {
-					errorsChannel <- fmt.Errorf(
-						"API-key replay cleanup: %w",
-						cleanupErr,
-					)
-					return
-				}
-				if deleted > 0 {
-					slog.Info(
-						"expired API-key replay cleanup completed",
-						"deleted", deleted,
-					)
-				}
-			}
+		cleanupErr := runAPIKeyReplayCleanup(
+			cleanupContext,
+			ticker.C,
+			func(cleanupCallContext context.Context) (int64, error) {
+				return compatibilityStore.PurgeExpiredAPIKeyReplays(
+					cleanupCallContext,
+					apiKeyReplayCleanupBatch,
+				)
+			},
+			func(coverageContext context.Context) error {
+				return verifyAPIKeyReplayCoverage(coverageContext, true)
+			},
+		)
+		if cleanupErr != nil {
+			errorsChannel <- cleanupErr
 		}
 	}()
 
@@ -297,6 +339,35 @@ func Serve(ctx context.Context, config Config) error {
 	}
 	shutdownServers(ctx, httpServer, grpcServer)
 	return nil
+}
+
+func runAPIKeyReplayCleanup(
+	ctx context.Context,
+	ticks <-chan time.Time,
+	purge func(context.Context) (int64, error),
+	verifyCoverage func(context.Context) error,
+) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case _, ok := <-ticks:
+			if !ok {
+				return nil
+			}
+			deleted, err := purge(ctx)
+			if err != nil {
+				return fmt.Errorf("API-key replay cleanup: %w", err)
+			}
+			slog.Info(
+				"expired API-key replay cleanup completed",
+				"deleted", deleted,
+			)
+			if err := verifyCoverage(ctx); err != nil {
+				return fmt.Errorf("API-key replay coverage: %w", err)
+			}
+		}
+	}
 }
 
 func applicationReplayKeys(

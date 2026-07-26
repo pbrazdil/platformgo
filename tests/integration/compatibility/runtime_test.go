@@ -188,17 +188,17 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		UPDATE identity.api_key_policy
 		   SET version = version + 1,
-		       max_active_per_owner = 17,
-		       client_rate_limit_max_requests = 321,
-		       client_rate_limit_window_seconds = 45,
-		       idempotency_ttl_seconds = 7200
+		       max_active_per_owner = 26,
+		       client_rate_limit_max_requests = 4294967295,
+		       client_rate_limit_window_seconds = 18446744073709551615,
+		       idempotency_ttl_seconds = 18446744073709551615
 		 WHERE singleton`); err != nil {
 		t.Fatal(err)
 	}
-	legacyMaxActive := uint64(17)
-	legacyRateMax := uint64(321)
-	legacyRateWindow := uint64(45)
-	legacyIdempotencyTTL := uint64(7200)
+	legacyMaxActive := int64(26)
+	legacyRateMax := uint64(4294967295)
+	legacyRateWindow := ^uint64(0)
+	legacyIdempotencyTTL := ^uint64(0)
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	serveConfig := platformruntime.Config{
@@ -266,7 +266,7 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 		CentrifugoTokenTTL: time.Hour,
 		ShardID:            7,
 	}
-	mismatchedMaxActive := uint64(18)
+	mismatchedMaxActive := int64(18)
 	mismatchedConfig := serveConfig
 	mismatchedConfig.LegacyAPIKeyPolicy.MaxActivePerOwner =
 		&mismatchedMaxActive
@@ -279,6 +279,53 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 			"differs from configured source deployment values",
 		) {
 		t.Fatalf("unreconciled legacy policy error = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO identity.api_key_replays (
+			owner_user_id,
+			idempotency_key_hash,
+			request_hash,
+			response_status,
+			replay_key_id,
+			response_nonce,
+			response_ciphertext,
+			created_at,
+			expires_at
+		) VALUES (
+			'urn:xb:user:trader-1',
+			decode(repeat('31', 32), 'hex'),
+			decode(repeat('32', 32), 'hex'),
+			201,
+			'old-v1',
+			decode(repeat('33', 12), 'hex'),
+			decode(repeat('34', 17), 'hex'),
+			statement_timestamp(),
+			statement_timestamp() + interval '1 hour'
+		)`); err != nil {
+		t.Fatal(err)
+	}
+	missingReplayKeyConfig := serveConfig
+	missingReplayKeyConfig.APIKeyReplayKeys =
+		[]platformruntime.APIKeyReplayKey{{
+			ID: "new-v2",
+			Key: [32]byte{
+				9, 8, 7, 6, 5, 4, 3, 2,
+			},
+		}}
+	if err := platformruntime.Serve(
+		context.Background(),
+		missingReplayKeyConfig,
+	); err == nil ||
+		!strings.Contains(
+			err.Error(),
+			`live API-key replay requires unavailable key "old-v1"`,
+		) {
+		t.Fatalf("missing replay-key coverage error = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM identity.api_key_replays
+		 WHERE replay_key_id = 'old-v1'`); err != nil {
+		t.Fatal(err)
 	}
 	serveContext, stopServe := context.WithCancel(runContext)
 	startServer := func(serverContext context.Context) <-chan error {
@@ -341,6 +388,40 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 	if unreadyEffects != 0 {
 		t.Fatalf("unready mutation created %d durable commands", unreadyEffects)
 	}
+	unreadyAPIKey := requestJSON(
+		t,
+		http.MethodPost,
+		baseURL+"/v1/me/api-keys",
+		`{"name":"unready-api-key","scopes":["orders:write"]}`,
+		map[string]string{
+			"authorization":   "Bearer " + login.AccessToken,
+			"idempotency-key": "unready-api-key",
+			"x-request-id":    "request-unready-api-key",
+		},
+	)
+	if unreadyAPIKey.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"API-key creation while unready status=%d, want 503",
+			unreadyAPIKey.StatusCode,
+		)
+	}
+	_ = unreadyAPIKey.Body.Close()
+	var unreadyAPIKeyEffects int
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM identity.api_keys) +
+			(SELECT count(*) FROM identity.api_key_replays) +
+			(SELECT count(*) FROM audit.events
+			  WHERE action = 'user-key.create')`,
+	).Scan(&unreadyAPIKeyEffects); err != nil {
+		t.Fatal(err)
+	}
+	if unreadyAPIKeyEffects != 0 {
+		t.Fatalf(
+			"unready API-key creation made %d durable effects",
+			unreadyAPIKeyEffects,
+		)
+	}
 	outboxWorkerResult := make(chan error, 1)
 	go func() {
 		outboxWorkerResult <- platformruntime.RunWorkers(
@@ -399,6 +480,50 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 			t.Fatalf("readyz components=%#v", readiness.Components)
 		}
 	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO identity.api_key_replays (
+			owner_user_id,
+			idempotency_key_hash,
+			request_hash,
+			response_status,
+			replay_key_id,
+			response_nonce,
+			response_ciphertext,
+			created_at,
+			expires_at
+		) VALUES (
+			'urn:xb:user:trader-1',
+			decode(repeat('41', 32), 'hex'),
+			decode(repeat('42', 32), 'hex'),
+			201,
+			'unavailable-live-v1',
+			decode(repeat('43', 12), 'hex'),
+			decode(repeat('44', 17), 'hex'),
+			statement_timestamp(),
+			statement_timestamp() + interval '1 hour'
+		)`); err != nil {
+		t.Fatal(err)
+	}
+	missingCoverageReady := requestJSON(
+		t,
+		http.MethodGet,
+		baseURL+"/readyz",
+		"",
+		nil,
+	)
+	_ = missingCoverageReady.Body.Close()
+	if missingCoverageReady.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"readyz with unavailable live replay key status=%d, want 503",
+			missingCoverageReady.StatusCode,
+		)
+	}
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM identity.api_key_replays
+		 WHERE replay_key_id = 'unavailable-live-v1'`); err != nil {
+		t.Fatal(err)
+	}
+	waitForReady(t, baseURL+"/readyz")
 	preflight := requestJSON(
 		t,
 		http.MethodOptions,

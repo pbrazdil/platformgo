@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,20 @@ type memoryIdentityStore struct {
 	session              engine.ID
 	refresh              [sha256.Size]byte
 	runtimeReadyRequired bool
+	apiKeyReplays        map[[sha256.Size]byte]memoryAPIKeyReplay
+	apiKeyCreateCalls    int
+	apiKeyRateCalls      int
+}
+
+type memoryAPIKeyReplay struct {
+	requestHash [sha256.Size]byte
+	result      UserAPIKeyReplayResult
+}
+
+type failingIdentityEntropy struct{}
+
+func (failingIdentityEntropy) Read([]byte) (int, error) {
+	return 0, errors.New("entropy must not be read")
 }
 
 func (store *memoryIdentityStore) UserByLogin(
@@ -108,6 +123,60 @@ func (store *memoryIdentityStore) CreateSession(
 	store.session = sessionID
 	store.refresh = refreshHash
 	return nil
+}
+
+func (store *memoryIdentityStore) ClaimClientRateLimit(
+	_ context.Context,
+	_ string,
+) (ClientRateLimitResult, error) {
+	store.apiKeyRateCalls++
+	return ClientRateLimitResult{Allowed: true}, nil
+}
+
+func (store *memoryIdentityStore) ReplayUserAPIKey(
+	_ context.Context,
+	_ string,
+	idempotencyHash [sha256.Size]byte,
+	requestHash [sha256.Size]byte,
+) (UserAPIKeyReplayResult, error) {
+	replay, ok := store.apiKeyReplays[idempotencyHash]
+	if !ok {
+		return UserAPIKeyReplayResult{}, nil
+	}
+	if replay.requestHash != requestHash {
+		return UserAPIKeyReplayResult{}, edge.ErrIdempotencyConflict
+	}
+	return replay.result, nil
+}
+
+func (store *memoryIdentityStore) CreateUserAPIKey(
+	_ context.Context,
+	creation UserAPIKeyCreation,
+) (UserAPIKeyCreationResult, error) {
+	store.apiKeyCreateCalls++
+	if store.apiKeyReplays == nil {
+		store.apiKeyReplays = make(
+			map[[sha256.Size]byte]memoryAPIKeyReplay,
+		)
+	}
+	result := UserAPIKeyReplayResult{
+		Found:            true,
+		ResponseStatus:   201,
+		ReplayKeyID:      creation.ReplayKeyID,
+		ReplayNonce:      append([]byte(nil), creation.ReplayNonce...),
+		ReplayCiphertext: append([]byte(nil), creation.ReplayCiphertext...),
+	}
+	store.apiKeyReplays[creation.IdempotencyHash] = memoryAPIKeyReplay{
+		requestHash: creation.RequestHash,
+		result:      result,
+	}
+	return UserAPIKeyCreationResult{
+		Outcome:          "created",
+		ResponseStatus:   result.ResponseStatus,
+		ReplayKeyID:      result.ReplayKeyID,
+		ReplayNonce:      result.ReplayNonce,
+		ReplayCiphertext: result.ReplayCiphertext,
+	}, nil
 }
 
 func (store *memoryIdentityStore) BrokerEcho(
@@ -324,6 +393,143 @@ func TestIdentityPasswordLoginProfileAndBrokerDelegation(t *testing.T) {
 	)
 	if err != nil || minted.ExpiresInSecs != ttl || minted.AccessToken == "" {
 		t.Fatalf("minted=%#v err=%v", minted, err)
+	}
+}
+
+func TestUserAPIKeyReadinessAllowsReplayButRejectsNewWork(t *testing.T) {
+	authenticator, err := edge.NewHMACAuthenticator(
+		edge.HMACAuthenticatorConfig{
+			ClientTokenSecret: []byte(
+				"0123456789abcdef0123456789abcdef",
+			),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &memoryIdentityStore{}
+	var replayKey APIKeyReplayKey
+	replayKey.ID = "test-v1"
+	copy(replayKey.Key[:], bytes.Repeat([]byte{3}, len(replayKey.Key)))
+	readyIdentity, err := NewIdentity(
+		store,
+		authenticator,
+		IdentityConfig{
+			Entropy:                 bytes.NewReader(bytes.Repeat([]byte{7}, 512)),
+			APIKeyReplayKeys:        []APIKeyReplayKey{replayKey},
+			APIKeyReplayActiveKeyID: replayKey.ID,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := edge.Principal{
+		Subject:  "urn:xb:user:readiness",
+		Audience: edge.AudienceClient,
+	}
+	request := edge.CreateAPIKeyRequest{
+		Name:   "readiness-key",
+		Scopes: []string{"orders:write"},
+	}
+	created, err := readyIdentity.CreateMyAPIKey(
+		context.Background(),
+		principal,
+		"request-ready",
+		"readiness-key",
+		request,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notReady := errors.New("runtime intentionally unready")
+	unreadyIdentity, err := NewIdentity(
+		store,
+		authenticator,
+		IdentityConfig{
+			Entropy:                 failingIdentityEntropy{},
+			CommandReadiness:        func(context.Context) error { return notReady },
+			APIKeyReplayKeys:        []APIKeyReplayKey{replayKey},
+			APIKeyReplayActiveKeyID: replayKey.ID,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := unreadyIdentity.CreateMyAPIKey(
+		context.Background(),
+		principal,
+		strings.Repeat("r", 129),
+		"readiness-key",
+		request,
+	)
+	if err != nil || !reflect.DeepEqual(replayed, created) {
+		t.Fatalf("unready replay = %#v, error = %v", replayed, err)
+	}
+	_, conflictErr := unreadyIdentity.CreateMyAPIKey(
+		context.Background(),
+		principal,
+		"request-conflict",
+		"readiness-key",
+		edge.CreateAPIKeyRequest{Name: "changed"},
+	)
+	if !errors.Is(conflictErr, edge.ErrIdempotencyConflict) {
+		t.Fatalf("unready conflict error = %v", conflictErr)
+	}
+	_, newErr := unreadyIdentity.CreateMyAPIKey(
+		context.Background(),
+		principal,
+		"request-new",
+		"new-readiness-key",
+		edge.CreateAPIKeyRequest{Name: "new"},
+	)
+	if newErr == nil || !strings.Contains(newErr.Error(), notReady.Error()) {
+		t.Fatalf("unready new-work error = %v", newErr)
+	}
+	if store.apiKeyCreateCalls != 1 {
+		t.Fatalf("unready create calls = %d, want 1", store.apiKeyCreateCalls)
+	}
+
+	var committed edge.APIKeyAdmission
+	racingIdentity, err := NewIdentity(
+		store,
+		authenticator,
+		IdentityConfig{
+			Entropy: failingIdentityEntropy{},
+			CommandReadiness: func(readinessContext context.Context) error {
+				var commitErr error
+				committed, commitErr = readyIdentity.CreateMyAPIKey(
+					readinessContext,
+					principal,
+					"request-race-commit",
+					"readiness-race",
+					edge.CreateAPIKeyRequest{Name: "race"},
+				)
+				if commitErr != nil {
+					t.Fatalf("concurrent readiness commit: %v", commitErr)
+				}
+				return notReady
+			},
+			APIKeyReplayKeys:        []APIKeyReplayKey{replayKey},
+			APIKeyReplayActiveKeyID: replayKey.ID,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raceReplay, err := racingIdentity.CreateMyAPIKey(
+		context.Background(),
+		principal,
+		"request-race-replay",
+		"readiness-race",
+		edge.CreateAPIKeyRequest{Name: "race"},
+	)
+	if err != nil || !reflect.DeepEqual(raceReplay, committed) {
+		t.Fatalf(
+			"readiness-race replay = %#v, committed %#v, error = %v",
+			raceReplay,
+			committed,
+			err,
+		)
 	}
 }
 

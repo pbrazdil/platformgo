@@ -69,8 +69,13 @@ names `UZO_AUTH_MAX_API_KEYS_PER_OWNER`,
 API compares it with the durable singleton before serving and on every
 readiness probe. A mismatch fails closed until a separately reviewed policy
 operation reconciles PostgreSQL; an API replica never applies a local override.
-Every successful audit
-fact records the durable policy version and effective owner cap. Policy changes
+The durable schema preserves the source domains: signed 64-bit owner cap,
+unsigned 32-bit rate maximum, and unsigned 64-bit rate-window/replay-TTL
+seconds. Zero and negative source values retain their fail-closed effects
+instead of being rejected during cutover. Replay TTLs beyond PostgreSQL's
+finite timestamp horizon are stored as `infinity`, which is observationally
+equivalent for the database lifetime. Every successful audit fact records the
+durable policy version and effective owner cap. Policy changes
 require a separately reviewed, audited PostgreSQL operation; mixed API replicas
 cannot submit different limits.
 
@@ -79,6 +84,11 @@ cannot submit different limits.
 source's optional middleware contract: a shown-once credential is never made
 active unless its exact encrypted response can be recovered after an unknown
 HTTP outcome.
+The owner-approved ordering deviation resolves existing same-request replay or
+changed-request conflict before new-work rate rejection. Invalid new requests
+consume the shared rate bucket exactly once. The raw external idempotency key
+is reduced to a fixed SHA-256 digest before durable lookup, indexing, or replay
+authentication and is never stored.
 
 `UZO_AUTH_API_KEY_REPLAY_KEYS` is secret JSON containing an AES-256-GCM
 keyring. `UZO_AUTH_API_KEY_REPLAY_ACTIVE_KEY_ID` explicitly selects the key that
@@ -92,8 +102,12 @@ Rotation is two-stage. First distribute the future key to every serving replica
 while the old active ID remains unchanged, and verify that every replica can
 decrypt both keys. Only then change the active ID across the fleet. Retain the
 old key for at least the durable replay TTL and until bounded cleanup reports no
-live response encrypted under it. The API fails closed when replay material
-names an unavailable key. Plaintext API-key tokens are never stored in the key
+live response encrypted under it. Startup and every readiness check compare the
+configured keyring with `identity.api_key_replay_coverage()` and fail closed
+when any live replay names an unavailable key. Startup and every cleanup cycle
+emit `key_id`, `live_count`, and `oldest_expires_at`; a configured old key is
+safe to remove only after its live count is repeatedly zero across the fleet.
+Plaintext API-key tokens and raw idempotency keys are never stored in the key
 table, audit trail, or replay table.
 
 `platformgo_api` is the trusted authenticated-principal authority for this

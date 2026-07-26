@@ -427,7 +427,8 @@ def schemas(client: bool) -> dict[str, object]:
                 },
                 "tenantId": {
                     "type": ["string", "null"],
-                    "pattern": "^urn:xb:tenant:[0-9A-Za-z]{1,22}$",
+                    "pattern": "^urn:xb:tenant:0*[0-9A-Za-z]{1,22}$",
+                    "description": "Standard-alphabet base62 value decodable as an unsigned 128-bit integer.",
                 },
             },
         },

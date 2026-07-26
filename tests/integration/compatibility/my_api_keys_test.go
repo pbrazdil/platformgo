@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -224,6 +225,7 @@ func TestClientCreatesOwnAPIKey(t *testing.T) {
 	for index, body := range []string{
 		`{"name":"ttl-zero","ttlSecs":0}`,
 		`{"name":"nullable-optionals","ttlSecs":null,"tenantId":null}`,
+		`{"name":"max-tenant","tenantId":"urn:xb:tenant:7n42DGM5Tflk9n8mt7Fhc7"}`,
 	} {
 		result := createMyAPIKey(
 			t,
@@ -243,6 +245,7 @@ func TestClientCreatesOwnAPIKey(t *testing.T) {
 	}
 	for index, body := range []string{
 		`{"name":"bad-tenant","tenantId":"urn:xb:tenant:not-valid"}`,
+		`{"name":"overflow-tenant","tenantId":"urn:xb:tenant:7n42DGM5Tflk9n8mt7Fhc8"}`,
 		`{"name":"negative-ttl","ttlSecs":-1}`,
 		`{"name":"null-scopes","scopes":null}`,
 		`{"name":"null-ips","ipAllowlist":null}`,
@@ -273,9 +276,9 @@ func TestClientCreatesOwnAPIKey(t *testing.T) {
 	).Scan(&compatibleCount); err != nil {
 		t.Fatal(err)
 	}
-	if compatibleCount != 8 {
+	if compatibleCount != 9 {
 		t.Fatalf(
-			"key count after source-compatible requests = %d, want 8",
+			"key count after source-compatible requests = %d, want 9",
 			compatibleCount,
 		)
 	}
@@ -354,6 +357,23 @@ func TestUserAPIKeyCreationReplaysOneDurableCredential(t *testing.T) {
 		t.Fatalf(
 			"no-entropy replay status = %d body = %s",
 			noEntropyReplay.status,
+			noEntropyReplay.body,
+		)
+	}
+	changedRequestIDReplay := createMyAPIKeyWithIdempotency(
+		t,
+		noEntropyServer.URL,
+		accessToken,
+		`{"name":"replay-bot","scopes":["orders:write"]}`,
+		strings.Repeat("r", 129),
+		"create-replay-bot",
+	)
+	if changedRequestIDReplay.status != http.StatusCreated ||
+		changedRequestIDReplay.body != noEntropyReplay.body {
+		t.Fatalf(
+			"ancillary request-ID replay = %d %q, want exact %q",
+			changedRequestIDReplay.status,
+			changedRequestIDReplay.body,
 			noEntropyReplay.body,
 		)
 	}
@@ -567,6 +587,89 @@ func TestUserAPIKeyCreationReplaysOneDurableCredential(t *testing.T) {
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLongIdempotencyKeyUsesFixedDurableDigest(t *testing.T) {
+	ctx, admin, apiPool, serverURL := newMyAPIKeyFixture(t, 25)
+	defer admin.Close()
+	defer apiPool.Close()
+	accessToken := loginMyAPIKeyOwner(t, serverURL)
+	idempotencyKey := strings.Repeat("incompressible-0123456789-", 140)
+	first := createMyAPIKeyWithIdempotency(
+		t,
+		serverURL,
+		accessToken,
+		`{"name":"long-idempotency"}`,
+		"request-long-idempotency-first",
+		idempotencyKey,
+	)
+	replay := createMyAPIKeyWithIdempotency(
+		t,
+		serverURL,
+		accessToken,
+		`{"name":"long-idempotency"}`,
+		"request-long-idempotency-replay",
+		idempotencyKey,
+	)
+	conflict := createMyAPIKeyWithIdempotency(
+		t,
+		serverURL,
+		accessToken,
+		`{"name":"long-idempotency-changed"}`,
+		"request-long-idempotency-conflict",
+		idempotencyKey,
+	)
+	if first.status != http.StatusCreated ||
+		replay.status != http.StatusCreated ||
+		replay.body != first.body ||
+		conflict.status != http.StatusConflict {
+		t.Fatalf(
+			"long idempotency = first %d replay %d conflict %d",
+			first.status,
+			replay.status,
+			conflict.status,
+		)
+	}
+	var (
+		keyCount      int
+		auditCount    int
+		replayCount   int
+		rateCount     int64
+		rawKeyColumns int
+	)
+	if err := admin.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM identity.api_keys),
+			(SELECT count(*) FROM audit.events
+			  WHERE action = 'user-key.create'),
+			(SELECT count(*) FROM identity.api_key_replays
+			  WHERE octet_length(idempotency_key_hash) = 32),
+			(SELECT request_count FROM identity.client_rate_limits
+			  WHERE owner_user_id = 'urn:xb:user:bot-owner'),
+			(SELECT count(*) FROM information_schema.columns
+			  WHERE table_schema = 'identity'
+			    AND table_name = 'api_key_replays'
+			    AND column_name = 'idempotency_key')`,
+	).Scan(
+		&keyCount,
+		&auditCount,
+		&replayCount,
+		&rateCount,
+		&rawKeyColumns,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if keyCount != 1 || auditCount != 1 || replayCount != 1 ||
+		rateCount != 1 || rawKeyColumns != 0 {
+		t.Fatalf(
+			"long-key durable state = keys %d audits %d replays %d rate %d raw-columns %d",
+			keyCount,
+			auditCount,
+			replayCount,
+			rateCount,
+			rawKeyColumns,
+		)
 	}
 }
 
@@ -832,6 +935,129 @@ func TestUserAPIKeyCreationIsRateLimitedPerPrincipal(t *testing.T) {
 			keyCount,
 			auditCount,
 		)
+	}
+}
+
+func TestInvalidUserAPIKeyRequestsConsumeSharedRate(t *testing.T) {
+	ctx, admin, apiPool, serverURL := newMyAPIKeyFixture(t, 25)
+	defer admin.Close()
+	defer apiPool.Close()
+	if _, err := admin.Exec(ctx, `
+		UPDATE identity.api_key_policy
+		   SET client_rate_limit_max_requests = 4,
+		       client_rate_limit_window_seconds = 60,
+		       version = version + 1
+		 WHERE singleton;
+		INSERT INTO identity.users (
+			user_id, login, normalized_login, email, normalized_email,
+			password_hash
+		)
+		SELECT
+			'urn:xb:user:invalid-isolated',
+			'invalidisolated',
+			'invalidisolated',
+			'invalid-isolated@xb.local',
+			'invalid-isolated@xb.local',
+			password_hash
+		  FROM identity.users
+		 WHERE user_id = 'urn:xb:user:bot-owner'`); err != nil {
+		t.Fatal(err)
+	}
+	accessToken := loginMyAPIKeyOwner(t, serverURL)
+	requests := []struct {
+		body string
+		key  string
+	}{
+		{body: `{"name":"missing"}`},
+		{body: `{`, key: "invalid-json"},
+		{
+			body: `{"name":"overflow","tenantId":"urn:xb:tenant:7n42DGM5Tflk9n8mt7Fhc8"}`,
+			key:  "invalid-tenant",
+		},
+		{body: `{"name":""}`, key: "invalid-name"},
+	}
+	for index, invalid := range requests {
+		response := requestJSON(
+			t,
+			http.MethodPost,
+			serverURL+"/v1/me/api-keys",
+			invalid.body,
+			map[string]string{
+				"authorization":   "Bearer " + accessToken,
+				"idempotency-key": invalid.key,
+				"x-request-id":    "invalid-rate-" + strconv.Itoa(index),
+			},
+		)
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf(
+				"invalid request %d status = %d, want 400",
+				index,
+				response.StatusCode,
+			)
+		}
+	}
+	limited := createMyAPIKeyWithIdempotency(
+		t,
+		serverURL,
+		accessToken,
+		`{"name":"invalid-request-id"}`,
+		strings.Repeat("r", 129),
+		"invalid-request-id",
+	)
+	if limited.status != http.StatusTooManyRequests ||
+		limited.header.Get("retry-after") != "60" ||
+		!strings.Contains(limited.body, `"code":"too_many_requests"`) {
+		t.Fatalf(
+			"invalid request rate limit = %d headers %#v body %s",
+			limited.status,
+			limited.header,
+			limited.body,
+		)
+	}
+	var (
+		rateCount   int64
+		keyCount    int
+		auditCount  int
+		replayCount int
+	)
+	if err := admin.QueryRow(ctx, `
+		SELECT
+			(SELECT request_count FROM identity.client_rate_limits
+			  WHERE owner_user_id = 'urn:xb:user:bot-owner'),
+			(SELECT count(*) FROM identity.api_keys),
+			(SELECT count(*) FROM audit.events
+			  WHERE action = 'user-key.create'),
+			(SELECT count(*) FROM identity.api_key_replays)`,
+	).Scan(
+		&rateCount,
+		&keyCount,
+		&auditCount,
+		&replayCount,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if rateCount != 4 || keyCount != 0 || auditCount != 0 ||
+		replayCount != 0 {
+		t.Fatalf(
+			"invalid durable state = rate %d keys %d audits %d replays %d",
+			rateCount,
+			keyCount,
+			auditCount,
+			replayCount,
+		)
+	}
+	secondAccessToken := loginMyAPIKey(t, serverURL, "invalidisolated")
+	isolated := requestJSON(
+		t,
+		http.MethodPost,
+		serverURL+"/v1/me/api-keys",
+		`{"name":"missing"}`,
+		map[string]string{"authorization": "Bearer " + secondAccessToken},
+	)
+	_ = isolated.Body.Close()
+	if isolated.StatusCode != http.StatusBadRequest {
+		t.Fatalf("isolated principal status = %d", isolated.StatusCode)
 	}
 }
 

@@ -3085,6 +3085,16 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 	if err := current.VerifyCurrent(ctx); err != nil {
 		t.Fatalf("verify retried API-key migration: %v", err)
 	}
+	if err := platformpostgres.NewMigrator(pool, previous).
+		VerifyCurrent(ctx); !errors.Is(
+		err,
+		platformpostgres.ErrDatabaseSchemaAhead,
+	) {
+		t.Fatalf(
+			"prior binary verification after API-key migration = %v, want schema-ahead",
+			err,
+		)
+	}
 	assertFinalMigrationHistory(t, pool)
 
 	var (
@@ -3093,6 +3103,7 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 		apiCanReplay       bool
 		apiCanVerifyPolicy bool
 		apiCanPurgeReplay  bool
+		apiCanReadCoverage bool
 		apiCanUpdatePolicy bool
 		apiCanReadReplay   bool
 	)
@@ -3105,22 +3116,27 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 			),
 				has_function_privilege(
 					'platformgo_api',
-					'identity.create_user_api_key(text,uuid,text,bytea,text,text[],uuid,text,text,bytea,text,bytea,bytea)',
+					'identity.create_user_api_key(text,uuid,text,bytea,text,text[],uuid,text,bytea,bytea,text,bytea,bytea)',
 					'EXECUTE'
 				),
 				has_function_privilege(
 					'platformgo_api',
-					'identity.replay_user_api_key(text,text,bytea)',
+					'identity.replay_user_api_key(text,bytea,bytea)',
 					'EXECUTE'
 				),
 				has_function_privilege(
 					'platformgo_api',
-					'identity.verify_api_key_policy(bigint,bigint,bigint,bigint)',
+					'identity.verify_api_key_policy(bigint,bigint,numeric,numeric)',
 					'EXECUTE'
 				),
 				has_function_privilege(
 					'platformgo_api',
 					'identity.purge_expired_api_key_replays(integer)',
+					'EXECUTE'
+				),
+				has_function_privilege(
+					'platformgo_api',
+					'identity.api_key_replay_coverage()',
 					'EXECUTE'
 				),
 				has_table_privilege(
@@ -3139,6 +3155,7 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 		&apiCanReplay,
 		&apiCanVerifyPolicy,
 		&apiCanPurgeReplay,
+		&apiCanReadCoverage,
 		&apiCanUpdatePolicy,
 		&apiCanReadReplay,
 	); err != nil {
@@ -3149,15 +3166,17 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 		!apiCanReplay ||
 		!apiCanVerifyPolicy ||
 		!apiCanPurgeReplay ||
+		!apiCanReadCoverage ||
 		apiCanUpdatePolicy ||
 		apiCanReadReplay {
 		t.Fatalf(
-			"API-key role boundary = insert %t create %t replay %t verify %t purge %t policy-update %t replay-read %t",
+			"API-key role boundary = insert %t create %t replay %t verify %t purge %t coverage %t policy-update %t replay-read %t",
 			apiCanInsert,
 			apiCanExecute,
 			apiCanReplay,
 			apiCanVerifyPolicy,
 			apiCanPurgeReplay,
+			apiCanReadCoverage,
 			apiCanUpdatePolicy,
 			apiCanReadReplay,
 		)
@@ -3165,8 +3184,35 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 
 	if _, err := pool.Exec(ctx, `
 		UPDATE identity.api_key_policy
+		   SET max_active_per_owner = 26,
+		       client_rate_limit_max_requests = 4294967295,
+		       client_rate_limit_window_seconds = 18446744073709551615,
+		       idempotency_ttl_seconds = 18446744073709551615
+		 WHERE singleton`); err != nil {
+		t.Fatalf("set source-domain boundary policy: %v", err)
+	}
+	var boundaryPolicyMatches bool
+	if err := pool.QueryRow(ctx, `
+		SELECT identity.verify_api_key_policy(
+			26,
+			4294967295,
+			18446744073709551615,
+			18446744073709551615
+		)`,
+	).Scan(&boundaryPolicyMatches); err != nil || !boundaryPolicyMatches {
+		t.Fatalf(
+			"source-domain boundary policy = %t, error = %v",
+			boundaryPolicyMatches,
+			err,
+		)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE identity.api_key_policy
 		   SET version = 2,
-		       max_active_per_owner = 1
+		       max_active_per_owner = 1,
+		       client_rate_limit_max_requests = 600,
+		       client_rate_limit_window_seconds = 60,
+		       idempotency_ttl_seconds = 86400
 		 WHERE singleton`); err != nil {
 		t.Fatalf("set durable API-key test policy: %v", err)
 	}
@@ -3180,7 +3226,7 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 			ARRAY['orders:write'],
 			'00000000-0000-4000-8000-000000000702',
 			'request-upgrade-key',
-			'upgrade-idempotency',
+			decode(repeat('09', 32), 'hex'),
 			decode(repeat('02', 32), 'hex'),
 			'test-v1',
 			decode(repeat('03', 12), 'hex'),
@@ -3199,7 +3245,7 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 			ARRAY[]::text[],
 			'00000000-0000-4000-8000-000000000706',
 			'request-missing-idempotency',
-			'',
+			''::bytea,
 			decode(repeat('10', 32), 'hex'),
 			'test-v1',
 			decode(repeat('11', 12), 'hex'),
@@ -3228,7 +3274,7 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 			ARRAY[]::text[],
 			'00000000-0000-4000-8000-000000000704',
 			'request-over-cap-key',
-			'over-cap-idempotency',
+			decode(repeat('0a', 32), 'hex'),
 			decode(repeat('06', 32), 'hex'),
 			'test-v1',
 			decode(repeat('07', 12), 'hex'),
@@ -3307,7 +3353,7 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 		if _, err := pool.Exec(ctx, `
 			INSERT INTO identity.api_key_replays (
 				owner_user_id,
-				idempotency_key,
+				idempotency_key_hash,
 				request_hash,
 				response_status,
 				replay_key_id,
@@ -3318,7 +3364,7 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 			) VALUES
 			(
 				'urn:xb:user:key-upgrade',
-				'expired-replay',
+				decode(repeat('0c', 32), 'hex'),
 				decode(repeat('0c', 32), 'hex'),
 				201,
 				'test-v1',
@@ -3329,7 +3375,29 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 			),
 			(
 				'urn:xb:user:key-upgrade',
-				'live-replay',
+				decode(repeat('1c', 32), 'hex'),
+				decode(repeat('1d', 32), 'hex'),
+				201,
+				'test-v1',
+				decode(repeat('1e', 12), 'hex'),
+				decode(repeat('1f', 17), 'hex'),
+				statement_timestamp() - interval '3 seconds',
+				statement_timestamp() - interval '2 seconds'
+			),
+			(
+				'urn:xb:user:key-upgrade',
+				decode(repeat('2c', 32), 'hex'),
+				decode(repeat('2d', 32), 'hex'),
+				201,
+				'test-v1',
+				decode(repeat('2e', 12), 'hex'),
+				decode(repeat('2f', 17), 'hex'),
+				statement_timestamp() - interval '4 seconds',
+				statement_timestamp() - interval '3 seconds'
+			),
+			(
+				'urn:xb:user:key-upgrade',
+				decode(repeat('09', 32), 'hex'),
 				decode(repeat('09', 32), 'hex'),
 				201,
 				'test-v1',
@@ -3338,27 +3406,33 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 				statement_timestamp(),
 				statement_timestamp() + interval '1 hour'
 			)
-			ON CONFLICT (owner_user_id, idempotency_key) DO UPDATE
+			ON CONFLICT (owner_user_id, idempotency_key_hash) DO UPDATE
 			   SET created_at = EXCLUDED.created_at,
 			       expires_at = EXCLUDED.expires_at`); err != nil {
 			t.Fatalf("seed replay cleanup rows: %v", err)
 		}
 		var deleted int
 		if err := pool.QueryRow(ctx, `
-			SELECT identity.purge_expired_api_key_replays(1)`,
-		).Scan(&deleted); err != nil || deleted != 1 {
+			SELECT identity.purge_expired_api_key_replays(2)`,
+		).Scan(&deleted); err != nil || deleted != 2 {
 			t.Fatalf("first replay cleanup = %d, error = %v", deleted, err)
 		}
 		if err := pool.QueryRow(ctx, `
-			SELECT identity.purge_expired_api_key_replays(1)`,
+			SELECT identity.purge_expired_api_key_replays(2)`,
+		).Scan(&deleted); err != nil || deleted != 1 {
+			t.Fatalf("second replay cleanup = %d, error = %v", deleted, err)
+		}
+		if err := pool.QueryRow(ctx, `
+			SELECT identity.purge_expired_api_key_replays(2)`,
 		).Scan(&deleted); err != nil || deleted != 0 {
 			t.Fatalf("repeated replay cleanup = %d, error = %v", deleted, err)
 		}
 		var liveReplayCount int
 		if err := pool.QueryRow(ctx, `
 			SELECT count(*)
-			  FROM identity.api_key_replays
-			 WHERE idempotency_key = 'live-replay'`,
+			 FROM identity.api_key_replays
+			 WHERE idempotency_key_hash =
+			       decode(repeat('09', 32), 'hex')`,
 		).Scan(&liveReplayCount); err != nil || liveReplayCount != 1 {
 			t.Fatalf(
 				"live replay count = %d, error = %v",
@@ -3366,6 +3440,91 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 				err,
 			)
 		}
+		var (
+			coverageKey    string
+			coverageCount  int64
+			coverageOldest string
+		)
+		if err := pool.QueryRow(ctx, `
+			SELECT replay_key_id, live_count, oldest_expires_at
+			  FROM identity.api_key_replay_coverage()
+			 WHERE replay_key_id = 'test-v1'`,
+		).Scan(
+			&coverageKey,
+			&coverageCount,
+			&coverageOldest,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if coverageKey != "test-v1" ||
+			coverageCount != 1 ||
+			coverageOldest == "" {
+			t.Fatalf(
+				"replay coverage = key %q count %d oldest %q",
+				coverageKey,
+				coverageCount,
+				coverageOldest,
+			)
+		}
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO identity.api_key_replays (
+			owner_user_id,
+			idempotency_key_hash,
+			request_hash,
+			response_status,
+			replay_key_id,
+			response_nonce,
+			response_ciphertext,
+			created_at,
+			expires_at
+		)
+		SELECT
+			'urn:xb:user:key-upgrade',
+			decode(lpad(to_hex(series), 64, '0'), 'hex'),
+			decode(repeat('5a', 32), 'hex'),
+			201,
+			'concurrent-cleanup-v1',
+			decode(repeat('5b', 12), 'hex'),
+			decode(repeat('5c', 17), 'hex'),
+			statement_timestamp() - interval '2 seconds',
+			statement_timestamp() - interval '1 second'
+		  FROM generate_series(101, 104) AS series`); err != nil {
+		t.Fatal(err)
+	}
+	cleanupResults := make(chan int, 2)
+	cleanupErrors := make(chan error, 2)
+	var cleanupWait sync.WaitGroup
+	for range 2 {
+		cleanupWait.Add(1)
+		go func() {
+			defer cleanupWait.Done()
+			var deleted int
+			err := pool.QueryRow(
+				context.Background(),
+				`SELECT identity.purge_expired_api_key_replays(2)`,
+			).Scan(&deleted)
+			cleanupResults <- deleted
+			cleanupErrors <- err
+		}()
+	}
+	cleanupWait.Wait()
+	close(cleanupResults)
+	close(cleanupErrors)
+	for err := range cleanupErrors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var concurrentlyDeleted int
+	for deleted := range cleanupResults {
+		concurrentlyDeleted += deleted
+	}
+	if concurrentlyDeleted != 4 {
+		t.Fatalf(
+			"concurrent cleanup deleted %d rows, want 4",
+			concurrentlyDeleted,
+		)
 	}
 }
 

@@ -69,7 +69,7 @@ type APIKeyReplayKey struct {
 // LegacyAPIKeyPolicy preserves source deployment inputs at the cutover into
 // PostgreSQL authority. A configured mismatch fails readiness closed.
 type LegacyAPIKeyPolicy struct {
-	MaxActivePerOwner    *uint64
+	MaxActivePerOwner    *int64
 	RateLimitMaxRequests *uint64
 	RateLimitWindowSecs  *uint64
 	IdempotencyTTLSecs   *uint64
@@ -163,28 +163,33 @@ func loadConfig(getenv func(string) string) (Config, error) {
 func loadLegacyAPIKeyPolicy(
 	getenv func(string) string,
 ) (LegacyAPIKeyPolicy, error) {
-	maxActive, err := optionalPositiveUint(
+	maxActive, err := optionalInt64(
 		getenv,
 		"UZO_AUTH_MAX_API_KEYS_PER_OWNER",
 	)
 	if err != nil {
 		return LegacyAPIKeyPolicy{}, err
 	}
-	rateMax, err := optionalPositiveUint(
+	rateMax, err := optionalUint64(
 		getenv,
 		"UZO_API_RATE_LIMIT_MAX_REQUESTS",
 	)
 	if err != nil {
 		return LegacyAPIKeyPolicy{}, err
 	}
-	rateWindow, err := optionalPositiveUint(
+	if rateMax != nil && *rateMax > uint64(^uint32(0)) {
+		return LegacyAPIKeyPolicy{}, errors.New(
+			"UZO_API_RATE_LIMIT_MAX_REQUESTS must fit an unsigned 32-bit integer",
+		)
+	}
+	rateWindow, err := optionalUint64(
 		getenv,
 		"UZO_API_RATE_LIMIT_WINDOW_SECS",
 	)
 	if err != nil {
 		return LegacyAPIKeyPolicy{}, err
 	}
-	idempotencyTTL, err := optionalPositiveUint(
+	idempotencyTTL, err := optionalUint64(
 		getenv,
 		"UZO_API_IDEMPOTENCY_TTL_SECS",
 	)
@@ -490,7 +495,7 @@ func unsignedValue(getenv func(string) string, name string, fallback uint64) (ui
 	return value, nil
 }
 
-func optionalPositiveUint(
+func optionalUint64(
 	getenv func(string) string,
 	name string,
 ) (*uint64, error) {
@@ -499,8 +504,23 @@ func optionalPositiveUint(
 		return nil, nil
 	}
 	value, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil || value == 0 {
-		return nil, fmt.Errorf("%s must be a positive integer", name)
+	if err != nil {
+		return nil, fmt.Errorf("%s must be an unsigned integer", name)
+	}
+	return &value, nil
+}
+
+func optionalInt64(
+	getenv func(string) string,
+	name string,
+) (*int64, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return nil, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("%s must be a signed 64-bit integer", name)
 	}
 	return &value, nil
 }

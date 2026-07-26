@@ -5,9 +5,10 @@
 -- Transaction: creation claims optional idempotency, enforces the durable
 -- policy, inserts the key, appends its audit fact, and stores only encrypted
 -- replay material in one transaction.
--- Compatibility: older binaries ignore the additive objects. The API role can
--- execute only the bounded authority functions and cannot mutate the durable
--- key, policy, replay, rate-limit, or audit tables directly.
+-- Binary rollback: older binaries reject this schema as ahead. After apply,
+-- recover with a forward fix or halt and restore the pre-migration backup.
+-- The API role can execute only the bounded authority functions and cannot
+-- mutate the durable key, policy, replay, rate-limit, or audit tables directly.
 -- Failure/retry: lock acquisition is bounded. A failed migration leaves no
 -- partial schema or journal entry and retries from migration 006.
 
@@ -19,17 +20,16 @@ CREATE SCHEMA audit;
 CREATE TABLE identity.api_key_policy (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
     version bigint NOT NULL CHECK (version > 0),
-    max_active_per_owner integer NOT NULL CHECK (
-        max_active_per_owner BETWEEN 1 AND 25
+    max_active_per_owner bigint NOT NULL,
+    client_rate_limit_max_requests bigint NOT NULL CHECK (
+        client_rate_limit_max_requests BETWEEN 0 AND 4294967295
     ),
-    client_rate_limit_max_requests integer NOT NULL CHECK (
-        client_rate_limit_max_requests > 0
+    client_rate_limit_window_seconds numeric(20, 0) NOT NULL CHECK (
+        client_rate_limit_window_seconds
+            BETWEEN 0 AND 18446744073709551615
     ),
-    client_rate_limit_window_seconds integer NOT NULL CHECK (
-        client_rate_limit_window_seconds > 0
-    ),
-    idempotency_ttl_seconds integer NOT NULL CHECK (
-        idempotency_ttl_seconds > 0
+    idempotency_ttl_seconds numeric(20, 0) NOT NULL CHECK (
+        idempotency_ttl_seconds BETWEEN 0 AND 18446744073709551615
     )
 );
 
@@ -67,7 +67,9 @@ WHERE revoked_at IS NULL;
 
 CREATE TABLE identity.api_key_replays (
     owner_user_id text NOT NULL REFERENCES identity.users(user_id),
-    idempotency_key text NOT NULL CHECK (idempotency_key <> ''),
+    idempotency_key_hash bytea NOT NULL CHECK (
+        octet_length(idempotency_key_hash) = 32
+    ),
     request_hash bytea NOT NULL CHECK (octet_length(request_hash) = 32),
     response_status integer NOT NULL CHECK (response_status = 201),
     replay_key_id text NOT NULL CHECK (
@@ -79,16 +81,20 @@ CREATE TABLE identity.api_key_replays (
     ),
     created_at timestamptz NOT NULL,
     expires_at timestamptz NOT NULL CHECK (expires_at > created_at),
-    PRIMARY KEY (owner_user_id, idempotency_key)
+    PRIMARY KEY (owner_user_id, idempotency_key_hash)
 );
 
 CREATE INDEX api_key_replays_expiry_idx
-ON identity.api_key_replays (expires_at, owner_user_id, idempotency_key);
+ON identity.api_key_replays (
+    expires_at,
+    owner_user_id,
+    idempotency_key_hash
+);
 
 CREATE TABLE identity.client_rate_limits (
     owner_user_id text PRIMARY KEY REFERENCES identity.users(user_id),
     window_started_at timestamptz NOT NULL,
-    request_count integer NOT NULL CHECK (request_count > 0)
+    request_count bigint NOT NULL CHECK (request_count > 0)
 );
 
 CREATE TABLE audit.events (
@@ -151,7 +157,7 @@ CREATE FUNCTION identity.claim_client_rate_limit(
 )
 RETURNS TABLE (
     allowed boolean,
-    retry_after_seconds bigint
+    retry_after_seconds numeric(20, 0)
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -159,10 +165,10 @@ SET search_path = pg_catalog
 SET lock_timeout = '5s'
 AS $$
 DECLARE
-    policy_max integer;
-    policy_window_seconds integer;
+    policy_max bigint;
+    policy_window_seconds numeric(20, 0);
     stored_window_started_at timestamptz;
-    stored_request_count integer;
+    stored_request_count bigint;
     inserted_count integer;
     authority_time timestamptz;
 BEGIN
@@ -193,7 +199,11 @@ BEGIN
     ON CONFLICT (owner_user_id) DO NOTHING;
     GET DIAGNOSTICS inserted_count = ROW_COUNT;
     IF inserted_count = 1 THEN
-        RETURN QUERY SELECT true, 0::bigint;
+        IF policy_max = 0 THEN
+            RETURN QUERY SELECT false, policy_window_seconds;
+        ELSE
+            RETURN QUERY SELECT true, 0::numeric;
+        END IF;
         RETURN;
     END IF;
 
@@ -204,35 +214,41 @@ BEGIN
      FOR UPDATE;
 
     IF authority_time < stored_window_started_at THEN
-        RETURN QUERY SELECT false, policy_window_seconds::bigint;
+        RETURN QUERY SELECT false, policy_window_seconds;
         RETURN;
     END IF;
     IF authority_time >= stored_window_started_at
-        + make_interval(secs => policy_window_seconds)
+        AND extract(
+            epoch FROM authority_time - stored_window_started_at
+        )::numeric >= policy_window_seconds
     THEN
         UPDATE identity.client_rate_limits
            SET window_started_at = authority_time,
                request_count = 1
          WHERE owner_user_id = requested_owner_user_id;
-        RETURN QUERY SELECT true, 0::bigint;
+        IF policy_max = 0 THEN
+            RETURN QUERY SELECT false, policy_window_seconds;
+        ELSE
+            RETURN QUERY SELECT true, 0::numeric;
+        END IF;
         RETURN;
     END IF;
     IF stored_request_count >= policy_max THEN
-        RETURN QUERY SELECT false, policy_window_seconds::bigint;
+        RETURN QUERY SELECT false, policy_window_seconds;
         RETURN;
     END IF;
 
     UPDATE identity.client_rate_limits
        SET request_count = request_count + 1
      WHERE owner_user_id = requested_owner_user_id;
-    RETURN QUERY SELECT true, 0::bigint;
+    RETURN QUERY SELECT true, 0::numeric;
     RETURN;
 END;
 $$;
 
 CREATE FUNCTION identity.replay_user_api_key(
     requested_owner_user_id text,
-    requested_idempotency_key text,
+    requested_idempotency_key_hash bytea,
     requested_request_hash bytea
 )
 RETURNS TABLE (
@@ -256,7 +272,7 @@ DECLARE
     stored_expires_at timestamptz;
 BEGIN
     IF requested_owner_user_id NOT LIKE 'urn:xb:user:%'
-        OR requested_idempotency_key = ''
+        OR octet_length(requested_idempotency_key_hash) <> 32
         OR octet_length(requested_request_hash) <> 32
     THEN
         RAISE EXCEPTION USING
@@ -278,9 +294,9 @@ BEGIN
         stored_response_nonce,
         stored_response_ciphertext,
         stored_expires_at
-      FROM identity.api_key_replays AS replays
+     FROM identity.api_key_replays AS replays
      WHERE replays.owner_user_id = requested_owner_user_id
-       AND replays.idempotency_key = requested_idempotency_key;
+       AND replays.idempotency_key_hash = requested_idempotency_key_hash;
 
     IF NOT FOUND OR stored_expires_at <= statement_timestamp() THEN
         RETURN QUERY SELECT
@@ -308,8 +324,8 @@ $$;
 CREATE FUNCTION identity.verify_api_key_policy(
     expected_max_active_per_owner bigint,
     expected_rate_limit_max_requests bigint,
-    expected_rate_limit_window_seconds bigint,
-    expected_idempotency_ttl_seconds bigint
+    expected_rate_limit_window_seconds numeric(20, 0),
+    expected_idempotency_ttl_seconds numeric(20, 0)
 )
 RETURNS boolean
 LANGUAGE sql
@@ -352,23 +368,44 @@ BEGIN
     END IF;
 
     WITH expired AS (
-        SELECT replays.owner_user_id, replays.idempotency_key
+        SELECT replays.owner_user_id, replays.idempotency_key_hash
           FROM identity.api_key_replays AS replays
          WHERE replays.expires_at <= statement_timestamp()
          ORDER BY
             replays.expires_at,
             replays.owner_user_id,
-            replays.idempotency_key
+            replays.idempotency_key_hash
          FOR UPDATE SKIP LOCKED
          LIMIT requested_batch_limit
     )
     DELETE FROM identity.api_key_replays AS replays
      USING expired
      WHERE replays.owner_user_id = expired.owner_user_id
-       AND replays.idempotency_key = expired.idempotency_key;
+       AND replays.idempotency_key_hash = expired.idempotency_key_hash;
     GET DIAGNOSTICS deleted_count = ROW_COUNT;
     RETURN deleted_count;
 END;
+$$;
+
+CREATE FUNCTION identity.api_key_replay_coverage()
+RETURNS TABLE (
+    replay_key_id text,
+    live_count bigint,
+    oldest_expires_at text
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+    SELECT
+        replays.replay_key_id,
+        count(*)::bigint,
+        min(replays.expires_at)::text
+      FROM identity.api_key_replays AS replays
+     WHERE replays.expires_at > statement_timestamp()
+     GROUP BY replays.replay_key_id
+     ORDER BY replays.replay_key_id;
 $$;
 
 CREATE FUNCTION identity.create_user_api_key(
@@ -380,7 +417,7 @@ CREATE FUNCTION identity.create_user_api_key(
     requested_scopes text[],
     requested_audit_event_id uuid,
     requested_request_id text,
-    requested_idempotency_key text,
+    requested_idempotency_key_hash bytea,
     requested_request_hash bytea,
     requested_replay_key_id text,
     requested_response_nonce bytea,
@@ -389,7 +426,7 @@ CREATE FUNCTION identity.create_user_api_key(
 RETURNS TABLE (
     outcome text,
     response_status integer,
-    retry_after_seconds bigint,
+    retry_after_seconds numeric(20, 0),
     replay_key_id text,
     response_nonce bytea,
     response_ciphertext bytea
@@ -404,18 +441,18 @@ DECLARE
     authority_time timestamptz;
     active_count bigint;
     policy_version bigint;
-    policy_max_active integer;
-    policy_idempotency_ttl integer;
+    policy_max_active bigint;
+    policy_idempotency_ttl numeric(20, 0);
     stored_request_hash bytea;
     stored_replay_key_id text;
     stored_response_nonce bytea;
     stored_response_ciphertext bytea;
     stored_expires_at timestamptz;
     rate_allowed boolean;
-    rate_retry_after bigint;
+    rate_retry_after numeric(20, 0);
 BEGIN
     IF requested_name = ''
-        OR requested_idempotency_key = ''
+        OR octet_length(requested_idempotency_key_hash) <> 32
         OR octet_length(requested_key_hash) <> 32
         OR requested_prefix !~ '^[0-9a-f]{12}$'
         OR requested_scopes IS NULL
@@ -455,49 +492,47 @@ BEGIN
 
     authority_time := statement_timestamp();
 
-    IF requested_idempotency_key <> '' THEN
-        SELECT
-            replays.request_hash,
-            replays.replay_key_id,
-            replays.response_nonce,
-            replays.response_ciphertext,
-            replays.expires_at
-          INTO
-            stored_request_hash,
-            stored_replay_key_id,
-            stored_response_nonce,
-            stored_response_ciphertext,
-            stored_expires_at
-          FROM identity.api_key_replays AS replays
-         WHERE replays.owner_user_id = requested_owner_user_id
-           AND replays.idempotency_key = requested_idempotency_key
-         FOR UPDATE;
+    SELECT
+        replays.request_hash,
+        replays.replay_key_id,
+        replays.response_nonce,
+        replays.response_ciphertext,
+        replays.expires_at
+      INTO
+        stored_request_hash,
+        stored_replay_key_id,
+        stored_response_nonce,
+        stored_response_ciphertext,
+        stored_expires_at
+      FROM identity.api_key_replays AS replays
+     WHERE replays.owner_user_id = requested_owner_user_id
+       AND replays.idempotency_key_hash = requested_idempotency_key_hash
+     FOR UPDATE;
 
-        IF FOUND AND stored_expires_at <= authority_time THEN
-            DELETE FROM identity.api_key_replays
-             WHERE owner_user_id = requested_owner_user_id
-               AND idempotency_key = requested_idempotency_key;
-            stored_request_hash := NULL;
-        ELSIF FOUND THEN
-            IF stored_request_hash <> requested_request_hash THEN
-                RETURN QUERY SELECT
-                    'idempotency_conflict'::text,
-                    0,
-                    0::bigint,
-                    ''::text,
-                    ''::bytea,
-                    ''::bytea;
-                RETURN;
-            END IF;
+    IF FOUND AND stored_expires_at <= authority_time THEN
+        DELETE FROM identity.api_key_replays
+         WHERE owner_user_id = requested_owner_user_id
+           AND idempotency_key_hash = requested_idempotency_key_hash;
+        stored_request_hash := NULL;
+    ELSIF FOUND THEN
+        IF stored_request_hash <> requested_request_hash THEN
             RETURN QUERY SELECT
-                'replayed'::text,
-                201,
-                0::bigint,
-                stored_replay_key_id,
-                stored_response_nonce,
-                stored_response_ciphertext;
+                'idempotency_conflict'::text,
+                0,
+                0::numeric,
+                ''::text,
+                ''::bytea,
+                ''::bytea;
             RETURN;
         END IF;
+        RETURN QUERY SELECT
+            'replayed'::text,
+            201,
+            0::numeric,
+            stored_replay_key_id,
+            stored_response_nonce,
+            stored_response_ciphertext;
+        RETURN;
     END IF;
 
     SELECT rate.allowed, rate.retry_after_seconds
@@ -526,7 +561,7 @@ BEGIN
         RETURN QUERY SELECT
             'cap_conflict'::text,
             0,
-            0::bigint,
+            0::numeric,
             ''::text,
             ''::bytea,
             ''::bytea;
@@ -583,34 +618,38 @@ BEGIN
         )
     );
 
-    IF requested_idempotency_key <> '' THEN
-        INSERT INTO identity.api_key_replays (
-            owner_user_id,
-            idempotency_key,
-            request_hash,
-            response_status,
-            replay_key_id,
-            response_nonce,
-            response_ciphertext,
-            created_at,
-            expires_at
-        ) VALUES (
-            requested_owner_user_id,
-            requested_idempotency_key,
-            requested_request_hash,
-            201,
-            requested_replay_key_id,
-            requested_response_nonce,
-            requested_response_ciphertext,
-            authority_time,
-            authority_time + make_interval(secs => policy_idempotency_ttl)
-        );
-    END IF;
+    INSERT INTO identity.api_key_replays (
+        owner_user_id,
+        idempotency_key_hash,
+        request_hash,
+        response_status,
+        replay_key_id,
+        response_nonce,
+        response_ciphertext,
+        created_at,
+        expires_at
+    ) VALUES (
+        requested_owner_user_id,
+        requested_idempotency_key_hash,
+        requested_request_hash,
+        201,
+        requested_replay_key_id,
+        requested_response_nonce,
+        requested_response_ciphertext,
+        authority_time,
+        CASE
+            WHEN policy_idempotency_ttl > 8000000000000
+                THEN 'infinity'::timestamptz
+            ELSE authority_time + make_interval(
+                secs => policy_idempotency_ttl::double precision
+            )
+        END
+    );
 
     RETURN QUERY SELECT
         'created'::text,
         201,
-        0::bigint,
+        0::numeric,
         requested_replay_key_id,
         requested_response_nonce,
         requested_response_ciphertext;
@@ -629,18 +668,20 @@ REVOKE ALL ON FUNCTION identity.claim_client_rate_limit(
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION identity.replay_user_api_key(
     text,
-    text,
+    bytea,
     bytea
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION identity.verify_api_key_policy(
     bigint,
     bigint,
-    bigint,
-    bigint
+    numeric,
+    numeric
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION identity.purge_expired_api_key_replays(
     integer
 ) FROM PUBLIC;
+REVOKE ALL ON FUNCTION identity.api_key_replay_coverage()
+FROM PUBLIC;
 REVOKE ALL ON FUNCTION identity.create_user_api_key(
     text,
     uuid,
@@ -650,7 +691,7 @@ REVOKE ALL ON FUNCTION identity.create_user_api_key(
     text[],
     uuid,
     text,
-    text,
+    bytea,
     bytea,
     text,
     bytea,
@@ -662,18 +703,20 @@ GRANT EXECUTE ON FUNCTION identity.claim_client_rate_limit(
 ) TO platformgo_api;
 GRANT EXECUTE ON FUNCTION identity.replay_user_api_key(
     text,
-    text,
+    bytea,
     bytea
 ) TO platformgo_api;
 GRANT EXECUTE ON FUNCTION identity.verify_api_key_policy(
     bigint,
     bigint,
-    bigint,
-    bigint
+    numeric,
+    numeric
 ) TO platformgo_api;
 GRANT EXECUTE ON FUNCTION identity.purge_expired_api_key_replays(
     integer
 ) TO platformgo_api;
+GRANT EXECUTE ON FUNCTION identity.api_key_replay_coverage()
+TO platformgo_api;
 GRANT EXECUTE ON FUNCTION identity.create_user_api_key(
     text,
     uuid,
@@ -683,7 +726,7 @@ GRANT EXECUTE ON FUNCTION identity.create_user_api_key(
     text[],
     uuid,
     text,
-    text,
+    bytea,
     bytea,
     text,
     bytea,

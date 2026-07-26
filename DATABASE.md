@@ -179,6 +179,10 @@ High-volume append-only tables may be time partitioned:
 - realtime publication history.
 
 Retention must never delete records required for unresolved commands, reconciliation, legal/audit obligations, or recovery. Cleanup is a durable idempotent job with metrics.
+The API-key replay cleanup reports every bounded batch and exposes a
+least-privilege per-encryption-key live count plus oldest expiry through
+`identity.api_key_replay_coverage()`. Missing live decryption keys make
+readiness false; zero-count evidence is required before key removal.
 
 ## 12. Backup and restore
 

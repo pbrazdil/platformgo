@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/big"
 	"net/http"
 	"net/netip"
 	"regexp"
@@ -223,28 +224,10 @@ func (server *Server) handleCreateMyAPIKey(
 	}
 	idempotencyKey := request.Header.Get("idempotency-key")
 	if strings.TrimSpace(idempotencyKey) == "" {
-		if err := server.identity.CheckClientRate(
-			request.Context(),
-			principal,
-		); err != nil {
-			if errors.Is(err, ErrRateLimited) {
-				writeClientRateLimit(writer, request, err)
-			} else {
-				writeError(
-					writer,
-					request,
-					http.StatusServiceUnavailable,
-					"unavailable",
-					"identity unavailable",
-				)
-			}
-			return
-		}
-		writeError(
+		server.rejectInvalidAPIKeyRequest(
 			writer,
 			request,
-			http.StatusBadRequest,
-			"invalid_request",
+			principal,
 			"Idempotency-Key is required",
 		)
 		return
@@ -252,11 +235,10 @@ func (server *Server) handleCreateMyAPIKey(
 	var body CreateAPIKeyRequest
 	if err := decodeCompatibleJSON(request.Body, &body); err != nil ||
 		!validOptionalTenantID(body.TenantID) {
-		writeError(
+		server.rejectInvalidAPIKeyRequest(
 			writer,
 			request,
-			http.StatusBadRequest,
-			"invalid_request",
+			principal,
 			"invalid API-key request",
 		)
 		return
@@ -270,11 +252,10 @@ func (server *Server) handleCreateMyAPIKey(
 	)
 	switch {
 	case errors.Is(err, ErrInvalidRequest):
-		writeError(
+		server.rejectInvalidAPIKeyRequest(
 			writer,
 			request,
-			http.StatusBadRequest,
-			"invalid_request",
+			principal,
 			"invalid API-key request",
 		)
 	case errors.Is(err, ErrIdempotencyConflict):
@@ -306,6 +287,38 @@ func (server *Server) handleCreateMyAPIKey(
 	default:
 		writeStoredResponse(writer, response.Response)
 	}
+}
+
+func (server *Server) rejectInvalidAPIKeyRequest(
+	writer http.ResponseWriter,
+	request *http.Request,
+	principal Principal,
+	message string,
+) {
+	if err := server.identity.CheckClientRate(
+		request.Context(),
+		principal,
+	); err != nil {
+		if errors.Is(err, ErrRateLimited) {
+			writeClientRateLimit(writer, request, err)
+		} else {
+			writeError(
+				writer,
+				request,
+				http.StatusServiceUnavailable,
+				"unavailable",
+				"identity unavailable",
+			)
+		}
+		return
+	}
+	writeError(
+		writer,
+		request,
+		http.StatusBadRequest,
+		"invalid_request",
+		message,
+	)
 }
 
 func (server *Server) handleInstruments(writer http.ResponseWriter, request *http.Request) {
@@ -812,15 +825,26 @@ func validOptionalTenantID(value *string) bool {
 	}
 	const prefix = "urn:xb:tenant:"
 	body := strings.TrimPrefix(*value, prefix)
-	if body == *value || body == "" || len(body) > 22 {
+	if body == *value || body == "" {
 		return false
 	}
-	for _, character := range body {
+	decoded := new(big.Int)
+	base := big.NewInt(62)
+	for _, character := range []byte(body) {
+		var digit int64
 		switch {
 		case character >= '0' && character <= '9':
+			digit = int64(character - '0')
 		case character >= 'A' && character <= 'Z':
+			digit = int64(character-'A') + 10
 		case character >= 'a' && character <= 'z':
+			digit = int64(character-'a') + 36
 		default:
+			return false
+		}
+		decoded.Mul(decoded, base)
+		decoded.Add(decoded, big.NewInt(digit))
+		if decoded.BitLen() > 128 {
 			return false
 		}
 	}

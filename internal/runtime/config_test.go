@@ -107,16 +107,35 @@ func TestAPIKeyReplayRotationRequiresExplicitActiveKey(t *testing.T) {
 	}
 }
 
-func TestLegacyAPIKeyPolicyRejectsInvalidValues(t *testing.T) {
-	for _, name := range []string{
-		"UZO_AUTH_MAX_API_KEYS_PER_OWNER",
-		"UZO_API_RATE_LIMIT_MAX_REQUESTS",
-		"UZO_API_RATE_LIMIT_WINDOW_SECS",
-		"UZO_API_IDEMPOTENCY_TTL_SECS",
+func TestLegacyAPIKeyPolicyPreservesSourceDomains(t *testing.T) {
+	values := map[string]string{
+		"UZO_AUTH_MAX_API_KEYS_PER_OWNER": "-1",
+		"UZO_API_RATE_LIMIT_MAX_REQUESTS": "0",
+		"UZO_API_RATE_LIMIT_WINDOW_SECS":  "0",
+		"UZO_API_IDEMPOTENCY_TTL_SECS":    "18446744073709551615",
+	}
+	config, err := loadConfig(func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *config.LegacyAPIKeyPolicy.MaxActivePerOwner != -1 ||
+		*config.LegacyAPIKeyPolicy.RateLimitMaxRequests != 0 ||
+		*config.LegacyAPIKeyPolicy.RateLimitWindowSecs != 0 ||
+		*config.LegacyAPIKeyPolicy.IdempotencyTTLSecs != ^uint64(0) {
+		t.Fatalf("legacy policy = %#v", config.LegacyAPIKeyPolicy)
+	}
+}
+
+func TestLegacyAPIKeyPolicyRejectsOutOfDomainValues(t *testing.T) {
+	for name, value := range map[string]string{
+		"UZO_AUTH_MAX_API_KEYS_PER_OWNER": "9223372036854775808",
+		"UZO_API_RATE_LIMIT_MAX_REQUESTS": "4294967296",
+		"UZO_API_RATE_LIMIT_WINDOW_SECS":  "18446744073709551616",
+		"UZO_API_IDEMPOTENCY_TTL_SECS":    "-1",
 	} {
 		_, err := loadConfig(func(candidate string) string {
 			if candidate == name {
-				return "0"
+				return value
 			}
 			return ""
 		})
