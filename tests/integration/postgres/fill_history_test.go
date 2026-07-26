@@ -504,11 +504,28 @@ func TestFillHistoryReturnsSideAndTradeType(t *testing.T) {
 	invalidEffects := []struct {
 		label     string
 		accountID string
+		raw       string
 	}{
-		{"uppercase", "urn:xb:account:fill-effect-upper"},
-		{"mixed-case", "urn:xb:account:fill-effect-mixed"},
-		{"whitespace", "urn:xb:account:fill-effect-whitespace"},
-		{"unknown", "urn:xb:account:fill-effect-unknown"},
+		{
+			"uppercase",
+			"urn:xb:account:fill-effect-upper",
+			"OPEN",
+		},
+		{
+			"mixed-case",
+			"urn:xb:account:fill-effect-mixed",
+			"Open",
+		},
+		{
+			"whitespace",
+			"urn:xb:account:fill-effect-whitespace",
+			" open ",
+		},
+		{
+			"unknown",
+			"urn:xb:account:fill-effect-unknown",
+			"unknown",
+		},
 	}
 	stores := []struct {
 		label string
@@ -548,6 +565,27 @@ func TestFillHistoryReturnsSideAndTradeType(t *testing.T) {
 					err,
 				)
 			}
+		}
+		var rawPositionEffect string
+		if err := pool.QueryRow(ctx, `
+			SELECT position_effect
+			  FROM trading.fills
+			 WHERE account_id = $1`,
+			invalidEffect.accountID,
+		).Scan(&rawPositionEffect); err != nil {
+			t.Fatalf(
+				"read %s raw durable effect: %v",
+				invalidEffect.label,
+				err,
+			)
+		}
+		if rawPositionEffect != invalidEffect.raw {
+			t.Fatalf(
+				"%s raw durable effect = %q, want immutable %q",
+				invalidEffect.label,
+				rawPositionEffect,
+				invalidEffect.raw,
+			)
 		}
 	}
 }
