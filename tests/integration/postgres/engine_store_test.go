@@ -3226,6 +3226,35 @@ func TestEngineStoreRestoredMarkRepairsProjectionWithoutLedgerDelta(
 			markless.LedgerChanges,
 		)
 	}
+	var markIsNull bool
+	if err := pool.QueryRow(ctx, `
+		SELECT mark_price IS NULL
+		  FROM market.books
+		 WHERE instrument_id = 'BTC-PERP'`,
+	).Scan(&markIsNull); err != nil || !markIsNull {
+		t.Fatalf("persisted markless book null=%t, error %v", markIsNull, err)
+	}
+	recoveredMarkless, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover markless state: %v", err)
+	}
+	if recoveredMarkless.Hash() != state.Hash() || !recoveredMarkless.Ready() {
+		t.Fatalf(
+			"recovered markless ready=%t hash=%s, want %s",
+			recoveredMarkless.Ready(),
+			recoveredMarkless.Hash(),
+			state.Hash(),
+		)
+	}
+	if report, err := store.ReconcileShard(ctx, 8); err != nil || !report.Ready {
+		t.Fatalf("markless reconciliation = %+v, error %v", report, err)
+	}
+	assertLedgerRowCounts(
+		t,
+		pool,
+		ledgerTransactionsBefore,
+		ledgerEntriesBefore,
+	)
 
 	restoredAction := engine.TradingAction{
 		Kind: engine.TradingActionUpdateBook,
