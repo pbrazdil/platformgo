@@ -102,11 +102,6 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 		t.Fatalf("funding contract status = %v", funding["x-platformgo-contract-status"])
 	}
 	assertOperationSecurity(t, funding, "bearer")
-	fills := assertMethod(t, client, "/v1/accounts/{accountId}/fills", "get")
-	assertPointer(t, client, "components", "schemas", "FillView")
-	assertPointer(t, client, "components", "schemas", "FillPage")
-	assertResponse(t, fills, "200")
-	assertOperationSecurity(t, fills, "bearer")
 	order := assertMethod(t, client, "/v1/accounts/{accountId}/orders", "post")
 	parameters, ok := order["parameters"].([]any)
 	if !ok {

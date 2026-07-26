@@ -340,6 +340,5 @@ type TradingReader interface {
 	Orders(context.Context, string) ([]OrderView, error)
 	Positions(context.Context, string) ([]PositionView, error)
 	Balances(context.Context, string) ([]BalanceView, error)
-	Fills(context.Context, string, PageParams) (FillPage, error)
 	Funding(context.Context, string, PageParams) (FundingPage, error)
 }

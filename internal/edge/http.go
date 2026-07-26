@@ -211,23 +211,6 @@ func (server *Server) handleAccountRead(
 		response, err = server.trading.Positions(request.Context(), accountID)
 	case "balances":
 		response, err = server.trading.Balances(request.Context(), accountID)
-	case "fills":
-		params, parseErr := historyPageParams(request)
-		if parseErr != nil {
-			writeError(
-				writer,
-				request,
-				http.StatusBadRequest,
-				"invalid_request",
-				"invalid fill page",
-			)
-			return
-		}
-		response, err = server.trading.Fills(
-			request.Context(),
-			accountID,
-			params,
-		)
 	case "funding":
 		params, parseErr := historyPageParams(request)
 		if parseErr != nil {
@@ -251,16 +234,12 @@ func (server *Server) handleAccountRead(
 	}
 	if err != nil {
 		if errors.Is(err, ErrInvalidRequest) {
-			message := "invalid funding page"
-			if resource == "fills" {
-				message = "invalid fill page"
-			}
 			writeError(
 				writer,
 				request,
 				http.StatusBadRequest,
 				"invalid_request",
-				message,
+				"invalid funding page",
 			)
 			return
 		}
@@ -596,7 +575,7 @@ func accountReadRoute(path string) (string, string, bool) {
 		return "", "", false
 	}
 	remainder := strings.TrimPrefix(path, prefix)
-	for _, resource := range []string{"orders", "positions", "balances", "fills", "funding"} {
+	for _, resource := range []string{"orders", "positions", "balances", "funding"} {
 		suffix := "/" + resource
 		if strings.HasSuffix(remainder, suffix) {
 			accountID := strings.TrimSuffix(remainder, suffix)

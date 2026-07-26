@@ -184,15 +184,10 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "statuses": [200, 400, 401, 403, 503],
         "success_array": "BalanceView",
     },
-    ("GET", "/v1/accounts/{accountId}/fills"): {
-        "statuses": [200, 400, 401, 403, 503],
-        "success": "FillPage",
-        "pagination": True,
-        "security": "bearer",
-    },
     ("GET", "/v1/accounts/{accountId}/funding"): {
-        "statuses": [200, 400, 401, 403, 503],
+        "statuses": [200, 400, 401, 403],
         "success": "FundingPage",
+        "success_description": "Funding history, newest first",
         "pagination": True,
         "security": "bearer",
     },
@@ -283,6 +278,10 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                 )
                 for status in accepted["statuses"]
             }
+            if accepted.get("success_description") is not None:
+                operation["responses"]["200"]["description"] = accepted[
+                    "success_description"
+                ]
             operation["x-platformgo-contract-status"] = "phase3-accepted-runtime"
             request_schema = accepted.get("request")
             if request_schema is not None:
@@ -341,7 +340,7 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
     return paths
 
 
-def schemas() -> dict[str, object]:
+def schemas(client: bool) -> dict[str, object]:
     decimal = {"type": "string", "pattern": r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$"}
     return {
         "Error": {
@@ -508,63 +507,6 @@ def schemas() -> dict[str, object]:
                 "equity": decimal,
             },
         },
-        "FillView": {
-            "type": "object",
-            "required": [
-                "fillId",
-                "orderId",
-                "accountId",
-                "userId",
-                "exchange",
-                "symbol",
-                "side",
-                "quantity",
-                "price",
-                "quoteQuantity",
-                "commission",
-                "reason",
-                "filledAt",
-            ],
-            "properties": {
-                "fillId": {"type": "string"},
-                "orderId": {"type": "string"},
-                "positionId": {"type": "string"},
-                "accountId": {"type": "string"},
-                "userId": {"type": "string"},
-                "exchange": {"type": "string"},
-                "symbol": {"type": "string"},
-                "base": {"type": "string"},
-                "quote": {"type": "string"},
-                "productType": {"type": "string"},
-                "side": {"type": "string"},
-                "orderType": {"type": "string"},
-                "type": {"type": "string"},
-                "quantity": decimal,
-                "price": decimal,
-                "quoteQuantity": decimal,
-                "commission": decimal,
-                "feeRate": decimal,
-                "feeAsset": {"type": "string"},
-                "realizedPnl": decimal,
-                "liquidity": {"type": "string"},
-                "reason": {"type": "string"},
-                "leverage": decimal,
-                "filledAt": {"type": "string", "format": "date-time"},
-            },
-        },
-        "FillPage": {
-            "type": "object",
-            "required": ["items"],
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "items": {"$ref": "#/components/schemas/FillView"},
-                },
-                "nextCursor": {"type": "string"},
-                "prevCursor": {"type": "string"},
-                "total": {"type": "integer"},
-            },
-        },
         "BrokerEcho": {
             "type": "object",
             "required": ["id"],
@@ -633,45 +575,61 @@ def schemas() -> dict[str, object]:
                 "createdAt": {"type": "string", "format": "date-time"},
             },
         },
-        "FundingView": {
-            "type": "object",
-            "required": [
-                "fundingId",
-                "symbol",
-                "positionId",
-                "positionSignedQty",
-                "oraclePrice",
-                "fundingRate",
-                "fundingAmount",
-                "currency",
-                "fundingTime",
-            ],
-            "properties": {
-                "fundingId": {"type": "string"},
-                "symbol": {"type": "string"},
-                "positionId": {"type": "string"},
-                "positionSignedQty": decimal,
-                "oraclePrice": decimal,
-                "fundingRate": decimal,
-                "fundingAmount": decimal,
-                "currency": {"type": "string"},
-                "fundingTime": {"type": "string", "format": "date-time"},
-                "accountLogin": {"type": "integer"},
-            },
-        },
-        "FundingPage": {
-            "type": "object",
-            "required": ["items"],
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "items": {"$ref": "#/components/schemas/FundingView"},
+        "FundingView": (
+            {
+                "type": "object",
+                "required": [
+                    "fundingId",
+                    "symbol",
+                    "positionId",
+                    "positionSignedQty",
+                    "oraclePrice",
+                    "fundingRate",
+                    "fundingAmount",
+                    "currency",
+                    "fundingTime",
+                ],
+                "properties": {
+                    "fundingId": {"type": "string"},
+                    "symbol": {"type": "string"},
+                    "positionId": {"type": "string"},
+                    "positionSignedQty": decimal,
+                    "oraclePrice": decimal,
+                    "fundingRate": decimal,
+                    "fundingAmount": decimal,
+                    "currency": {"type": "string"},
+                    "fundingTime": {"type": "string", "format": "date-time"},
+                    "accountLogin": {"type": "integer"},
                 },
-                "nextCursor": {"type": "string"},
-                "prevCursor": {"type": "string"},
-                "total": {"type": "integer"},
-            },
-        },
+            }
+            if client
+            else {
+                "type": "object",
+                "properties": {
+                    "amount": decimal,
+                    "rate": decimal,
+                },
+            }
+        ),
+        **(
+            {
+                "FundingPage": {
+                    "type": "object",
+                    "required": ["items"],
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/FundingView"},
+                        },
+                        "nextCursor": {"type": "string"},
+                        "prevCursor": {"type": "string"},
+                        "total": {"type": "integer"},
+                    },
+                }
+            }
+            if client
+            else {}
+        ),
         "RealtimeToken": {
             "type": "object",
             "required": ["token", "channels"],
@@ -703,7 +661,7 @@ def document(title: str, raw: str, security: str) -> dict[str, object]:
                     else {"type": "http", "scheme": "bearer"}
                 )
             },
-            "schemas": schemas(),
+            "schemas": schemas(raw == CLIENT),
         },
     }
 
