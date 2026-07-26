@@ -1858,7 +1858,8 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 			decode(repeat('21', 32), 'hex'),
 			decode(repeat('31', 32), 'hex'),
 			decode(repeat('71', 32), 'hex'),
-			decode(repeat('51', 32), 'hex'), '{}', '{}'
+			decode(repeat('51', 32), 'hex'), '{}',
+			'{"DecisionHashVersion":3}'
 		);
 		INSERT INTO trading.idempotency_records (
 			scope, idempotency_key, request_hash, command_id, state, expires_at
@@ -3683,6 +3684,203 @@ func TestBalanceProjectionHashV3MigrationGuardsHistoricalOrderReceipts(
 	assertFinalMigrationHistory(t, pool)
 }
 
+func TestBalanceProjectionHashV3MigrationLocksBeforeHistoricalGuard(
+	t *testing.T,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("apply pre-v3 schema: %v", err)
+	}
+
+	oldWriter, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin old writer: %v", err)
+	}
+	defer func() { _ = oldWriter.Rollback(context.Background()) }()
+	if _, err := oldWriter.Exec(ctx, `
+		SELECT set_config(
+			'platformgo.runtime_schema_revision',
+			'20260725001100_phase3_committed_realtime_outbox',
+			true
+		);
+		INSERT INTO engine.input_receipts (
+			shard_id, input_id, stream_sequence, schema_version,
+			input_hash_version, input_hash, decision_hash_version,
+			decision_hash, resulting_state_hash, envelope, decision,
+			business_input_hash, business_input_hash_version
+		) VALUES (
+			8,
+			'00000000-0000-4000-8000-000000000811',
+			1,
+			1,
+			1,
+			decode(repeat('31', 32), 'hex'),
+			2,
+			decode(repeat('32', 32), 'hex'),
+			decode(repeat('33', 32), 'hex'),
+			'{}',
+			'{"OrderChanges":[{"OrderID":"concurrent-old-order"}]}',
+			decode(repeat('34', 32), 'hex'),
+			1
+		)`); err != nil {
+		t.Fatalf("stage uncommitted old order receipt: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	migrationResult := make(chan error, 1)
+	go func() {
+		migrationResult <- current.Migrate(ctx)
+	}()
+	waitForTableLockWaiter(t, ctx, pool, "engine.input_receipts")
+	if err := oldWriter.Commit(ctx); err != nil {
+		t.Fatalf("commit concurrent old order receipt: %v", err)
+	}
+
+	err = <-migrationResult
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("concurrent old order migration error = %v, want 55000", err)
+	}
+	var (
+		lastMigration string
+		receiptCount  int
+		triggerCount  int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			(SELECT count(*) FROM engine.input_receipts),
+			(
+				SELECT count(*)
+				  FROM pg_trigger
+				 WHERE tgname IN (
+					'input_receipts_require_balance_projection_hash_v3',
+					'duplicate_receipts_require_decision_hash_v3'
+				 )
+				   AND NOT tgisinternal
+			)`,
+	).Scan(&lastMigration, &receiptCount, &triggerCount); err != nil {
+		t.Fatalf("inspect concurrent guard rollback: %v", err)
+	}
+	if lastMigration != "20260726000700_phase3_user_api_keys.up.sql" ||
+		receiptCount != 1 ||
+		triggerCount != 0 {
+		t.Fatalf(
+			"concurrent guard state = last %q receipts %d triggers %d",
+			lastMigration,
+			receiptCount,
+			triggerCount,
+		)
+	}
+}
+
+func TestBalanceProjectionHashV3MigrationFencesConcurrentOldDuplicateWriter(
+	t *testing.T,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("apply pre-v3 schema: %v", err)
+	}
+
+	oldWriter, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin old duplicate writer: %v", err)
+	}
+	defer func() { _ = oldWriter.Rollback(context.Background()) }()
+	if _, err := oldWriter.Exec(ctx, `
+		INSERT INTO engine.duplicate_delivery_receipts (
+			shard_id, stream_sequence, input_id, input_hash,
+			original_decision_hash, decision_hash, resulting_state_hash,
+			envelope, decision
+		) VALUES (
+			8,
+			1,
+			'00000000-0000-4000-8000-000000000821',
+			decode(repeat('41', 32), 'hex'),
+			decode(repeat('42', 32), 'hex'),
+			decode(repeat('43', 32), 'hex'),
+			decode(repeat('44', 32), 'hex'),
+			'{}',
+			'{"DecisionHashVersion":2}'
+		)`); err != nil {
+		t.Fatalf("stage uncommitted old duplicate receipt: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	migrationResult := make(chan error, 1)
+	go func() {
+		migrationResult <- current.Migrate(ctx)
+	}()
+	waitForTableLockWaiter(
+		t,
+		ctx,
+		pool,
+		"engine.duplicate_delivery_receipts",
+	)
+	if err := oldWriter.Commit(ctx); err != nil {
+		t.Fatalf("commit concurrent old duplicate receipt: %v", err)
+	}
+	if err := <-migrationResult; err != nil {
+		t.Fatalf("migrate after concurrent old duplicate receipt: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify duplicate writer fence: %v", err)
+	}
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO engine.duplicate_delivery_receipts (
+			shard_id, stream_sequence, input_id, input_hash,
+			original_decision_hash, decision_hash, resulting_state_hash,
+			envelope, decision
+		) VALUES (
+			8,
+			2,
+			'00000000-0000-4000-8000-000000000821',
+			decode(repeat('51', 32), 'hex'),
+			decode(repeat('52', 32), 'hex'),
+			decode(repeat('53', 32), 'hex'),
+			decode(repeat('54', 32), 'hex'),
+			'{}',
+			'{"DecisionHashVersion":2}'
+		)`)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("post-cutover old duplicate error = %v, want 55000", err)
+	}
+	var duplicateCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM engine.duplicate_delivery_receipts`,
+	).Scan(&duplicateCount); err != nil {
+		t.Fatalf("count duplicate receipts: %v", err)
+	}
+	if duplicateCount != 1 {
+		t.Fatalf("duplicate receipts = %d, want preserved historical row", duplicateCount)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
 func TestBalanceProjectionHashV3MigrationUsesBoundedLockAndRetries(
 	t *testing.T,
 ) {
@@ -3743,6 +3941,40 @@ func TestBalanceProjectionHashV3MigrationUsesBoundedLockAndRetries(
 		t.Fatalf("verify retried v3 migration: %v", err)
 	}
 	assertFinalMigrationHistory(t, pool)
+}
+
+func waitForTableLockWaiter(
+	t *testing.T,
+	ctx context.Context,
+	pool interface {
+		QueryRow(context.Context, string, ...any) pgx.Row
+	},
+	relation string,
+) {
+	t.Helper()
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				  FROM pg_locks
+				 WHERE relation = $1::regclass
+				   AND mode = 'ShareRowExclusiveLock'
+				   AND NOT granted
+			)`,
+			relation,
+		).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("migration did not wait on the receipt-table fence")
+		case <-time.After(time.Millisecond):
+		}
+	}
 }
 
 func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
