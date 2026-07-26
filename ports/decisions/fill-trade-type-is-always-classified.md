@@ -3,7 +3,7 @@ Title: Preserve classified trade types for durable Go fills
 Source revision/files/tests:
 - `upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd`
 - `apps/app/tests/it/trading/e2e_fills.rs::fill_history_returns_side_and_trade_type`
-- `internal/engine/trading_positions_source_test.go::TestTradingPositionEffectsFollowFillSequence`
+- `internal/engine/trading_positions_source_test.go::TestTradingFillTypeIsClassifiedOpenIncreaseReduceFlipClose`
 
 Conflict or ambiguity:
 The pinned source test inserts an artificial legacy mirror row without an
@@ -45,8 +45,8 @@ Tests added/changed:
 - The same test proves both fill readers reject uppercase, mixed-case,
   whitespace-padded, and unknown durable effects through current and recreated
   API pools, return zero projections, and preserve the raw immutable evidence.
-- `TestTradingPositionEffectsFollowFillSequence` remains the accepted engine
-  authority for the five reachable position effects.
+- `TestTradingFillTypeIsClassifiedOpenIncreaseReduceFlipClose` remains the
+  accepted engine authority for the five reachable position effects.
 
 Approver: Petr Brazdil, through the active owner instruction: "Zachovej soucasne chovani jako zdroj."
 
