@@ -280,6 +280,8 @@ func TestFillsHistoryFiltersBySideAndTradeID(t *testing.T) {
 // Assertions preserved:
 //   - BUY/open and SELL/close sides retain their source spellings.
 //   - Open, increase, reduce, flip, and close trade types project exactly.
+//
+// Strengthening:
 //   - Unknown durable effects fail closed instead of becoming client values.
 func TestFillHistoryReturnsSideAndTradeType(t *testing.T) {
 	ctx := context.Background()
