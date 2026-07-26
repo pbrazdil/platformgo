@@ -31,12 +31,26 @@ Validate at each boundary. Internal origin does not make a payload valid.
 - Passwords use Argon2id parameters documented and benchmarked for production hardware.
 - Sensitive factors/keys stored in PostgreSQL are encrypted with externally supplied key material where required.
 - Randomness is injected into deterministic core; adapters use `crypto/rand`.
+- User API-key idempotency responses use AES-256-GCM with an externally supplied
+  keyring and explicit active key ID. The key table and audit trail retain only
+  the authentication digest and non-secret metadata; the bounded replay table
+  retains authenticated ciphertext, nonce and key ID.
+- Shown-once credential creation requires a stable idempotency key. The exact
+  encrypted HTTP response commits atomically with the credential and audit fact
+  so a lost success response cannot leave an unrecoverable active credential.
+- Replay-key rotation distributes future decryption material to every replica
+  before activation and retains old keys through the replay TTL and cleanup
+  horizon.
 
 ## 5. Authorization
 
 - All mutations pass one authorization choke point before command creation.
 - Authorization identity and scopes become part of the immutable command/audit record.
 - Database roles prevent API code from writing monetary tables.
+- `platformgo_api` is a trusted authenticated-principal authority for identity
+  mutations. Its ability to execute a credential-minting definer function is an
+  explicit trust boundary; compromise of that role triggers credential
+  reconciliation and is not contained as an ordinary read-only database leak.
 - NATS permissions prevent cross-role subject publication/subscription.
 - Privileged risk settings, kill switch and account operations require explicit permissions and audit.
 
