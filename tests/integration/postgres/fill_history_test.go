@@ -280,6 +280,7 @@ func TestFillsHistoryFiltersBySideAndTradeID(t *testing.T) {
 // Assertions preserved:
 //   - BUY/open and SELL/close sides retain their source spellings.
 //   - Open, increase, reduce, flip, and close trade types project exactly.
+//   - Unknown durable effects fail closed instead of becoming client values.
 func TestFillHistoryReturnsSideAndTradeType(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
@@ -379,7 +380,8 @@ func TestFillHistoryReturnsSideAndTradeType(t *testing.T) {
 		"platformgo_fill_side_trade_type_api_login",
 		"platformgo_api",
 	)
-	page, err := platformpostgres.NewCompatibilityStore(apiPool).FilterFillExecutions(
+	store := platformpostgres.NewCompatibilityStore(apiPool)
+	page, err := store.FilterFillExecutions(
 		ctx,
 		accountID,
 		platformpostgres.FillExecutionFilter{Limit: 10},
@@ -415,6 +417,29 @@ func TestFillHistoryReturnsSideAndTradeType(t *testing.T) {
 				expected.tradeType,
 			)
 		}
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.fills (
+			fill_id, order_id, input_id, account_id, instrument_id,
+			side, price, quantity, position_id, position_effect,
+			liquidity_side, logical_time
+		) VALUES (
+			'019fa844-26c0-7000-8000-000000000076',
+			'019fa844-26c0-7000-8000-000000000081',
+			'019fa844-26c0-7000-8000-000000000096',
+			'urn:xb:account:fill-side-trade-type', 'BTC-PERP',
+			'BUY', 60000, 0.01,
+			'019fa844-26c0-7000-8000-0000000000a1',
+			'unknown', 'TAKER', 1784901600000000076)`); err != nil {
+		t.Fatalf("seed unknown durable fill trade type: %v", err)
+	}
+	if _, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{Limit: 10},
+	); err == nil {
+		t.Fatal("unknown durable fill position effect unexpectedly projected")
 	}
 }
 

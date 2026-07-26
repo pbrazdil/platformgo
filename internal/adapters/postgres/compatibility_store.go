@@ -1023,6 +1023,12 @@ func (store *CompatibilityStore) LatestFillExecution(
 	); err != nil {
 		return edge.FillExecutionView{}, fmt.Errorf("read latest fill execution: %w", err)
 	}
+	if err := validateFillTradeType(view.TradeType); err != nil {
+		return edge.FillExecutionView{}, fmt.Errorf(
+			"read latest fill execution: %w",
+			err,
+		)
+	}
 	view.OrderID = "urn:xb:order:" + view.OrderID
 	view.FilledAt = time.Unix(0, logicalTime).UTC().Format(time.RFC3339Nano)
 	return view, nil
@@ -1117,6 +1123,12 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				err,
 			)
 		}
+		if err := validateFillTradeType(view.TradeType); err != nil {
+			return edge.FillExecutionPage{}, fmt.Errorf(
+				"scan filtered fill execution: %w",
+				err,
+			)
+		}
 		view.OrderID = "urn:xb:order:" + view.OrderID
 		view.FilledAt = time.Unix(0, logicalTime).UTC().Format(time.RFC3339Nano)
 		page.Items = append(page.Items, view)
@@ -1126,6 +1138,19 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		return edge.FillExecutionPage{}, fmt.Errorf("filter fill executions: %w", err)
 	}
 	return page, nil
+}
+
+func validateFillTradeType(tradeType string) error {
+	switch engine.PositionEffect(tradeType) {
+	case engine.PositionEffectOpen,
+		engine.PositionEffectIncrease,
+		engine.PositionEffectReduce,
+		engine.PositionEffectFlip,
+		engine.PositionEffectClose:
+		return nil
+	default:
+		return fmt.Errorf("unsupported durable fill position effect %q", tradeType)
+	}
 }
 
 // Funding returns one exact, newest-first account funding page.
