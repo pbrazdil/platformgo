@@ -449,6 +449,338 @@ func TestEngineStorePersistsOrdersFillsPositionsAndEvents(t *testing.T) {
 	}
 }
 
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/trading/e2e_fills.rs:459
+//	test: saga_reconcile_settles_orphaned_order_from_fills
+//
+// Adaptations:
+//   - The current Go authority commits an order transition and its fills in one
+//     PostgreSQL transaction, so a separately committed orphan fill is not a
+//     valid runtime state and no repair saga is introduced.
+//   - The post-persist failpoint proves the transaction rolls both projections
+//     back before a retry commits them together.
+//   - Reconciliation detects an injected orphan state and fails closed instead
+//     of rewriting immutable economic history.
+//
+// Assertions preserved:
+//   - Before execution, the order remains non-terminal with no fill.
+//   - Once execution commits, the order is filled with its exact fill quantity.
+//   - Repeating the same execution does not settle or fill the order again.
+//
+// Strengthening:
+//   - Retry, duplicate delivery, restart recovery, and reconciliation are
+//     proved against PostgreSQL 17 at the actual engine-store boundary.
+func TestSagaReconcileSettlesOrphanedOrderFromFills(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).MigrateAndProvision(ctx, 52); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	store := platformpostgres.NewEngineStore(pool)
+	state := engine.NewState(52)
+	ids := testkit.NewShardIDSequence(52)
+	clock := testkit.NewManualClock(
+		engine.NewLogicalTime(time.Date(
+			2026,
+			time.July,
+			26,
+			14,
+			0,
+			0,
+			123456789,
+			time.UTC,
+		)),
+	)
+	apply := func(action engine.TradingAction) engine.Decision {
+		var decision engine.Decision
+		state, decision, _, _ = applyStoredTrading(
+			t,
+			pool,
+			store,
+			state,
+			ids,
+			clock,
+			action,
+			platformpostgres.ApplyOptions{},
+		)
+		return decision
+	}
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionConfigureInstrument,
+		ConfigureInstrument: &engine.ConfigureInstrument{
+			InstrumentID:            "BTC-PERP",
+			Revision:                1,
+			PriceScale:              2,
+			QuantityScale:           3,
+			SettlementCurrency:      "USDC",
+			SettlementCurrencyScale: 2,
+			InitialMarginRate:       "0.1",
+			MaintenanceMarginRate:   "0.05",
+			MaxLeverage:             "10",
+			MakerFeeRate:            "0",
+			TakerFeeRate:            "0",
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "account-atomic-fill",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionAdjustBalance,
+		AdjustBalance: &engine.AdjustBalance{
+			AccountID:     "account-atomic-fill",
+			Currency:      "USDC",
+			CurrencyScale: 2,
+			Operation:     engine.BalanceOperationDeposit,
+			Amount:        "1000",
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionUpdateBook,
+		UpdateBook: &engine.UpdateBook{
+			InstrumentID: "BTC-PERP",
+			MarkPrice:    "100",
+			Bids:         []engine.BookLevel{{Price: "99", Quantity: "10"}},
+			Asks:         []engine.BookLevel{{Price: "110", Quantity: "10"}},
+		},
+	})
+
+	orderID := engine.IDFromSequence(engine.ID{}, 5201)
+	submitted := apply(engine.TradingAction{
+		Kind: engine.TradingActionSubmitOrder,
+		SubmitOrder: &engine.SubmitOrder{
+			OrderID:      orderID,
+			AccountID:    "account-atomic-fill",
+			InstrumentID: "BTC-PERP",
+			Side:         engine.SideBuy,
+			Type:         engine.OrderTypeLimit,
+			TimeInForce:  engine.TimeInForceGTC,
+			Quantity:     "0.01",
+			Price:        "100",
+		},
+	})
+	if len(submitted.OrderChanges) != 1 ||
+		submitted.OrderChanges[0].Status != engine.OrderStatusWorking ||
+		submitted.OrderChanges[0].FilledQuantity != "0" ||
+		len(submitted.Fills) != 0 {
+		t.Fatalf("resting order decision = %+v", submitted)
+	}
+	assertRowCount(t, pool, "trading.orders", 1)
+	assertRowCount(t, pool, "trading.fills", 0)
+	assertPersistedOrderExecution(
+		t,
+		pool,
+		orderID,
+		string(engine.OrderStatusWorking),
+		"0",
+		"0",
+	)
+
+	executionAction := engine.TradingAction{
+		Kind: engine.TradingActionUpdateBook,
+		UpdateBook: &engine.UpdateBook{
+			InstrumentID: "BTC-PERP",
+			MarkPrice:    "100",
+			Bids:         []engine.BookLevel{{Price: "99", Quantity: "10"}},
+			Asks:         []engine.BookLevel{{Price: "100", Quantity: "10"}},
+		},
+	}
+	executionInput := nextStoredInput(t, state, ids, clock, executionAction)
+	beforeFaultHash := state.Hash()
+	faultedState, _, duplicate, err := store.ApplyTrading(
+		ctx,
+		state,
+		executionInput,
+		executionAction,
+		platformpostgres.ApplyOptions{
+			Faults: testkit.NewFaults(
+				platformpostgres.FailpointAfterPersistBeforeCommit,
+			),
+		},
+	)
+	if !errors.Is(err, platformpostgres.ErrInjectedFault) {
+		t.Fatalf("faulted execution error = %v, want ErrInjectedFault", err)
+	}
+	if duplicate || faultedState.Hash() != beforeFaultHash {
+		t.Fatalf(
+			"faulted execution = duplicate %t hash %s, want false %s",
+			duplicate,
+			faultedState.Hash(),
+			beforeFaultHash,
+		)
+	}
+	assertRowCount(t, pool, "trading.fills", 0)
+	assertRowCount(t, pool, "trading.positions", 0)
+	assertPersistedOrderExecution(
+		t,
+		pool,
+		orderID,
+		string(engine.OrderStatusWorking),
+		"0",
+		"0",
+	)
+
+	var execution engine.Decision
+	state, execution, _, duplicate = applyStoredInput(
+		t,
+		pool,
+		store,
+		state,
+		executionInput,
+		executionAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if duplicate ||
+		len(execution.OrderChanges) != 1 ||
+		execution.OrderChanges[0].Status != engine.OrderStatusFilled ||
+		execution.OrderChanges[0].FilledQuantity != "0.01" ||
+		len(execution.Fills) != 1 ||
+		execution.Fills[0].Quantity != "0.01" {
+		t.Fatalf("retried execution = duplicate %t decision %+v", duplicate, execution)
+	}
+	assertRowCount(t, pool, "trading.fills", 1)
+	assertRowCount(t, pool, "trading.positions", 1)
+	assertPersistedOrderExecution(
+		t,
+		pool,
+		orderID,
+		string(engine.OrderStatusFilled),
+		"0.01",
+		"100",
+	)
+
+	duplicateState, duplicateDecision, duplicate, err := store.ApplyTrading(
+		ctx,
+		state,
+		executionInput,
+		executionAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if err != nil || !duplicate || duplicateState.Hash() != state.Hash() {
+		t.Fatalf(
+			"duplicate execution = duplicate %t hash %s, want %s, error %v",
+			duplicate,
+			duplicateState.Hash(),
+			state.Hash(),
+			err,
+		)
+	}
+	if duplicateDecision.DecisionHash != execution.DecisionHash {
+		t.Fatalf(
+			"duplicate decision hash = %s, want %s",
+			duplicateDecision.DecisionHash,
+			execution.DecisionHash,
+		)
+	}
+	assertRowCount(t, pool, "trading.fills", 1)
+	assertPersistedOrderExecution(
+		t,
+		pool,
+		orderID,
+		string(engine.OrderStatusFilled),
+		"0.01",
+		"100",
+	)
+
+	recovered, err := store.RecoverTradingState(ctx, 52)
+	if err != nil {
+		t.Fatalf("RecoverTradingState: %v", err)
+	}
+	recoveredOrder, ok := recovered.Order(orderID)
+	if recovered.Hash() != state.Hash() ||
+		!ok ||
+		recoveredOrder.Status != engine.OrderStatusFilled ||
+		recoveredOrder.FilledQuantity != "0.01" ||
+		len(recovered.FillsForOrder(orderID)) != 1 {
+		t.Fatalf(
+			"recovered state = hash %s order %+v found %t fills %d",
+			recovered.Hash(),
+			recoveredOrder,
+			ok,
+			len(recovered.FillsForOrder(orderID)),
+		)
+	}
+	report, err := store.ReconcileShard(ctx, 52)
+	if err != nil || !report.Ready || report.OrderFillMismatchCount != 0 {
+		t.Fatalf("settled reconciliation = %+v, error %v", report, err)
+	}
+
+	corruptAsReplicationAuthority(t, pool, `
+		UPDATE trading.orders
+		   SET status = 'working',
+		       filled_quantity = 0,
+		       average_fill_price = 0
+		 WHERE order_id = $1`,
+		orderID.String(),
+	)
+	report, err = store.ReconcileShard(ctx, 52)
+	if !errors.Is(err, platformpostgres.ErrReconciliationMismatch) {
+		t.Fatalf(
+			"orphan reconciliation error = %v, want ErrReconciliationMismatch",
+			err,
+		)
+	}
+	if report.Ready || report.OrderFillMismatchCount == 0 {
+		t.Fatalf("orphan reconciliation report = %+v", report)
+	}
+	assertRowCount(t, pool, "trading.fills", 1)
+	assertPersistedOrderExecution(
+		t,
+		pool,
+		orderID,
+		string(engine.OrderStatusWorking),
+		"0",
+		"0",
+	)
+}
+
+func assertPersistedOrderExecution(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	orderID engine.ID,
+	wantStatus string,
+	wantFilledQuantity string,
+	wantAverageFillPrice string,
+) {
+	t.Helper()
+	var status string
+	var filledQuantity string
+	var averageFillPrice string
+	if err := pool.QueryRow(context.Background(), `
+		SELECT status,
+		       trim_scale(filled_quantity)::text,
+		       trim_scale(average_fill_price)::text
+		  FROM trading.orders
+		 WHERE order_id = $1`,
+		orderID.String(),
+	).Scan(&status, &filledQuantity, &averageFillPrice); err != nil {
+		t.Fatalf("read persisted order execution: %v", err)
+	}
+	if status != wantStatus ||
+		filledQuantity != wantFilledQuantity ||
+		averageFillPrice != wantAverageFillPrice {
+		t.Fatalf(
+			"persisted order execution = (%s,%s,%s), want (%s,%s,%s)",
+			status,
+			filledQuantity,
+			averageFillPrice,
+			wantStatus,
+			wantFilledQuantity,
+			wantAverageFillPrice,
+		)
+	}
+}
+
 func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 	tests := []struct {
 		name       string
