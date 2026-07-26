@@ -12,7 +12,7 @@ const (
 	CurrentSchemaVersion       uint32 = 1
 	CurrentInputHashVersion    uint32 = 1
 	CurrentBusinessHashVersion uint32 = 1
-	CurrentDecisionHashVersion uint32 = 3
+	CurrentDecisionHashVersion uint32 = 4
 )
 
 // IDError is a stable canonical-ID validation error.

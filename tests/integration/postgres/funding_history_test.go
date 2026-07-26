@@ -264,11 +264,17 @@ func seedFundingHistory(
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	if _, err := tx.Exec(ctx, `
-		SELECT set_config(
-			'platformgo.runtime_schema_revision',
-			'20260725001100_phase3_committed_realtime_outbox',
-			true
-		);
+		SELECT
+			set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				true
+			),
+			set_config(
+				'platformgo.engine_decision_hash_version',
+				'4',
+				true
+			);
 		INSERT INTO engine.deployment_shard (shard_id)
 		VALUES (41)
 		ON CONFLICT DO NOTHING;
@@ -344,11 +350,11 @@ func seedFundingHistory(
 			1,
 			1,
 			decode(repeat(lpad(stream_sequence::text, 2, '0'), 32), 'hex'),
-			3,
+			4,
 			decode(repeat(lpad((stream_sequence + 10)::text, 2, '0'), 32), 'hex'),
 			decode(repeat(lpad((stream_sequence + 20)::text, 2, '0'), 32), 'hex'),
 			jsonb_build_object('LogicalTime', logical_time),
-			'{}'::jsonb,
+			'{"DecisionHashVersion":4}'::jsonb,
 			decode(repeat(lpad((stream_sequence + 30)::text, 2, '0'), 32), 'hex'),
 			1
 		  FROM (

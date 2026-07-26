@@ -204,7 +204,15 @@ func ApplyDuplicateDeliveryAtDecisionHashVersion(
 		DuplicateOfDecisionHash: original.Decision.DecisionHash,
 		CommandResult:           original.Decision.CommandResult,
 	}
-	decision.EffectsHash = hashEffects(decision)
+	effectsHash, effectsHashErr := hashEffectsAtVersion(
+		decision,
+		decisionHashVersion,
+	)
+	if effectsHashErr != nil {
+		effectsHashErr.Sequence = input.StreamSequence
+		return halt(state, inputHash, effectsHashErr)
+	}
+	decision.EffectsHash = effectsHash
 	decisionHash, decisionHashErr := hashDecisionAtVersion(
 		previousStateHash,
 		inputHash,
@@ -368,6 +376,16 @@ func applyWithSchemaAndDecisionHashVersion(
 	previousState := state
 	previousStateHash := state.hash
 	state, decision := transition(state)
+	if decisionHashVersion >= 4 {
+		if engineError := freezeFillEffectiveLeverage(
+			previousState,
+			&state,
+			&decision,
+			input.StreamSequence,
+		); engineError != nil {
+			return halt(previousState, inputHash, engineError)
+		}
+	}
 	if decisionHashVersion >= 3 {
 		decision.BalanceChanges = completeBalanceProjectionChanges(
 			previousState,
@@ -395,7 +413,15 @@ func applyWithSchemaAndDecisionHashVersion(
 	decision.DecisionHashVersion = decisionHashVersion
 	decision.PreviousStateHash = previousStateHash
 	decision.InputHash = inputHash
-	decision.EffectsHash = hashEffects(decision)
+	effectsHash, effectsHashErr := hashEffectsAtVersion(
+		decision,
+		decisionHashVersion,
+	)
+	if effectsHashErr != nil {
+		effectsHashErr.Sequence = input.StreamSequence
+		return halt(previousState, inputHash, effectsHashErr)
+	}
+	decision.EffectsHash = effectsHash
 	decisionHash, decisionHashErr := hashDecisionAtVersion(
 		previousStateHash,
 		inputHash,
@@ -416,6 +442,116 @@ func applyWithSchemaAndDecisionHashVersion(
 	state.lastReceipt = NewReceipt(input, decision)
 	state.hasLastReceipt = true
 	return state, cloneDecision(decision), nil
+}
+
+func freezeFillEffectiveLeverage(
+	previous State,
+	next *State,
+	decision *Decision,
+	streamSequence uint64,
+) *Error {
+	if len(decision.Fills) == 0 {
+		return nil
+	}
+
+	next.trading = next.trading.clone()
+	for decisionIndex := range decision.Fills {
+		snapshot := &decision.Fills[decisionIndex]
+		fillIndex := -1
+		for index := range next.trading.fills {
+			if next.trading.fills[index].fillID != snapshot.FillID {
+				continue
+			}
+			if fillIndex >= 0 {
+				return invalidFrozenLeverageEffect(
+					streamSequence,
+					"fill ID links to multiple resulting-state fill records",
+				)
+			}
+			fillIndex = index
+		}
+		if fillIndex < 0 {
+			return invalidFrozenLeverageEffect(
+				streamSequence,
+				"decision fill has no resulting-state fill record",
+			)
+		}
+
+		fill := &next.trading.fills[fillIndex]
+		if fill.orderID != snapshot.OrderID ||
+			fill.accountID == "" ||
+			fill.accountID != snapshot.AccountID ||
+			fill.instrument.ID() == "" ||
+			fill.instrument.ID() != snapshot.InstrumentID {
+			return invalidFrozenLeverageEffect(
+				streamSequence,
+				"decision fill linkage disagrees with resulting state",
+			)
+		}
+		orderIndex, orderFound := next.trading.orderIndex(fill.orderID)
+		if !orderFound ||
+			next.trading.orders[orderIndex].accountID != fill.accountID ||
+			!next.trading.orders[orderIndex].instrument.Equal(fill.instrument) {
+			return invalidFrozenLeverageEffect(
+				streamSequence,
+				"fill has no authoritative resulting order linkage",
+			)
+		}
+
+		instrument, instrumentFound := previous.trading.instrumentRecord(
+			fill.instrument.ID(),
+		)
+		if !instrumentFound ||
+			!instrument.revision.Equal(fill.instrument) ||
+			instrument.maxLeverage.Decimal().Sign() <= 0 {
+			return invalidFrozenLeverageEffect(
+				streamSequence,
+				"fill has no valid execution-time instrument risk authority",
+			)
+		}
+
+		effectiveLeverage := instrument.maxLeverage
+		riskFound := false
+		for _, risk := range previous.trading.risks {
+			if risk.accountID != fill.accountID ||
+				risk.instrumentID != fill.instrument.ID() {
+				continue
+			}
+			if riskFound {
+				return invalidFrozenLeverageEffect(
+					streamSequence,
+					"fill has multiple execution-time risk authorities",
+				)
+			}
+			riskFound = true
+			effectiveLeverage = risk.leverage
+		}
+		if effectiveLeverage.Decimal().Sign() <= 0 ||
+			effectiveLeverage.Decimal().Cmp(
+				instrument.maxLeverage.Decimal(),
+			) > 0 {
+			return invalidFrozenLeverageEffect(
+				streamSequence,
+				"fill execution-time leverage is outside instrument authority",
+			)
+		}
+
+		fill.effectiveLeverage = effectiveLeverage
+		fill.hasEffectiveLeverage = true
+		snapshot.EffectiveLeverage = effectiveLeverage.Decimal().String()
+	}
+	return nil
+}
+
+func invalidFrozenLeverageEffect(
+	streamSequence uint64,
+	detail string,
+) *Error {
+	return &Error{
+		Kind:     ErrInvalidEffect,
+		Sequence: streamSequence,
+		Detail:   detail,
+	}
 }
 
 func lookupReceipt(

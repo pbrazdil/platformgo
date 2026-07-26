@@ -28,11 +28,17 @@ func TestFundingHistoryQueriesUseKeysetIndexes(t *testing.T) {
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	if _, err := tx.Exec(ctx, `
-		SELECT set_config(
-			'platformgo.runtime_schema_revision',
-			'20260725001100_phase3_committed_realtime_outbox',
-			true
-		);
+		SELECT
+			set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				true
+			),
+			set_config(
+				'platformgo.engine_decision_hash_version',
+				'4',
+				true
+			);
 		INSERT INTO engine.deployment_shard (shard_id) VALUES (41);
 		INSERT INTO trading.instruments (
 			instrument_id, revision, price_scale, quantity_scale,
@@ -63,14 +69,14 @@ func TestFundingHistoryQueriesUseKeysetIndexes(t *testing.T) {
 			1,
 			1,
 			decode(repeat('01', 32), 'hex'),
-			3,
+			4,
 			decode(repeat('02', 32), 'hex'),
 			decode(repeat('03', 32), 'hex'),
 			jsonb_build_object(
 				'LogicalTime',
 				1784901600000000000 + sequence_number
 			),
-			'{}'::jsonb,
+			'{"DecisionHashVersion":4}'::jsonb,
 			decode(repeat('04', 32), 'hex'),
 			1
 		  FROM generate_series(1, 10000) AS sequence(sequence_number);

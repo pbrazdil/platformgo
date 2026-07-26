@@ -471,7 +471,7 @@ func TestEngineStorePersistsOrdersFillsPositionsAndEvents(t *testing.T) {
 //
 // Strengthening:
 //   - Retry, duplicate delivery, restart recovery, and reconciliation are
-//     proved against PostgreSQL 17 at the actual engine-store boundary.
+//     proved against PostgreSQL 19 Beta 2 at the actual engine-store boundary.
 func TestSagaReconcileSettlesOrphanedOrderFromFills(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
@@ -694,6 +694,7 @@ func TestSagaReconcileSettlesOrphanedOrderFromFills(t *testing.T) {
 		execution.Fills[0].LiquiditySide != engine.LiquiditySideMaker ||
 		execution.Fills[0].Fee != "0.5" ||
 		execution.Fills[0].FeeCurrency != "USDC" ||
+		execution.Fills[0].EffectiveLeverage != "10" ||
 		len(execution.BalanceChanges) != 1 ||
 		execution.BalanceChanges[0].Total != "999.5" ||
 		execution.BalanceChanges[0].Used != "0.01" ||
@@ -717,6 +718,13 @@ func TestSagaReconcileSettlesOrphanedOrderFromFills(t *testing.T) {
 	assertRowCount(t, pool, "trading.positions", 1)
 	assertRowCount(t, pool, "ledger.transactions", 2)
 	assertRowCount(t, pool, "ledger.entries", 4)
+	assertPersistedFrozenLeverage(
+		t,
+		pool,
+		executionInput.InputID,
+		execution.Fills[0].FillID,
+		"10",
+	)
 	assertExactFillLedger(
 		t,
 		pool,
@@ -3593,7 +3601,7 @@ func TestEngineStoreDurablyHaltsNonCommandReuseOfCommandID(t *testing.T) {
 	}
 }
 
-func TestEngineStoreRecoversDecisionHashV2AndExtendsTheChainWithV3(
+func TestEngineStoreRecoversDecisionHashV2V3AndExtendsTheChainWithV4(
 	t *testing.T,
 ) {
 	ctx := context.Background()
@@ -3638,9 +3646,9 @@ func TestEngineStoreRecoversDecisionHashV2AndExtendsTheChainWithV3(
 		legacyAction,
 		platformpostgres.ApplyOptions{},
 	)
-	if currentDecision.DecisionHashVersion != 3 {
+	if currentDecision.DecisionHashVersion != 4 {
 		t.Fatalf(
-			"initial persisted decision version = %d, want 3",
+			"initial persisted decision version = %d, want 4",
 			currentDecision.DecisionHashVersion,
 		)
 	}
@@ -3665,6 +3673,21 @@ func TestEngineStoreRecoversDecisionHashV2AndExtendsTheChainWithV3(
 	connection, err := pool.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire legacy-history connection: %v", err)
+	}
+	if _, err := connection.Exec(ctx, `
+		SELECT
+			set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				false
+			),
+			set_config(
+				'platformgo.engine_decision_hash_version',
+				'4',
+				false
+			)`); err != nil {
+		connection.Release()
+		t.Fatalf("bind legacy-history fixture authority: %v", err)
 	}
 	if _, err := connection.Exec(
 		ctx,
@@ -3743,9 +3766,9 @@ func TestEngineStoreRecoversDecisionHashV2AndExtendsTheChainWithV3(
 			err,
 		)
 	}
-	if currentDuplicateDecision.DecisionHashVersion != 3 {
+	if currentDuplicateDecision.DecisionHashVersion != 4 {
 		t.Fatalf(
-			"persisted duplicate version = %d, want 3",
+			"persisted duplicate version = %d, want 4",
 			currentDuplicateDecision.DecisionHashVersion,
 		)
 	}
@@ -3835,35 +3858,155 @@ func TestEngineStoreRecoversDecisionHashV2AndExtendsTheChainWithV3(
 	}
 	recovered = recoveredDuplicate
 
-	next, v3Decision, _, _ := applyStoredTrading(
+	v3Action := engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "mixed-version-v3-account",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	}
+	v3Input := nextStoredInput(t, recovered, ids, clock, v3Action)
+	_, currentV4Decision, _, _ := applyStoredInput(
 		t,
 		pool,
 		store,
 		recovered,
+		v3Input,
+		v3Action,
+		platformpostgres.ApplyOptions{},
+	)
+	if currentV4Decision.DecisionHashVersion != 4 {
+		t.Fatalf(
+			"temporary persisted decision version = %d, want 4",
+			currentV4Decision.DecisionHashVersion,
+		)
+	}
+	v3State, v3Decision, err :=
+		engine.ApplyTradingWithReceiptsAtDecisionHashVersion(
+			recovered,
+			v3Input,
+			v3Action,
+			nil,
+			3,
+		)
+	if err != nil {
+		t.Fatalf("derive v3 decision: %v", err)
+	}
+	v3DecisionJSON, err := json.Marshal(v3Decision)
+	if err != nil {
+		t.Fatalf("encode v3 decision: %v", err)
+	}
+	v3StateHash := v3State.Hash()
+	v3Connection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire v3-history connection: %v", err)
+	}
+	if _, err := v3Connection.Exec(ctx, `
+		SELECT
+			set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				false
+			),
+			set_config(
+				'platformgo.engine_decision_hash_version',
+				'4',
+				false
+			)`); err != nil {
+		v3Connection.Release()
+		t.Fatalf("bind v3-history fixture authority: %v", err)
+	}
+	defer func() {
+		_, _ = pool.Exec(
+			context.Background(),
+			"ALTER TABLE engine.input_receipts ENABLE TRIGGER USER",
+		)
+	}()
+	if _, err := v3Connection.Exec(
+		ctx,
+		"ALTER TABLE engine.input_receipts DISABLE TRIGGER USER",
+	); err != nil {
+		v3Connection.Release()
+		t.Fatalf("disable immutable receipt triggers for v3 fixture: %v", err)
+	}
+	if _, err := v3Connection.Exec(ctx, `
+		UPDATE engine.input_receipts
+		   SET decision_hash_version = 3,
+		       decision_hash = $1,
+		       resulting_state_hash = $2,
+		       decision = $3
+		 WHERE shard_id = 8
+		   AND input_id = $4`,
+		v3Decision.DecisionHash[:],
+		v3StateHash[:],
+		v3DecisionJSON,
+		v3Input.InputID.String(),
+	); err != nil {
+		v3Connection.Release()
+		t.Fatalf("install immutable v3 receipt fixture: %v", err)
+	}
+	if _, err := v3Connection.Exec(ctx, `
+		UPDATE engine.shard_checkpoints
+		   SET state_hash = $1,
+		       next_stream_sequence = $2
+		 WHERE shard_id = 8`,
+		v3StateHash[:],
+		v3State.NextStreamSequence(),
+	); err != nil {
+		v3Connection.Release()
+		t.Fatalf("install v3 checkpoint fixture: %v", err)
+	}
+	if _, err := v3Connection.Exec(
+		ctx,
+		"ALTER TABLE engine.input_receipts ENABLE TRIGGER USER",
+	); err != nil {
+		v3Connection.Release()
+		t.Fatalf("reenable immutable receipt triggers after v3 fixture: %v", err)
+	}
+	v3Connection.Release()
+
+	recoveredV3, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover mixed v2/v3 history: %v", err)
+	}
+	if recoveredV3.Hash() != v3State.Hash() || !recoveredV3.Ready() {
+		t.Fatalf(
+			"mixed recovery ready=%t hash=%s, want %s",
+			recoveredV3.Ready(),
+			recoveredV3.Hash(),
+			v3State.Hash(),
+		)
+	}
+
+	next, v4Decision, _, _ := applyStoredTrading(
+		t,
+		pool,
+		store,
+		recoveredV3,
 		ids,
 		clock,
 		engine.TradingAction{
 			Kind: engine.TradingActionConfigureAccount,
 			ConfigureAccount: &engine.ConfigureAccount{
-				AccountID: "mixed-version-account",
+				AccountID: "mixed-version-v4-account",
 				OmsMode:   engine.OmsModeNetting,
 			},
 		},
 		platformpostgres.ApplyOptions{},
 	)
-	if v3Decision.DecisionHashVersion != 3 {
+	if v4Decision.DecisionHashVersion != 4 {
 		t.Fatalf(
-			"new decision version = %d, want 3",
-			v3Decision.DecisionHashVersion,
+			"new decision version = %d, want 4",
+			v4Decision.DecisionHashVersion,
 		)
 	}
 	recoveredMixed, err := store.RecoverTradingState(ctx, 8)
 	if err != nil {
-		t.Fatalf("recover mixed v2/v3 history: %v", err)
+		t.Fatalf("recover mixed v2/v3/v4 history: %v", err)
 	}
 	if recoveredMixed.Hash() != next.Hash() || !recoveredMixed.Ready() {
 		t.Fatalf(
-			"mixed recovery ready=%t hash=%s, want %s",
+			"mixed v2/v3/v4 recovery ready=%t hash=%s, want %s",
 			recoveredMixed.Ready(),
 			recoveredMixed.Hash(),
 			next.Hash(),

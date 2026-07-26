@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,9 +37,12 @@ var (
 const (
 	// MinimumPostgresMajorVersion is the oldest PostgreSQL release supported by
 	// the platform.
-	MinimumPostgresMajorVersion = 17
-	migrationAdvisoryLockKey    = int64(0x504c4154474f)
-	migrationLockTimeout        = "5s"
+	MinimumPostgresMajorVersion = 19
+	// MinimumPostgres19BetaVersion rejects development snapshots and the
+	// superseded first beta while PostgreSQL 19 is still prerelease software.
+	MinimumPostgres19BetaVersion = 2
+	migrationAdvisoryLockKey     = int64(0x504c4154474f)
+	migrationLockTimeout         = "5s"
 )
 
 const runtimeRoleSafetyPreflight = `
@@ -148,14 +153,25 @@ func (migrator *Migrator) Migrate(ctx context.Context) error {
 	}
 	defer connection.Release()
 
-	var postgresVersionNumber int
+	var (
+		postgresVersionNumber int
+		postgresVersion       string
+	)
 	if versionErr := connection.QueryRow(
 		ctx,
-		"SELECT current_setting('server_version_num')::integer",
-	).Scan(&postgresVersionNumber); versionErr != nil {
+		`SELECT
+			current_setting('server_version_num')::integer,
+			current_setting('server_version')`,
+	).Scan(
+		&postgresVersionNumber,
+		&postgresVersion,
+	); versionErr != nil {
 		return fmt.Errorf("migrate: read PostgreSQL server version: %w", versionErr)
 	}
-	if versionErr := validatePostgresVersionNumber(postgresVersionNumber); versionErr != nil {
+	if versionErr := validatePostgresVersion(
+		postgresVersionNumber,
+		postgresVersion,
+	); versionErr != nil {
 		return fmt.Errorf("migrate: %w", versionErr)
 	}
 
@@ -270,18 +286,27 @@ func (migrator *Migrator) VerifyCurrent(ctx context.Context) error {
 	}
 	defer connection.Release()
 
-	var postgresVersionNumber int
+	var (
+		postgresVersionNumber int
+		postgresVersion       string
+	)
 	if versionReadErr := connection.QueryRow(
 		ctx,
-		"SELECT current_setting('server_version_num')::integer",
-	).Scan(&postgresVersionNumber); versionReadErr != nil {
+		`SELECT
+			current_setting('server_version_num')::integer,
+			current_setting('server_version')`,
+	).Scan(
+		&postgresVersionNumber,
+		&postgresVersion,
+	); versionReadErr != nil {
 		return fmt.Errorf(
 			"verify migrations: read PostgreSQL server version: %w",
 			versionReadErr,
 		)
 	}
-	if versionErr := validatePostgresVersionNumber(
+	if versionErr := validatePostgresVersion(
 		postgresVersionNumber,
+		postgresVersion,
 	); versionErr != nil {
 		return fmt.Errorf("verify migrations: %w", versionErr)
 	}
@@ -371,6 +396,149 @@ func validatePostgresVersionNumber(versionNumber int) error {
 		)
 	}
 	return nil
+}
+
+func validatePostgresVersion(versionNumber int, version string) error {
+	if err := validatePostgresVersionNumber(versionNumber); err != nil {
+		return err
+	}
+
+	displayMajor, suffix, ok := splitPostgresDisplayVersion(version)
+	numericMajor := versionNumber / 10000
+	if !ok || displayMajor != numericMajor {
+		return unsupportedPostgresVersion(
+			versionNumber,
+			version,
+			"numeric and display versions disagree",
+		)
+	}
+	numericMinor := versionNumber % 10000
+	if stableMinor, stable := stablePostgresVersionMinor(suffix); stable {
+		if stableMinor != numericMinor {
+			return unsupportedPostgresVersion(
+				versionNumber,
+				version,
+				"numeric and display versions disagree",
+			)
+		}
+		return nil
+	}
+
+	if beta, found := postgresPrereleaseNumber(suffix, "beta"); found {
+		if numericMinor != 0 {
+			return unsupportedPostgresVersion(
+				versionNumber,
+				version,
+				"numeric and display versions disagree",
+			)
+		}
+		if numericMajor == MinimumPostgresMajorVersion &&
+			beta >= MinimumPostgres19BetaVersion {
+			return nil
+		}
+		return unsupportedPostgresVersion(
+			versionNumber,
+			version,
+			"prerelease beta is not qualified",
+		)
+	}
+	if _, found := postgresPrereleaseNumber(suffix, "rc"); found {
+		if numericMinor != 0 {
+			return unsupportedPostgresVersion(
+				versionNumber,
+				version,
+				"numeric and display versions disagree",
+			)
+		}
+		if numericMajor == MinimumPostgresMajorVersion {
+			return nil
+		}
+		return unsupportedPostgresVersion(
+			versionNumber,
+			version,
+			"future release candidate is not qualified",
+		)
+	}
+	return unsupportedPostgresVersion(
+		versionNumber,
+		version,
+		"development or unknown prerelease is not qualified",
+	)
+}
+
+func splitPostgresDisplayVersion(version string) (int, string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(version))
+	fields := strings.Fields(normalized)
+	if len(fields) == 0 {
+		return 0, "", false
+	}
+	releaseToken := fields[0]
+	majorEnd := 0
+	for majorEnd < len(releaseToken) &&
+		releaseToken[majorEnd] >= '0' &&
+		releaseToken[majorEnd] <= '9' {
+		majorEnd++
+	}
+	if majorEnd == 0 || majorEnd > 1 && releaseToken[0] == '0' {
+		return 0, "", false
+	}
+	major, err := strconv.Atoi(releaseToken[:majorEnd])
+	if err != nil {
+		return 0, "", false
+	}
+	return major, releaseToken[majorEnd:], true
+}
+
+func stablePostgresVersionMinor(suffix string) (int, bool) {
+	if len(suffix) < 2 || suffix[0] != '.' {
+		return 0, false
+	}
+	return canonicalPostgresVersionNumber(suffix[1:], true)
+}
+
+func postgresPrereleaseNumber(
+	suffix string,
+	prefix string,
+) (int, bool) {
+	if !strings.HasPrefix(suffix, prefix) {
+		return 0, false
+	}
+	digits := suffix[len(prefix):]
+	return canonicalPostgresVersionNumber(digits, false)
+}
+
+func canonicalPostgresVersionNumber(
+	digits string,
+	allowZero bool,
+) (int, bool) {
+	if digits == "" || len(digits) > 1 && digits[0] == '0' {
+		return 0, false
+	}
+	for _, digit := range digits {
+		if digit < '0' || digit > '9' {
+			return 0, false
+		}
+	}
+	number, err := strconv.Atoi(digits)
+	if err != nil || number < 0 || !allowZero && number == 0 {
+		return 0, false
+	}
+	return number, true
+}
+
+func unsupportedPostgresVersion(
+	versionNumber int,
+	version string,
+	detail string,
+) error {
+	return fmt.Errorf(
+		"%w: server version %q (%d): %s; minimum PostgreSQL 19 Beta %d",
+		ErrUnsupportedPostgresVersion,
+		version,
+		versionNumber,
+		detail,
+		MinimumPostgres19BetaVersion,
+	)
 }
 
 func releaseMigrationLock(ctx context.Context, connection *pgxpool.Conn) {

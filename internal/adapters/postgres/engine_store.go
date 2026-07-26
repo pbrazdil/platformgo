@@ -660,8 +660,11 @@ func (store *EngineStore) beginEngineTx(
 func bindEngineRuntimeSchemaRevision(ctx context.Context, tx pgx.Tx) error {
 	if _, err := tx.Exec(
 		ctx,
-		"SELECT set_config('platformgo.runtime_schema_revision', $1, true)",
+		`SELECT
+			set_config('platformgo.runtime_schema_revision', $1, true),
+			set_config('platformgo.engine_decision_hash_version', $2, true)`,
 		engineRuntimeSchemaRevision,
+		fmt.Sprint(engine.CurrentDecisionHashVersion),
 	); err != nil {
 		return fmt.Errorf("bind engine runtime schema revision: %w", err)
 	}
@@ -1597,8 +1600,10 @@ func persistFills(
 				fill_id, order_id, input_id, account_id, instrument_id,
 				side, price, quantity, position_id, position_effect,
 				realized_pnl, settlement_currency, liquidity_side, fee,
-				fee_currency, logical_time
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+				fee_currency, logical_time, effective_leverage
+			) VALUES (
+				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
+			)`,
 			change.FillID.String(),
 			change.OrderID.String(),
 			input.InputID.String(),
@@ -1615,6 +1620,7 @@ func persistFills(
 			nullableText(change.Fee),
 			nullableText(change.FeeCurrency),
 			change.LogicalTime.UnixNano(),
+			nullableText(change.EffectiveLeverage),
 		); err != nil {
 			return fmt.Errorf("persist fill %s: %w", change.FillID, err)
 		}
@@ -2005,13 +2011,14 @@ func recoverTradingState(
 		)
 	}
 	rows, err := querier.Query(ctx, `
-		SELECT receipt_kind, envelope, decision_hash, resulting_state_hash,
+		SELECT receipt_kind, envelope, decision, decision_hash, resulting_state_hash,
 		       decision_hash_version,
 		       business_input_hash_version, business_input_hash
 		  FROM (
 			SELECT
 				'business'::text AS receipt_kind,
 				envelope,
+				decision,
 				decision_hash,
 				resulting_state_hash,
 				decision_hash_version,
@@ -2024,6 +2031,7 @@ func recoverTradingState(
 			SELECT
 				'duplicate'::text AS receipt_kind,
 				envelope,
+				decision,
 				decision_hash,
 				resulting_state_hash,
 				COALESCE(
@@ -2048,6 +2056,7 @@ func recoverTradingState(
 	for rows.Next() {
 		var receiptKind string
 		var envelopeJSON []byte
+		var storedDecisionJSON []byte
 		var storedDecisionHash []byte
 		var storedStateHash []byte
 		var storedDecisionHashVersion uint32
@@ -2056,6 +2065,7 @@ func recoverTradingState(
 		if scanErr := rows.Scan(
 			&receiptKind,
 			&envelopeJSON,
+			&storedDecisionJSON,
 			&storedDecisionHash,
 			&storedStateHash,
 			&storedDecisionHashVersion,
@@ -2116,6 +2126,45 @@ func recoverTradingState(
 			!equalHashBytes(next.Hash(), storedStateHash) {
 			return engine.State{}, fmt.Errorf(
 				"%w: shard %d sequence %d replay hash differs",
+				ErrCheckpointMismatch,
+				shardID,
+				input.StreamSequence,
+			)
+		}
+		var storedDecision engine.Decision
+		if decodeErr := json.Unmarshal(
+			storedDecisionJSON,
+			&storedDecision,
+		); decodeErr != nil {
+			return engine.State{}, fmt.Errorf(
+				"%w: shard %d sequence %d stored decision is invalid: %w",
+				ErrCheckpointMismatch,
+				shardID,
+				input.StreamSequence,
+				decodeErr,
+			)
+		}
+		storedCanonical, encodeErr := json.Marshal(storedDecision)
+		if encodeErr != nil {
+			return engine.State{}, fmt.Errorf(
+				"encode shard %d sequence %d stored decision: %w",
+				shardID,
+				input.StreamSequence,
+				encodeErr,
+			)
+		}
+		replayedCanonical, encodeErr := json.Marshal(decision)
+		if encodeErr != nil {
+			return engine.State{}, fmt.Errorf(
+				"encode shard %d sequence %d replayed decision: %w",
+				shardID,
+				input.StreamSequence,
+				encodeErr,
+			)
+		}
+		if !bytes.Equal(storedCanonical, replayedCanonical) {
+			return engine.State{}, fmt.Errorf(
+				"%w: shard %d sequence %d stored decision differs from replay",
 				ErrCheckpointMismatch,
 				shardID,
 				input.StreamSequence,

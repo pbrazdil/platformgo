@@ -567,6 +567,7 @@ type FillSnapshot struct {
 	Fee                string
 	FeeCurrency        string
 	LogicalTime        LogicalTime
+	EffectiveLeverage  string
 }
 
 // PositionSnapshot is the immutable query representation of one position

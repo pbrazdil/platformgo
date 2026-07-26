@@ -450,6 +450,19 @@ func (state tradingState) hasEconomicStateForInstrument(instrumentID string) boo
 	return false
 }
 
+func (state tradingState) hasRiskAboveMaxLeverage(
+	instrumentID string,
+	maxLeverage domain.Ratio,
+) bool {
+	for _, risk := range state.risks {
+		if risk.instrumentID == instrumentID &&
+			risk.leverage.Decimal().Cmp(maxLeverage.Decimal()) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (state tradingState) hasActiveOrderForInstrument(
 	accountID string,
 	instrumentID string,

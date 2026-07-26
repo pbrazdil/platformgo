@@ -113,6 +113,8 @@ func hashDecisionAtVersion(
 		domain = "platformgo.engine.decision.v2"
 	case 3:
 		domain = "platformgo.engine.decision.v3"
+	case 4:
+		domain = "platformgo.engine.decision.v4"
 	default:
 		return Hash{}, &Error{
 			Kind:   ErrUnknownHashVersion,
@@ -127,9 +129,23 @@ func hashDecisionAtVersion(
 	}), nil
 }
 
-func hashEffects(decision Decision) Hash {
+func hashEffectsAtVersion(decision Decision, version uint32) (Hash, *Error) {
+	var domain string
+	var includeEffectiveLeverage bool
+	switch version {
+	case 2, 3:
+		domain = "platformgo.engine.effects.v1"
+	case 4:
+		domain = "platformgo.engine.effects.v2"
+		includeEffectiveLeverage = true
+	default:
+		return Hash{}, &Error{
+			Kind:   ErrUnknownHashVersion,
+			Detail: "effects hash version is not supported",
+		}
+	}
 	return finishHash(func(hasher hash.Hash) {
-		writeString(hasher, "platformgo.engine.effects.v1")
+		writeString(hasher, domain)
 		writeString(hasher, string(decision.CommandResult.Status))
 		writeString(hasher, string(decision.CommandResult.Reason))
 		writeBytes(hasher, decision.DuplicateOfDecisionHash[:])
@@ -247,6 +263,9 @@ func hashEffects(decision Decision) Hash {
 			writeString(hasher, fill.Fee)
 			writeString(hasher, fill.FeeCurrency)
 			writeInt64(hasher, fill.LogicalTime.UnixNano())
+			if includeEffectiveLeverage {
+				writeString(hasher, fill.EffectiveLeverage)
+			}
 		}
 		writeUint64(hasher, uint64(len(decision.PositionChanges)))
 		for _, position := range decision.PositionChanges {
@@ -271,7 +290,7 @@ func hashEffects(decision Decision) Hash {
 			writeUint64(hasher, event.AggregateVersion)
 			writeInt64(hasher, event.LogicalTime.UnixNano())
 		}
-	})
+	}), nil
 }
 
 func writeBookLevels(hasher hash.Hash, levels []BookLevel) {

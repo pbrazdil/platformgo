@@ -112,10 +112,39 @@ func applyTradingWithReceiptsAtDecisionHashVersion(
 		input,
 		receipts,
 		func(state State) (State, Decision) {
-			return applyTradingAction(state, input, action)
+			return applyTradingActionAtDecisionHashVersion(
+				state,
+				input,
+				action,
+				decisionHashVersion,
+			)
 		},
 		decisionHashVersion,
 	)
+}
+
+func applyTradingActionAtDecisionHashVersion(
+	state State,
+	input InputEnvelope,
+	action TradingAction,
+	decisionHashVersion uint32,
+) (State, Decision) {
+	if decisionHashVersion >= 4 &&
+		validTradingActionUnion(action) &&
+		action.Kind == TradingActionConfigureInstrument {
+		maxLeverage, err := domain.NewRatio(
+			action.ConfigureInstrument.MaxLeverage,
+		)
+		if err == nil &&
+			maxLeverage.Decimal().Sign() > 0 &&
+			state.trading.hasRiskAboveMaxLeverage(
+				action.ConfigureInstrument.InstrumentID,
+				maxLeverage,
+			) {
+			return rejectedTradingDecision(state, RejectionRiskConfigLocked)
+		}
+	}
+	return applyTradingAction(state, input, action)
 }
 
 // TradingActionAllowedForInputKind enforces producer authority at the
