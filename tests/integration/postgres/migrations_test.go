@@ -805,6 +805,95 @@ func TestFillHistoryMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 		MigrateAndProvision(ctx, 41); err != nil {
 		t.Fatalf("apply previous funding schema: %v", err)
 	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2,
+			0.1, 0.05, 10, -0.0001, 0.0005
+		);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:fill-upgrade', 'NETTING');
+		INSERT INTO identity.users (
+			user_id, login, normalized_login, broker_subject
+		) VALUES (
+			'urn:xb:user:fill-upgrade',
+			'fill-upgrade',
+			'fill-upgrade',
+			'urn:xb:tenant:fill-upgrade'
+		);
+		INSERT INTO identity.user_accounts (
+			user_id, account_id, broker_subject
+		) VALUES (
+			'urn:xb:user:fill-upgrade',
+			'urn:xb:account:fill-upgrade',
+			'urn:xb:tenant:fill-upgrade'
+		);
+		INSERT INTO identity.account_profiles (
+			account_id, login, base_currency, market_venue,
+			permitted_classes, created_at, broker_subject
+		) VALUES (
+			'urn:xb:account:fill-upgrade',
+			1001,
+			'USDC',
+			'HYPERLIQUID',
+			ARRAY['CRYPTOCURRENCY'],
+			'2020-09-13T12:26:40Z',
+			'urn:xb:tenant:fill-upgrade'
+		);
+		INSERT INTO trading.orders (
+			order_id, account_id, instrument_id, side, order_type,
+			time_in_force, status, quantity, filled_quantity,
+			average_fill_price, triggered, reduce_only, has_rested,
+			version
+		) VALUES (
+			'019fa844-26c0-7000-8000-000000000001',
+			'urn:xb:account:fill-upgrade',
+			'BTC-PERP',
+			'BUY',
+			'MARKET',
+			'IOC',
+			'FILLED',
+			1,
+			1,
+			60000,
+			false,
+			false,
+			false,
+			1
+		);
+		INSERT INTO trading.fills (
+			fill_id, order_id, input_id, account_id, instrument_id,
+			side, price, quantity, position_id, position_effect,
+			liquidity_side, fee, fee_currency, logical_time
+		)
+		SELECT
+			format(
+				'10000000-0000-0000-0000-%s',
+				lpad(to_hex(sequence_number), 12, '0')
+			)::uuid,
+			'019fa844-26c0-7000-8000-000000000001'::uuid,
+			format(
+				'20000000-0000-0000-0000-%s',
+				lpad(to_hex(sequence_number), 12, '0')
+			)::uuid,
+			'urn:xb:account:fill-upgrade',
+			'BTC-PERP',
+			'BUY',
+			60000,
+			0.01,
+			'30000000-0000-0000-0000-000000000001'::uuid,
+			'OPEN',
+			'TAKER',
+			0.5,
+			'USDC',
+			1600000000000000000 + sequence_number
+		  FROM generate_series(1, 100) AS sequence(sequence_number)`); err != nil {
+		t.Fatalf("seed populated fill-history schema: %v", err)
+	}
 
 	lockingTx, err := pool.Begin(ctx)
 	if err != nil {
@@ -835,20 +924,24 @@ func TestFillHistoryMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 	var (
 		lastMigration string
 		indexExists   bool
+		fillCount     int
 	)
 	if err := pool.QueryRow(ctx, `
 		SELECT
 			(SELECT max(filename) FROM engine.schema_migrations),
-			to_regclass('trading.fills_account_history_idx') IS NOT NULL`,
-	).Scan(&lastMigration, &indexExists); err != nil {
+			to_regclass('trading.fills_account_history_idx') IS NOT NULL,
+			(SELECT count(*) FROM trading.fills)`,
+	).Scan(&lastMigration, &indexExists, &fillCount); err != nil {
 		t.Fatalf("inspect rolled-back fill-history migration: %v", err)
 	}
 	if lastMigration != "20260726000100_phase3_funding_history_read_model.up.sql" ||
-		indexExists {
+		indexExists ||
+		fillCount != 100 {
 		t.Fatalf(
-			"contended fill-history migration state = last %q index %t",
+			"contended fill-history migration state = last %q index %t fills %d",
 			lastMigration,
 			indexExists,
+			fillCount,
 		)
 	}
 
@@ -862,6 +955,24 @@ func TestFillHistoryMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 		t.Fatalf("verify retried fill-history upgrade: %v", err)
 	}
 	assertFinalMigrationHistory(t, pool)
+	page, err := platformpostgres.NewCompatibilityStore(pool).Fills(
+		ctx,
+		"urn:xb:account:fill-upgrade",
+		edge.PageParams{Limit: 1},
+	)
+	if err != nil {
+		t.Fatalf("read preserved fill history after upgrade: %v", err)
+	}
+	wantTime := time.Unix(0, 1600000000000000100).
+		UTC().
+		Format(time.RFC3339Nano)
+	if len(page.Items) != 1 ||
+		page.Total == nil ||
+		*page.Total != 100 ||
+		page.Items[0].FillID != "10000000-0000-0000-0000-000000000064" ||
+		page.Items[0].FilledAt != wantTime {
+		t.Fatalf("preserved fill history = %#v, want newest time %q", page, wantTime)
+	}
 }
 
 func TestRuntimeMigrationVerificationIsExactAndOldEngineIsFenced(t *testing.T) {

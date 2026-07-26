@@ -101,6 +101,12 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 	if funding["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
 		t.Fatalf("funding contract status = %v", funding["x-platformgo-contract-status"])
 	}
+	assertOperationSecurity(t, funding, "bearer")
+	fills := assertMethod(t, client, "/v1/accounts/{accountId}/fills", "get")
+	assertPointer(t, client, "components", "schemas", "FillView")
+	assertPointer(t, client, "components", "schemas", "FillPage")
+	assertResponse(t, fills, "200")
+	assertOperationSecurity(t, fills, "bearer")
 	order := assertMethod(t, client, "/v1/accounts/{accountId}/orders", "post")
 	parameters, ok := order["parameters"].([]any)
 	if !ok {
@@ -138,6 +144,25 @@ func assertResponse(t *testing.T, operation map[string]any, status string) {
 	}
 	if _, ok := responses[status]; !ok {
 		t.Fatalf("response %s missing: %v", status, responses)
+	}
+}
+
+func assertOperationSecurity(
+	t *testing.T,
+	operation map[string]any,
+	scheme string,
+) {
+	t.Helper()
+	security, ok := operation["security"].([]any)
+	if !ok || len(security) != 1 {
+		t.Fatalf("operation security = %v, want one %s requirement", security, scheme)
+	}
+	requirement, ok := security[0].(map[string]any)
+	if !ok {
+		t.Fatalf("operation security requirement = %v", security[0])
+	}
+	if _, ok := requirement[scheme]; !ok {
+		t.Fatalf("operation security = %v, want %s", requirement, scheme)
 	}
 }
 

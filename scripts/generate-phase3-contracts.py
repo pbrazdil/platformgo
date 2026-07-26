@@ -188,11 +188,13 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "statuses": [200, 400, 401, 403, 503],
         "success": "FillPage",
         "pagination": True,
+        "security": "bearer",
     },
     ("GET", "/v1/accounts/{accountId}/funding"): {
         "statuses": [200, 400, 401, 403, 503],
         "success": "FundingPage",
         "pagination": True,
+        "security": "bearer",
     },
     ("GET", "/broker/v1/ping"): {"statuses": [200, 401]},
     ("POST", "/broker/v1/echo"): {
@@ -333,6 +335,8 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                     },
                 },
             ]
+        if accepted is not None and accepted.get("security") is not None:
+            operation["security"] = [{accepted["security"]: []}]
         paths.setdefault(path, {})[method.lower()] = operation
     return paths
 

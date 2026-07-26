@@ -890,6 +890,11 @@
             "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
         "x-platformgo-contract-status": "phase3-accepted-runtime"
       }
     },
@@ -989,6 +994,11 @@
             "description": "Dependency unavailable"
           }
         },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
         "x-platformgo-contract-status": "phase3-accepted-runtime"
       }
     },
