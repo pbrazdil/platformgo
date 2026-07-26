@@ -485,6 +485,40 @@ func TestImmediateFillRealtimeSequenceMatchesAuthoritativeViews(t *testing.T) {
 		t.Fatalf("clean realtime reconciliation report=%+v error=%v", report, err)
 	}
 	if _, err := pool.Exec(context.Background(), `
+		UPDATE realtime.publications
+		   SET claimed_at = clock_timestamp() + interval '1 day'
+		 WHERE channel = 'user:immediate-realtime'`); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		report, err := store.ReconcileShard(context.Background(), 29)
+		if err != nil || !report.Ready || report.RealtimeMismatchCount != 0 {
+			t.Fatalf(
+				"future lease reconciliation attempt %d report=%+v error=%v",
+				attempt,
+				report,
+				err,
+			)
+		}
+	}
+	var faultCount int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*)
+		  FROM engine.shard_faults
+		 WHERE shard_id = 29`,
+	).Scan(&faultCount); err != nil {
+		t.Fatal(err)
+	}
+	if faultCount != 0 {
+		t.Fatalf("future operational lease created %d durable shard faults", faultCount)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE realtime.publications
+		   SET claimed_at = NULL
+		 WHERE channel = 'user:immediate-realtime'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `
 		UPDATE realtime.channel_sequences
 		   SET last_sequence = last_sequence + 1
 		 WHERE channel = 'user:immediate-realtime'`,

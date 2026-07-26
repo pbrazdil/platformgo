@@ -449,6 +449,766 @@ func TestEngineStorePersistsOrdersFillsPositionsAndEvents(t *testing.T) {
 	}
 }
 
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/trading/e2e_fills.rs:459
+//	test: saga_reconcile_settles_orphaned_order_from_fills
+//
+// Adaptations:
+//   - The current Go authority commits an order transition and its fills in one
+//     PostgreSQL transaction, so a separately committed orphan fill is not a
+//     valid runtime state and no repair saga is introduced.
+//   - The post-persist failpoint proves the transaction rolls both projections
+//     back before a retry commits them together.
+//   - Reconciliation detects an injected orphan state and fails closed instead
+//     of rewriting immutable economic history.
+//
+// Assertions preserved:
+//   - Before execution, the order remains non-terminal with no fill.
+//   - Once execution commits, the order is filled with its exact fill quantity.
+//   - Repeating the same execution does not settle or fill the order again.
+//
+// Strengthening:
+//   - Retry, duplicate delivery, restart recovery, and reconciliation are
+//     proved against PostgreSQL 17 at the actual engine-store boundary.
+func TestSagaReconcileSettlesOrphanedOrderFromFills(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).MigrateAndProvision(ctx, 52); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	store := platformpostgres.NewEngineStore(pool)
+	state := engine.NewState(52)
+	ids := testkit.NewShardIDSequence(52)
+	clock := testkit.NewManualClock(
+		engine.NewLogicalTime(time.Date(
+			2026,
+			time.July,
+			26,
+			14,
+			0,
+			0,
+			123456789,
+			time.UTC,
+		)),
+	)
+	apply := func(action engine.TradingAction) engine.Decision {
+		var decision engine.Decision
+		state, decision, _, _ = applyStoredTrading(
+			t,
+			pool,
+			store,
+			state,
+			ids,
+			clock,
+			action,
+			platformpostgres.ApplyOptions{},
+		)
+		return decision
+	}
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionConfigureInstrument,
+		ConfigureInstrument: &engine.ConfigureInstrument{
+			InstrumentID:            "BTC-PERP",
+			Revision:                1,
+			PriceScale:              2,
+			QuantityScale:           3,
+			SettlementCurrency:      "USDC",
+			SettlementCurrencyScale: 2,
+			InitialMarginRate:       "0.1",
+			MaintenanceMarginRate:   "0.05",
+			MaxLeverage:             "10",
+			MakerFeeRate:            "0.5",
+			TakerFeeRate:            "0.5",
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "account-atomic-fill",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionAdjustBalance,
+		AdjustBalance: &engine.AdjustBalance{
+			AccountID:     "account-atomic-fill",
+			Currency:      "USDC",
+			CurrencyScale: 2,
+			Operation:     engine.BalanceOperationDeposit,
+			Amount:        "1000",
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionUpdateBook,
+		UpdateBook: &engine.UpdateBook{
+			InstrumentID: "BTC-PERP",
+			MarkPrice:    "100",
+			Bids:         []engine.BookLevel{{Price: "99", Quantity: "10"}},
+			Asks:         []engine.BookLevel{{Price: "110", Quantity: "10"}},
+		},
+	})
+
+	orderID := engine.IDFromSequence(engine.ID{}, 5201)
+	submitted := apply(engine.TradingAction{
+		Kind: engine.TradingActionSubmitOrder,
+		SubmitOrder: &engine.SubmitOrder{
+			OrderID:      orderID,
+			AccountID:    "account-atomic-fill",
+			InstrumentID: "BTC-PERP",
+			Side:         engine.SideBuy,
+			Type:         engine.OrderTypeLimit,
+			TimeInForce:  engine.TimeInForceGTC,
+			Quantity:     "0.01",
+			Price:        "100",
+		},
+	})
+	if len(submitted.OrderChanges) != 1 ||
+		submitted.OrderChanges[0].Status != engine.OrderStatusWorking ||
+		submitted.OrderChanges[0].FilledQuantity != "0" ||
+		len(submitted.Fills) != 0 ||
+		len(submitted.BalanceChanges) != 1 ||
+		submitted.BalanceChanges[0].Total != "1000" ||
+		submitted.BalanceChanges[0].Used != "0.51" ||
+		submitted.BalanceChanges[0].Free != "999.49" ||
+		submitted.BalanceChanges[0].Equity != "1000" {
+		t.Fatalf("resting order decision = %+v", submitted)
+	}
+	beforeExecutionBalance, ok := state.Balance("account-atomic-fill", "USDC")
+	if !ok || beforeExecutionBalance != submitted.BalanceChanges[0] {
+		t.Fatalf(
+			"balance before execution = %#v found %t, want %#v",
+			beforeExecutionBalance,
+			ok,
+			submitted.BalanceChanges[0],
+		)
+	}
+	assertPersistedBalanceMatches(t, pool, beforeExecutionBalance)
+	assertRowCount(t, pool, "trading.orders", 1)
+	assertRowCount(t, pool, "trading.fills", 0)
+	assertRowCount(t, pool, "ledger.transactions", 1)
+	assertRowCount(t, pool, "ledger.entries", 2)
+	assertPersistedOrderExecution(
+		t,
+		pool,
+		orderID,
+		string(engine.OrderStatusWorking),
+		"0",
+		"0",
+	)
+
+	executionAction := engine.TradingAction{
+		Kind: engine.TradingActionUpdateBook,
+		UpdateBook: &engine.UpdateBook{
+			InstrumentID: "BTC-PERP",
+			MarkPrice:    "100",
+			Bids:         []engine.BookLevel{{Price: "99", Quantity: "10"}},
+			Asks:         []engine.BookLevel{{Price: "100", Quantity: "10"}},
+		},
+	}
+	executionInput := nextStoredInput(t, state, ids, clock, executionAction)
+	beforeFaultHash := state.Hash()
+	faultedState, _, duplicate, err := store.ApplyTrading(
+		ctx,
+		state,
+		executionInput,
+		executionAction,
+		platformpostgres.ApplyOptions{
+			Faults: testkit.NewFaults(
+				platformpostgres.FailpointAfterPersistBeforeCommit,
+			),
+		},
+	)
+	if !errors.Is(err, platformpostgres.ErrInjectedFault) {
+		t.Fatalf("faulted execution error = %v, want ErrInjectedFault", err)
+	}
+	if duplicate || faultedState.Hash() != beforeFaultHash {
+		t.Fatalf(
+			"faulted execution = duplicate %t hash %s, want false %s",
+			duplicate,
+			faultedState.Hash(),
+			beforeFaultHash,
+		)
+	}
+	assertRowCount(t, pool, "trading.fills", 0)
+	assertRowCount(t, pool, "trading.positions", 0)
+	assertRowCount(t, pool, "ledger.transactions", 1)
+	assertRowCount(t, pool, "ledger.entries", 2)
+	assertPersistedBalanceMatches(t, pool, beforeExecutionBalance)
+	assertPersistedOrderExecution(
+		t,
+		pool,
+		orderID,
+		string(engine.OrderStatusWorking),
+		"0",
+		"0",
+	)
+
+	restartedStore := platformpostgres.NewEngineStore(pool)
+	restartedState, err := restartedStore.RecoverTradingState(ctx, 52)
+	if err != nil {
+		t.Fatalf("recover after pre-commit process loss: %v", err)
+	}
+	restartedOrder, ok := restartedState.Order(orderID)
+	if restartedState.Hash() != state.Hash() ||
+		!restartedState.Ready() ||
+		!ok ||
+		restartedOrder.Status != engine.OrderStatusWorking ||
+		restartedOrder.FilledQuantity != "0" ||
+		len(restartedState.FillsForOrder(orderID)) != 0 {
+		t.Fatalf(
+			"pre-commit restart = hash %s ready %t order %+v found %t fills %d",
+			restartedState.Hash(),
+			restartedState.Ready(),
+			restartedOrder,
+			ok,
+			len(restartedState.FillsForOrder(orderID)),
+		)
+	}
+	store = restartedStore
+	state = restartedState
+
+	var execution engine.Decision
+	state, execution, _, duplicate = applyStoredInput(
+		t,
+		pool,
+		store,
+		state,
+		executionInput,
+		executionAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if duplicate ||
+		len(execution.OrderChanges) != 1 ||
+		execution.OrderChanges[0].Status != engine.OrderStatusFilled ||
+		execution.OrderChanges[0].FilledQuantity != "0.01" ||
+		len(execution.Fills) != 1 ||
+		execution.Fills[0].Price != "100" ||
+		execution.Fills[0].Quantity != "0.01" ||
+		execution.Fills[0].LiquiditySide != engine.LiquiditySideMaker ||
+		execution.Fills[0].Fee != "0.5" ||
+		execution.Fills[0].FeeCurrency != "USDC" ||
+		len(execution.BalanceChanges) != 1 ||
+		execution.BalanceChanges[0].Total != "999.5" ||
+		execution.BalanceChanges[0].Used != "0.01" ||
+		execution.BalanceChanges[0].Free != "999.49" ||
+		execution.BalanceChanges[0].Equity != "999.5" ||
+		len(execution.LedgerChanges) != 1 ||
+		len(execution.LedgerChanges[0].Entries) != 2 {
+		t.Fatalf("retried execution = duplicate %t decision %+v", duplicate, execution)
+	}
+	afterExecutionBalance, ok := state.Balance("account-atomic-fill", "USDC")
+	if !ok || afterExecutionBalance != execution.BalanceChanges[0] {
+		t.Fatalf(
+			"balance after execution = %#v found %t, want %#v",
+			afterExecutionBalance,
+			ok,
+			execution.BalanceChanges[0],
+		)
+	}
+	assertPersistedBalanceMatches(t, pool, afterExecutionBalance)
+	assertRowCount(t, pool, "trading.fills", 1)
+	assertRowCount(t, pool, "trading.positions", 1)
+	assertRowCount(t, pool, "ledger.transactions", 2)
+	assertRowCount(t, pool, "ledger.entries", 4)
+	assertExactFillLedger(
+		t,
+		pool,
+		executionInput,
+		execution.LedgerChanges[0],
+	)
+	assertPersistedOrderExecution(
+		t,
+		pool,
+		orderID,
+		string(engine.OrderStatusFilled),
+		"0.01",
+		"100",
+	)
+	settledProjection := readPersistedFillSettlement(
+		t,
+		pool,
+		orderID,
+		executionInput.InputID,
+	)
+	assertPersistedFillSettlement(t, settledProjection)
+
+	replayedState, replayedDecision, duplicate, err := store.ApplyTrading(
+		ctx,
+		state,
+		executionInput,
+		executionAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if err != nil || !duplicate || replayedState.Hash() != state.Hash() {
+		t.Fatalf(
+			"same-sequence replay = duplicate %t hash %s, want %s, error %v",
+			duplicate,
+			replayedState.Hash(),
+			state.Hash(),
+			err,
+		)
+	}
+	if replayedDecision.DecisionHash != execution.DecisionHash {
+		t.Fatalf(
+			"replayed decision hash = %s, want %s",
+			replayedDecision.DecisionHash,
+			execution.DecisionHash,
+		)
+	}
+	if replayedProjection := readPersistedFillSettlement(
+		t,
+		pool,
+		orderID,
+		executionInput.InputID,
+	); replayedProjection != settledProjection {
+		t.Fatalf(
+			"same-sequence replay changed settlement:\n got %#v\nwant %#v",
+			replayedProjection,
+			settledProjection,
+		)
+	}
+	assertRowCount(t, pool, "engine.input_receipts", 6)
+	assertRowCount(t, pool, "engine.duplicate_delivery_receipts", 0)
+
+	republishedInput := executionInput
+	republishedInput.StreamSequence = state.NextStreamSequence()
+	republishedState, republishedDecision, duplicate, err := store.ApplyTrading(
+		ctx,
+		state,
+		republishedInput,
+		executionAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if err != nil ||
+		!duplicate ||
+		republishedState.NextStreamSequence() != state.NextStreamSequence()+1 ||
+		republishedDecision.DuplicateOfDecisionHash != execution.DecisionHash {
+		t.Fatalf(
+			"republished duplicate = duplicate %t state sequence %d want %d decision %+v error %v",
+			duplicate,
+			republishedState.NextStreamSequence(),
+			state.NextStreamSequence()+1,
+			republishedDecision,
+			err,
+		)
+	}
+	state = republishedState
+	if republishedProjection := readPersistedFillSettlement(
+		t,
+		pool,
+		orderID,
+		executionInput.InputID,
+	); republishedProjection != settledProjection {
+		t.Fatalf(
+			"republished duplicate changed settlement:\n got %#v\nwant %#v",
+			republishedProjection,
+			settledProjection,
+		)
+	}
+	assertRowCount(t, pool, "engine.input_receipts", 6)
+	assertRowCount(t, pool, "engine.duplicate_delivery_receipts", 1)
+	assertRowCount(t, pool, "trading.fills", 1)
+	assertRowCount(t, pool, "trading.positions", 1)
+	assertRowCount(t, pool, "ledger.transactions", 2)
+	assertRowCount(t, pool, "ledger.entries", 4)
+	assertPersistedBalanceMatches(t, pool, afterExecutionBalance)
+
+	recovered, err := store.RecoverTradingState(ctx, 52)
+	if err != nil {
+		t.Fatalf("RecoverTradingState: %v", err)
+	}
+	recoveredOrder, ok := recovered.Order(orderID)
+	if recovered.Hash() != state.Hash() ||
+		!ok ||
+		recoveredOrder.Status != engine.OrderStatusFilled ||
+		recoveredOrder.FilledQuantity != "0.01" ||
+		len(recovered.FillsForOrder(orderID)) != 1 ||
+		recovered.FillsForOrder(orderID)[0].Fee != "0.5" {
+		t.Fatalf(
+			"recovered state = hash %s order %+v found %t fills %d",
+			recovered.Hash(),
+			recoveredOrder,
+			ok,
+			len(recovered.FillsForOrder(orderID)),
+		)
+	}
+	report, err := store.ReconcileShard(ctx, 52)
+	if err != nil || !report.Ready || report.OrderFillMismatchCount != 0 {
+		t.Fatalf("settled reconciliation = %+v, error %v", report, err)
+	}
+
+	corruptAsReplicationAuthority(t, pool, `
+		UPDATE trading.orders
+		   SET status = 'working',
+		       filled_quantity = 0,
+		       average_fill_price = 0
+		 WHERE order_id = $1`,
+		orderID.String(),
+	)
+	report, err = store.ReconcileShard(ctx, 52)
+	if !errors.Is(err, platformpostgres.ErrReconciliationMismatch) {
+		t.Fatalf(
+			"orphan reconciliation error = %v, want ErrReconciliationMismatch",
+			err,
+		)
+	}
+	if report.Ready || report.OrderFillMismatchCount == 0 {
+		t.Fatalf("orphan reconciliation report = %+v", report)
+	}
+	assertRowCount(t, pool, "trading.fills", 1)
+	assertRowCount(t, pool, "trading.positions", 1)
+	assertRowCount(t, pool, "ledger.transactions", 2)
+	assertRowCount(t, pool, "ledger.entries", 4)
+	assertPersistedBalanceMatches(t, pool, afterExecutionBalance)
+	if orphanProjection := readPersistedFillSettlement(
+		t,
+		pool,
+		orderID,
+		executionInput.InputID,
+	); orphanProjection.fillID != settledProjection.fillID ||
+		orphanProjection.positionID != settledProjection.positionID ||
+		orphanProjection.fee != settledProjection.fee ||
+		orphanProjection.balanceTotal != settledProjection.balanceTotal ||
+		orphanProjection.ledgerTransactionID != settledProjection.ledgerTransactionID {
+		t.Fatalf(
+			"orphan reconciliation changed economic facts:\n got %#v\nwant %#v",
+			orphanProjection,
+			settledProjection,
+		)
+	}
+	assertPersistedOrderExecution(
+		t,
+		pool,
+		orderID,
+		string(engine.OrderStatusWorking),
+		"0",
+		"0",
+	)
+}
+
+type persistedFillSettlement struct {
+	orderStatus           string
+	orderFilledQuantity   string
+	orderAveragePrice     string
+	orderVersion          uint64
+	fillID                string
+	fillPositionID        string
+	fillSide              string
+	fillPrice             string
+	fillQuantity          string
+	fillPositionEffect    string
+	fillRealizedPnL       string
+	fillCurrency          string
+	fillLiquiditySide     string
+	fee                   string
+	feeCurrency           string
+	positionID            string
+	positionSide          string
+	positionStatus        string
+	positionQuantity      string
+	positionAveragePrice  string
+	positionRealizedPnL   string
+	positionCurrency      string
+	positionMarginMode    string
+	positionCollateral    string
+	positionVersion       uint64
+	balanceTotal          string
+	balanceUsed           string
+	balanceFree           string
+	balanceEquity         string
+	ledgerTransactionID   string
+	ledgerBusinessKey     string
+	ledgerTransactionRows int
+	ledgerEntryRows       int
+	domainOutboxRows      int
+}
+
+func readPersistedFillSettlement(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	orderID engine.ID,
+	inputID engine.ID,
+) persistedFillSettlement {
+	t.Helper()
+	var got persistedFillSettlement
+	if err := pool.QueryRow(context.Background(), `
+		SELECT orders.status,
+		       trim_scale(orders.filled_quantity)::text,
+		       trim_scale(orders.average_fill_price)::text,
+		       orders.version,
+		       fills.fill_id::text,
+		       fills.position_id::text,
+		       fills.side,
+		       trim_scale(fills.price)::text,
+		       trim_scale(fills.quantity)::text,
+		       fills.position_effect,
+		       COALESCE(trim_scale(fills.realized_pnl)::text, ''),
+		       COALESCE(fills.settlement_currency, ''),
+		       fills.liquidity_side,
+		       COALESCE(trim_scale(fills.fee)::text, ''),
+		       COALESCE(fills.fee_currency, ''),
+		       positions.position_id::text,
+		       positions.side,
+		       positions.status,
+		       trim_scale(positions.signed_quantity)::text,
+		       trim_scale(positions.average_open_price)::text,
+		       trim_scale(positions.realized_pnl)::text,
+		       positions.settlement_currency,
+		       positions.margin_mode,
+		       trim_scale(positions.isolated_collateral)::text,
+		       positions.version,
+		       trim_scale(balances.total)::text,
+		       trim_scale(balances.used)::text,
+		       trim_scale(balances.free)::text,
+		       trim_scale(balances.equity)::text,
+		       transactions.transaction_id::text,
+		       transactions.business_key,
+		       (SELECT count(*) FROM ledger.transactions),
+		       (SELECT count(*) FROM ledger.entries),
+		       (SELECT count(*)
+		          FROM messaging.outbox
+		         WHERE subject LIKE 'domain.v1.%')
+		  FROM trading.orders AS orders
+		  JOIN trading.fills AS fills
+		    ON fills.order_id = orders.order_id
+		  JOIN trading.positions AS positions
+		    ON positions.position_id = fills.position_id
+		  JOIN ledger.balances AS balances
+		    ON balances.account_id = orders.account_id
+		   AND balances.currency = 'USDC'
+		  JOIN ledger.transactions AS transactions
+		    ON transactions.input_id = $2
+		 WHERE orders.order_id = $1`,
+		orderID.String(),
+		inputID.String(),
+	).Scan(
+		&got.orderStatus,
+		&got.orderFilledQuantity,
+		&got.orderAveragePrice,
+		&got.orderVersion,
+		&got.fillID,
+		&got.fillPositionID,
+		&got.fillSide,
+		&got.fillPrice,
+		&got.fillQuantity,
+		&got.fillPositionEffect,
+		&got.fillRealizedPnL,
+		&got.fillCurrency,
+		&got.fillLiquiditySide,
+		&got.fee,
+		&got.feeCurrency,
+		&got.positionID,
+		&got.positionSide,
+		&got.positionStatus,
+		&got.positionQuantity,
+		&got.positionAveragePrice,
+		&got.positionRealizedPnL,
+		&got.positionCurrency,
+		&got.positionMarginMode,
+		&got.positionCollateral,
+		&got.positionVersion,
+		&got.balanceTotal,
+		&got.balanceUsed,
+		&got.balanceFree,
+		&got.balanceEquity,
+		&got.ledgerTransactionID,
+		&got.ledgerBusinessKey,
+		&got.ledgerTransactionRows,
+		&got.ledgerEntryRows,
+		&got.domainOutboxRows,
+	); err != nil {
+		t.Fatalf("read persisted fill settlement: %v", err)
+	}
+	return got
+}
+
+func assertPersistedFillSettlement(
+	t *testing.T,
+	got persistedFillSettlement,
+) {
+	t.Helper()
+	if got.orderStatus != string(engine.OrderStatusFilled) ||
+		got.orderFilledQuantity != "0.01" ||
+		got.orderAveragePrice != "100" ||
+		got.orderVersion != 2 ||
+		got.fillID == "" ||
+		got.fillPositionID == "" ||
+		got.fillSide != string(engine.SideBuy) ||
+		got.fillPrice != "100" ||
+		got.fillQuantity != "0.01" ||
+		got.fillPositionEffect != string(engine.PositionEffectOpen) ||
+		got.fillRealizedPnL != "" ||
+		got.fillCurrency != "" ||
+		got.fillLiquiditySide != string(engine.LiquiditySideMaker) ||
+		got.fee != "0.5" ||
+		got.feeCurrency != "USDC" ||
+		got.positionID != got.fillPositionID ||
+		got.positionSide != string(engine.PositionSideLong) ||
+		got.positionStatus != string(engine.PositionStatusOpen) ||
+		got.positionQuantity != "0.01" ||
+		got.positionAveragePrice != "100" ||
+		got.positionRealizedPnL != "0" ||
+		got.positionCurrency != "USDC" ||
+		got.positionMarginMode != string(engine.MarginModeCross) ||
+		got.positionCollateral != "0" ||
+		got.positionVersion != 1 ||
+		got.balanceTotal != "999.5" ||
+		got.balanceUsed != "0.01" ||
+		got.balanceFree != "999.49" ||
+		got.balanceEquity != "999.5" ||
+		got.ledgerTransactionID == "" ||
+		got.ledgerBusinessKey == "" ||
+		got.ledgerTransactionRows != 2 ||
+		got.ledgerEntryRows != 4 ||
+		got.domainOutboxRows == 0 {
+		t.Fatalf("persisted fill settlement = %#v", got)
+	}
+}
+
+func assertExactFillLedger(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	input engine.InputEnvelope,
+	change engine.LedgerTransactionSnapshot,
+) {
+	t.Helper()
+	wantBusinessKey := fmt.Sprintf(
+		"balance:%s:account-atomic-fill:USDC",
+		input.InputID,
+	)
+	if change.InputID != input.InputID ||
+		change.BusinessKey != wantBusinessKey ||
+		len(change.Entries) != 2 ||
+		change.Entries[0].AccountID != "account-atomic-fill" ||
+		change.Entries[0].Currency != "USDC" ||
+		change.Entries[0].Amount != "-0.5" ||
+		change.Entries[1].AccountID != engine.SystemClearingAccount ||
+		change.Entries[1].Currency != "USDC" ||
+		change.Entries[1].Amount != "0.5" {
+		t.Fatalf("exact fill ledger change = %#v", change)
+	}
+
+	var transactionID string
+	var businessKey string
+	var persistedInputID string
+	if err := pool.QueryRow(context.Background(), `
+		SELECT transaction_id::text, business_key, input_id::text
+		  FROM ledger.transactions
+		 WHERE input_id = $1`,
+		input.InputID.String(),
+	).Scan(&transactionID, &businessKey, &persistedInputID); err != nil {
+		t.Fatalf("read fill ledger transaction: %v", err)
+	}
+	if transactionID != change.TransactionID.String() ||
+		businessKey != wantBusinessKey ||
+		persistedInputID != input.InputID.String() {
+		t.Fatalf(
+			"persisted fill ledger transaction = (%s,%s,%s), want (%s,%s,%s)",
+			transactionID,
+			businessKey,
+			persistedInputID,
+			change.TransactionID,
+			wantBusinessKey,
+			input.InputID,
+		)
+	}
+	rows, err := pool.Query(context.Background(), `
+		SELECT entry_id::text, account_id, currency, trim_scale(amount)::text
+		  FROM ledger.entries
+		 WHERE transaction_id = $1
+		 ORDER BY entry_id`,
+		transactionID,
+	)
+	if err != nil {
+		t.Fatalf("read fill ledger entries: %v", err)
+	}
+	defer rows.Close()
+	var entries []engine.LedgerEntrySnapshot
+	for rows.Next() {
+		var entry engine.LedgerEntrySnapshot
+		var entryID string
+		if err := rows.Scan(
+			&entryID,
+			&entry.AccountID,
+			&entry.Currency,
+			&entry.Amount,
+		); err != nil {
+			t.Fatalf("scan fill ledger entry: %v", err)
+		}
+		entry.EntryID, err = engine.ParseID(entryID)
+		if err != nil {
+			t.Fatalf("parse fill ledger entry ID: %v", err)
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate fill ledger entries: %v", err)
+	}
+	if len(entries) != len(change.Entries) {
+		t.Fatalf("persisted fill ledger entries = %#v, want %#v", entries, change.Entries)
+	}
+	persistedByID := make(map[string]engine.LedgerEntrySnapshot, len(entries))
+	for _, entry := range entries {
+		persistedByID[entry.EntryID.String()] = entry
+	}
+	for index, want := range change.Entries {
+		got, ok := persistedByID[want.EntryID.String()]
+		if !ok || got != want {
+			t.Fatalf(
+				"persisted fill ledger entry %d = %#v found %t, want %#v",
+				index,
+				got,
+				ok,
+				want,
+			)
+		}
+	}
+}
+
+func assertPersistedOrderExecution(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	orderID engine.ID,
+	wantStatus string,
+	wantFilledQuantity string,
+	wantAverageFillPrice string,
+) {
+	t.Helper()
+	var status string
+	var filledQuantity string
+	var averageFillPrice string
+	if err := pool.QueryRow(context.Background(), `
+		SELECT status,
+		       trim_scale(filled_quantity)::text,
+		       trim_scale(average_fill_price)::text
+		  FROM trading.orders
+		 WHERE order_id = $1`,
+		orderID.String(),
+	).Scan(&status, &filledQuantity, &averageFillPrice); err != nil {
+		t.Fatalf("read persisted order execution: %v", err)
+	}
+	if status != wantStatus ||
+		filledQuantity != wantFilledQuantity ||
+		averageFillPrice != wantAverageFillPrice {
+		t.Fatalf(
+			"persisted order execution = (%s,%s,%s), want (%s,%s,%s)",
+			status,
+			filledQuantity,
+			averageFillPrice,
+			wantStatus,
+			wantFilledQuantity,
+			wantAverageFillPrice,
+		)
+	}
+}
+
 func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 	tests := []struct {
 		name       string
