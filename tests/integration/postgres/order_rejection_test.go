@@ -32,11 +32,13 @@ import (
 //   - The admitted order has no rejection reason before rejection.
 //   - Rejection makes the order terminal and persists the exact reason.
 //   - A later rejection opportunity cannot re-reject the terminal order,
-//     rewrite its reason, or change its durable version.
+//     or rewrite its reason.
 //
 // Strengthening:
 //   - Restart recovery must reproduce the ready canonical engine state before
 //     terminal no-rewrite behavior is checked.
+//   - The durable order version must also remain unchanged after the later
+//     market input.
 //   - The frozen external order contract remains unchanged.
 func TestRejectedOrderPersistsReason(t *testing.T) {
 	ctx := context.Background()
