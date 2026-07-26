@@ -46,6 +46,47 @@ clients to reload authoritative snapshots. Database rollback means restoring
 the pre-migration backup during the halted window, not editing or reversing an
 applied migration.
 
+### Phase 3 balance-projection hash v3 upgrade
+
+Migration `20260726000800_phase3_balance_projection_hash_v3.up.sql` introduces
+a no-overlap engine boundary:
+
+1. Enter halt, drain the old engine singleton, and prove its ownership and
+   current transaction have ended.
+2. Record the candidate artifact digest and take a complete, restore-verified
+   backup/PITR boundary containing application state, immutable receipts,
+   checkpoints, and `schema_migrations`.
+3. Run the new-image migrator. It locks `trading.instruments`,
+   `market.books`, `engine.input_receipts`, and
+   `engine.duplicate_delivery_receipts` in writer-compatible order under a
+   two-second lock timeout and a thirty-second statement timeout.
+4. Treat SQLSTATE `55000`, a timeout, or any migration error as a failed
+   cutover. Keep writers halted. The transaction leaves the old schema and
+   history intact; preserve the database and resolve malformed or incomplete
+   history through an owner-reviewed forward repair or a complete restore.
+5. After a successful commit, start only the new engine image. New business
+   and duplicate receipts are fenced to decision-hash v3, so an old engine
+   must not be restarted against the upgraded database.
+6. Verify engine recovery, checkpoint and decision/state hashes, the
+   append-only currency-scale registry, exact balance projections, order
+   reservations, nullable markless books, and zero reconciliation mismatches
+   before leaving halt.
+
+`trading.currency_scales` retains every historically accepted currency
+code/scale binding even after the current instrument catalog changes. Update,
+delete, and truncate are forbidden, including for the table owner; runtime
+roles have no mutation grant. A scale conflict, malformed registry/history,
+or disagreement between replay and durable projections makes readiness false.
+Do not repair these facts in place.
+
+After the migration commits, operational rollback is a reviewed forward fix
+with trading halted. If an owner authorizes full rollback, stop every writer
+and restore the complete database to the recorded pre-migration boundary
+before deploying the prior binary; then run full reconciliation. Never
+selectively restore tables, edit an applied migration, or run an old binary
+against the v3 schema. Any facts accepted after the boundary are lost by a
+full restore and require the normal disaster-recovery decision.
+
 ### Realtime quarantine repair
 
 A permanent error or ten transient/ambiguous failures quarantines the channel
