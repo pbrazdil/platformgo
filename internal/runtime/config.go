@@ -3,11 +3,13 @@ package runtime
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +25,8 @@ const (
 	defaultHealthAddress = "0.0.0.0:8081"
 )
 
+var apiKeyReplayKeyID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
 // Config is the deployment-role configuration loaded from frozen environment
 // keys. Secrets are never included in its formatted errors.
 type Config struct {
@@ -35,6 +39,9 @@ type Config struct {
 	AllowedOrigin         string
 	TrustedProxies        []netip.Prefix
 	ClientTokenSecret     []byte
+	APIKeyReplayKeys      []APIKeyReplayKey
+	APIKeyReplayActiveID  string
+	LegacyAPIKeyPolicy    LegacyAPIKeyPolicy
 	BrokerCredentials     []edge.BrokerCredential
 	CentrifugoAPIURL      string
 	CentrifugoAPIKey      string
@@ -50,6 +57,27 @@ type brokerEnvironment struct {
 	Scopes      []string `json:"scopes"`
 	IPAllowlist []string `json:"ipAllowlist"`
 	ExpiresAt   string   `json:"expiresAt"`
+}
+
+// APIKeyReplayKey is one externally supplied AES-256-GCM replay key. The first
+// entry is active; following entries remain available during rotation.
+type APIKeyReplayKey struct {
+	ID  string
+	Key [32]byte
+}
+
+// LegacyAPIKeyPolicy preserves source deployment inputs at the cutover into
+// PostgreSQL authority. A configured mismatch fails readiness closed.
+type LegacyAPIKeyPolicy struct {
+	MaxActivePerOwner    *int64
+	RateLimitMaxRequests *uint64
+	RateLimitWindowSecs  *uint64
+	IdempotencyTTLSecs   *uint64
+}
+
+type apiKeyReplayEnvironment struct {
+	ID  string `json:"id"`
+	Key string `json:"key"`
 }
 
 // LoadConfig reads the Phase 3 deployment environment.
@@ -78,6 +106,38 @@ func loadConfig(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	replayKeys, err := parseAPIKeyReplayKeys(
+		getenv("UZO_AUTH_API_KEY_REPLAY_KEYS"),
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	activeReplayKeyID := strings.TrimSpace(
+		getenv("UZO_AUTH_API_KEY_REPLAY_ACTIVE_KEY_ID"),
+	)
+	if len(replayKeys) > 1 && activeReplayKeyID == "" {
+		return Config{}, errors.New(
+			"UZO_AUTH_API_KEY_REPLAY_ACTIVE_KEY_ID is required with multiple replay keys",
+		)
+	}
+	if activeReplayKeyID == "" && len(replayKeys) == 1 {
+		activeReplayKeyID = replayKeys[0].ID
+	}
+	if activeReplayKeyID != "" {
+		found := false
+		for _, replayKey := range replayKeys {
+			found = found || replayKey.ID == activeReplayKeyID
+		}
+		if !found {
+			return Config{}, errors.New(
+				"UZO_AUTH_API_KEY_REPLAY_ACTIVE_KEY_ID is not present in the replay keyring",
+			)
+		}
+	}
+	legacyPolicy, err := loadLegacyAPIKeyPolicy(getenv)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		DatabaseURL:           getenv("UZO_DATABASE_URL"),
 		NATSURL:               getenv("UZO_NATS_URL"),
@@ -88,6 +148,9 @@ func loadConfig(getenv func(string) string) (Config, error) {
 		AllowedOrigin:         valueOrDefault(getenv, "UZO_CORS_ALLOWED_ORIGINS", "*"),
 		TrustedProxies:        trustedProxies,
 		ClientTokenSecret:     []byte(getenv("UZO_AUTH_CLIENT_TOKEN_SECRET")),
+		APIKeyReplayKeys:      replayKeys,
+		APIKeyReplayActiveID:  activeReplayKeyID,
+		LegacyAPIKeyPolicy:    legacyPolicy,
 		BrokerCredentials:     brokers,
 		CentrifugoAPIURL:      getenv("UZO_REALTIME_API_URL"),
 		CentrifugoAPIKey:      getenv("UZO_REALTIME_API_KEY"),
@@ -95,6 +158,93 @@ func loadConfig(getenv func(string) string) (Config, error) {
 		CentrifugoTokenTTL:    tokenTTL,
 		ShardID:               engine.ShardID(shard),
 	}, nil
+}
+
+func loadLegacyAPIKeyPolicy(
+	getenv func(string) string,
+) (LegacyAPIKeyPolicy, error) {
+	maxActive, err := optionalInt64(
+		getenv,
+		"UZO_AUTH_MAX_API_KEYS_PER_OWNER",
+	)
+	if err != nil {
+		return LegacyAPIKeyPolicy{}, err
+	}
+	rateMax, err := optionalUint64(
+		getenv,
+		"UZO_API_RATE_LIMIT_MAX_REQUESTS",
+	)
+	if err != nil {
+		return LegacyAPIKeyPolicy{}, err
+	}
+	if rateMax != nil && *rateMax > uint64(^uint32(0)) {
+		return LegacyAPIKeyPolicy{}, errors.New(
+			"UZO_API_RATE_LIMIT_MAX_REQUESTS must fit an unsigned 32-bit integer",
+		)
+	}
+	rateWindow, err := optionalUint64(
+		getenv,
+		"UZO_API_RATE_LIMIT_WINDOW_SECS",
+	)
+	if err != nil {
+		return LegacyAPIKeyPolicy{}, err
+	}
+	idempotencyTTL, err := optionalUint64(
+		getenv,
+		"UZO_API_IDEMPOTENCY_TTL_SECS",
+	)
+	if err != nil {
+		return LegacyAPIKeyPolicy{}, err
+	}
+	return LegacyAPIKeyPolicy{
+		MaxActivePerOwner:    maxActive,
+		RateLimitMaxRequests: rateMax,
+		RateLimitWindowSecs:  rateWindow,
+		IdempotencyTTLSecs:   idempotencyTTL,
+	}, nil
+}
+
+func parseAPIKeyReplayKeys(raw string) ([]APIKeyReplayKey, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var encoded []apiKeyReplayEnvironment
+	if err := json.Unmarshal([]byte(raw), &encoded); err != nil {
+		return nil, errors.New(
+			"UZO_AUTH_API_KEY_REPLAY_KEYS must be valid JSON",
+		)
+	}
+	keys := make([]APIKeyReplayKey, 0, len(encoded))
+	seen := make(map[string]struct{}, len(encoded))
+	for _, value := range encoded {
+		if !apiKeyReplayKeyID.MatchString(value.ID) {
+			return nil, errors.New(
+				"UZO_AUTH_API_KEY_REPLAY_KEYS contains an invalid key ID",
+			)
+		}
+		if _, exists := seen[value.ID]; exists {
+			return nil, errors.New(
+				"UZO_AUTH_API_KEY_REPLAY_KEYS contains a duplicate key ID",
+			)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(value.Key)
+		if err != nil || len(decoded) != 32 {
+			return nil, errors.New(
+				"UZO_AUTH_API_KEY_REPLAY_KEYS must contain base64 AES-256 keys",
+			)
+		}
+		var key APIKeyReplayKey
+		key.ID = value.ID
+		copy(key.Key[:], decoded)
+		keys = append(keys, key)
+		seen[value.ID] = struct{}{}
+	}
+	if len(keys) == 0 {
+		return nil, errors.New(
+			"UZO_AUTH_API_KEY_REPLAY_KEYS must contain at least one key",
+		)
+	}
+	return keys, nil
 }
 
 func parseTrustedProxies(value string) ([]netip.Prefix, error) {
@@ -213,6 +363,9 @@ func (config Config) ValidateFor(command string) error {
 	case "serve":
 		if len(config.ClientTokenSecret) < 32 {
 			missing = append(missing, "UZO_AUTH_CLIENT_TOKEN_SECRET")
+		}
+		if len(config.APIKeyReplayKeys) == 0 {
+			missing = append(missing, "UZO_AUTH_API_KEY_REPLAY_KEYS")
 		}
 		if config.CentrifugoAPIURL == "" {
 			missing = append(missing, "UZO_REALTIME_API_URL")
@@ -340,4 +493,34 @@ func unsignedValue(getenv func(string) string, name string, fallback uint64) (ui
 		return 0, fmt.Errorf("%s must be an unsigned integer", name)
 	}
 	return value, nil
+}
+
+func optionalUint64(
+	getenv func(string) string,
+	name string,
+) (*uint64, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return nil, nil
+	}
+	value, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("%s must be an unsigned integer", name)
+	}
+	return &value, nil
+}
+
+func optionalInt64(
+	getenv func(string) string,
+	name string,
+) (*int64, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return nil, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("%s must be a signed 64-bit integer", name)
+	}
+	return &value, nil
 }

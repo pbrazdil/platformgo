@@ -1,8 +1,11 @@
 package edge
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 // Audience identifies the externally visible authentication plane.
@@ -20,8 +23,24 @@ var (
 	ErrInvalidCredentials  = errors.New("invalid credentials")
 	ErrInvalidRequest      = errors.New("invalid request")
 	ErrNotFound            = errors.New("not found")
+	ErrConflict            = errors.New("conflict")
+	ErrRateLimited         = errors.New("rate limited")
 	ErrIdempotencyConflict = errors.New("idempotency key conflicts with another request")
 )
+
+// RateLimitError preserves the externally visible Retry-After value while
+// remaining comparable with ErrRateLimited through errors.Is.
+type RateLimitError struct {
+	RetryAfterSeconds uint64
+}
+
+func (err RateLimitError) Error() string {
+	return fmt.Sprintf("rate limited; retry after %d seconds", err.RetryAfterSeconds)
+}
+
+func (RateLimitError) Unwrap() error {
+	return ErrRateLimited
+}
 
 // Principal is the authenticated identity passed to application services.
 type Principal struct {
@@ -135,6 +154,51 @@ type LoginResponse struct {
 	RefreshToken string `json:"refreshToken"`
 }
 
+// CreateAPIKeyRequest is the client self-service credential request.
+type CreateAPIKeyRequest struct {
+	Name        string   `json:"name"`
+	Scopes      []string `json:"scopes"`
+	IPAllowlist []string `json:"ipAllowlist"`
+	TTLSeconds  *uint64  `json:"ttlSecs,omitempty"`
+	TenantID    *string  `json:"tenantId,omitempty"`
+}
+
+// UnmarshalJSON preserves the pinned Serde behavior: additive fields are
+// ignored, omitted vectors default empty, and explicit null vectors are
+// rejected.
+func (request *CreateAPIKeyRequest) UnmarshalJSON(data []byte) error {
+	type wireRequest CreateAPIKeyRequest
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, name := range []string{"scopes", "ipAllowlist"} {
+		if raw, ok := fields[name]; ok &&
+			bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return fmt.Errorf("%s must be an array", name)
+		}
+	}
+	var decoded wireRequest
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*request = CreateAPIKeyRequest(decoded)
+	return nil
+}
+
+// APIKeyCreated returns metadata plus the credential shown exactly once.
+type APIKeyCreated struct {
+	ID     string `json:"id"`
+	Prefix string `json:"prefix"`
+	Token  string `json:"token"`
+}
+
+// APIKeyAdmission is the exact immutable HTTP response for credential
+// creation or replay.
+type APIKeyAdmission struct {
+	Response StoredResponse
+}
+
 // UserProfile is the client-visible identity projection.
 type UserProfile struct {
 	UserID string `json:"userId"`
@@ -209,6 +273,14 @@ type IdentityService interface {
 	Login(context.Context, LoginRequest) (LoginResponse, error)
 	Profile(context.Context, Principal) (UserProfile, error)
 	MyAccounts(context.Context, Principal) ([]MyAccountView, error)
+	CheckClientRate(context.Context, Principal) error
+	CreateMyAPIKey(
+		context.Context,
+		Principal,
+		string,
+		string,
+		CreateAPIKeyRequest,
+	) (APIKeyAdmission, error)
 	BrokerEcho(
 		context.Context,
 		Principal,

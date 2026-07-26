@@ -1,6 +1,12 @@
 {
   "environmentKeys": [
     "UZO_AUTH_CLIENT_TOKEN_SECRET",
+    "UZO_AUTH_API_KEY_REPLAY_KEYS",
+    "UZO_AUTH_API_KEY_REPLAY_ACTIVE_KEY_ID",
+    "UZO_AUTH_MAX_API_KEYS_PER_OWNER",
+    "UZO_API_IDEMPOTENCY_TTL_SECS",
+    "UZO_API_RATE_LIMIT_MAX_REQUESTS",
+    "UZO_API_RATE_LIMIT_WINDOW_SECS",
     "UZO_BROKER_API_KEYS",
     "UZO_CORS_ALLOWED_ORIGINS",
     "UZO_DATABASE_URL",
@@ -20,7 +26,10 @@
     "UZO_REALTIME_TOKEN_SECRET",
     "UZO_REALTIME_TOKEN_TTL_SECS"
   ],
-  "intentionalDeviations": [],
+  "intentionalDeviations": [
+    "api-key-idempotent-resolution-precedes-rate-rejection",
+    "client-api-key-creation-requires-idempotency-key"
+  ],
   "implementedHTTPRoutes": [
     "GET /healthz",
     "GET /readyz",
@@ -30,6 +39,7 @@
     "POST /v1/auth/login",
     "GET /v1/me",
     "GET /v1/me/accounts",
+    "POST /v1/me/api-keys",
     "GET /v1/instruments",
     "POST /v1/me/realtime/token",
     "POST /v1/accounts/{accountId}/orders",
@@ -55,8 +65,8 @@
   },
   "openAPIArtifacts": {
     "openapi/admin-v1.json": "615e8a49f9e6a71f6a3ea0108bd71353bd5b7050cc79cee6b17d98af84a6aeb3",
-    "openapi/broker-v1.json": "f8bd15b8c0c9fee3069f779dcbf9ade2cea82e7583804999f6c3e117a91fdac6",
-    "openapi/client-v1.json": "eae3672aeaeddaab3c2d0f4de366154f9e96225923c94bb31cdcaac90c0079c0"
+    "openapi/broker-v1.json": "fa8e295fac856f566fb58239a3dcb10ae2288948a7d63131b6d6688d38101e0e",
+    "openapi/client-v1.json": "15e029fce613c3ce3f8bdc8d67d6d71eaf27de3e47862ea275838cb3739c82ac"
   },
   "platformSourceRevision": "50141367492be46ebf5623f6191a14b94af2f2bd",
   "protobufDescriptor": {

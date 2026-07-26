@@ -28,15 +28,17 @@ import (
 )
 
 const (
-	outboxBatchSize         = 100
-	outboxLease             = 30 * time.Second
-	outboxRetry             = time.Second
-	realtimeBatchSize       = 1
-	realtimeLease           = 30 * time.Second
-	realtimeRetry           = time.Second
-	realtimeMaxAttempts     = uint32(10)
-	realtimeFinalizeTimeout = 5 * time.Second
-	runtimeSchemaRevision   = "20260725001100_phase3_committed_realtime_outbox"
+	outboxBatchSize          = 100
+	outboxLease              = 30 * time.Second
+	outboxRetry              = time.Second
+	realtimeBatchSize        = 1
+	realtimeLease            = 30 * time.Second
+	realtimeRetry            = time.Second
+	realtimeMaxAttempts      = uint32(10)
+	realtimeFinalizeTimeout  = 5 * time.Second
+	apiKeyReplayCleanupBatch = 100
+	apiKeyReplayCleanupEvery = time.Minute
+	runtimeSchemaRevision    = "20260725001100_phase3_committed_realtime_outbox"
 )
 
 type databaseRuntimeRole string
@@ -125,14 +127,87 @@ func Serve(ctx context.Context, config Config) error {
 		return err
 	}
 	compatibilityStore := platformpostgres.NewCompatibilityStore(pool)
+	verifyAPIKeyPolicy := func(checkContext context.Context) error {
+		policy := config.LegacyAPIKeyPolicy
+		return compatibilityStore.VerifyAPIKeyPolicy(
+			checkContext,
+			policy.MaxActivePerOwner,
+			policy.RateLimitMaxRequests,
+			policy.RateLimitWindowSecs,
+			policy.IdempotencyTTLSecs,
+		)
+	}
+	verifyAPIKeyReplayCoverage := func(
+		checkContext context.Context,
+		logCoverage bool,
+	) error {
+		coverage, coverageErr := compatibilityStore.APIKeyReplayCoverage(
+			checkContext,
+		)
+		if coverageErr != nil {
+			return coverageErr
+		}
+		configured := make(map[string]struct{}, len(config.APIKeyReplayKeys))
+		for _, replayKey := range config.APIKeyReplayKeys {
+			configured[replayKey.ID] = struct{}{}
+		}
+		for _, item := range coverage {
+			if _, ok := configured[item.KeyID]; !ok {
+				return fmt.Errorf(
+					"live API-key replay requires unavailable key %q",
+					item.KeyID,
+				)
+			}
+		}
+		if logCoverage {
+			for _, replayKey := range config.APIKeyReplayKeys {
+				var (
+					liveCount int64
+					oldest    string
+				)
+				for _, item := range coverage {
+					if item.KeyID == replayKey.ID {
+						liveCount = item.LiveCount
+						oldest = item.OldestExpiresAt
+						break
+					}
+				}
+				slog.Info(
+					"API-key replay key coverage",
+					"key_id", replayKey.ID,
+					"live_count", liveCount,
+					"oldest_expires_at", oldest,
+				)
+			}
+		}
+		return nil
+	}
+	if verifyErr := verifyAPIKeyPolicy(ctx); verifyErr != nil {
+		return fmt.Errorf("serve: %w", verifyErr)
+	}
+	if _, purgeErr := compatibilityStore.PurgeExpiredAPIKeyReplays(
+		ctx,
+		apiKeyReplayCleanupBatch,
+	); purgeErr != nil {
+		return fmt.Errorf("serve: %w", purgeErr)
+	}
+	if coverageErr := verifyAPIKeyReplayCoverage(ctx, true); coverageErr != nil {
+		return fmt.Errorf("serve: %w", coverageErr)
+	}
 	postgresReady := func(checkContext context.Context) error {
 		if pingErr := pool.Ping(checkContext); pingErr != nil {
 			return pingErr
 		}
-		return compatibilityStore.RuntimeCommandReady(
+		if readyErr := compatibilityStore.RuntimeCommandReady(
 			checkContext,
 			config.ShardID,
-		)
+		); readyErr != nil {
+			return readyErr
+		}
+		if policyErr := verifyAPIKeyPolicy(checkContext); policyErr != nil {
+			return policyErr
+		}
+		return verifyAPIKeyReplayCoverage(checkContext, false)
 	}
 	natsReady := func(checkContext context.Context) error {
 		if flushErr := flushNATS(checkContext, natsConnection); flushErr != nil {
@@ -154,7 +229,13 @@ func Serve(ctx context.Context, config Config) error {
 	identityService, err := application.NewIdentity(
 		compatibilityStore,
 		authenticator,
-		application.IdentityConfig{CommandReadiness: commandReady},
+		application.IdentityConfig{
+			CommandReadiness: commandReady,
+			APIKeyReplayKeys: applicationReplayKeys(
+				config.APIKeyReplayKeys,
+			),
+			APIKeyReplayActiveKeyID: config.APIKeyReplayActiveID,
+		},
 	)
 	if err != nil {
 		return err
@@ -216,7 +297,9 @@ func Serve(ctx context.Context, config Config) error {
 		grpcServer,
 		edge.NewGRPCServer(authenticator, submission),
 	)
-	errorsChannel := make(chan error, 2)
+	errorsChannel := make(chan error, 3)
+	cleanupContext, cancelCleanup := context.WithCancel(ctx)
+	defer cancelCleanup()
 	go func() {
 		if serveErr := httpServer.Serve(restListener); !errors.Is(serveErr, http.ErrServerClosed) {
 			errorsChannel <- fmt.Errorf("serve REST: %w", serveErr)
@@ -225,6 +308,26 @@ func Serve(ctx context.Context, config Config) error {
 	go func() {
 		if serveErr := grpcServer.Serve(grpcListener); serveErr != nil {
 			errorsChannel <- fmt.Errorf("serve gRPC: %w", serveErr)
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(apiKeyReplayCleanupEvery)
+		defer ticker.Stop()
+		cleanupErr := runAPIKeyReplayCleanup(
+			cleanupContext,
+			ticker.C,
+			func(cleanupCallContext context.Context) (int64, error) {
+				return compatibilityStore.PurgeExpiredAPIKeyReplays(
+					cleanupCallContext,
+					apiKeyReplayCleanupBatch,
+				)
+			},
+			func(coverageContext context.Context) error {
+				return verifyAPIKeyReplayCoverage(coverageContext, true)
+			},
+		)
+		if cleanupErr != nil {
+			errorsChannel <- cleanupErr
 		}
 	}()
 
@@ -236,6 +339,48 @@ func Serve(ctx context.Context, config Config) error {
 	}
 	shutdownServers(ctx, httpServer, grpcServer)
 	return nil
+}
+
+func runAPIKeyReplayCleanup(
+	ctx context.Context,
+	ticks <-chan time.Time,
+	purge func(context.Context) (int64, error),
+	verifyCoverage func(context.Context) error,
+) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case _, ok := <-ticks:
+			if !ok {
+				return nil
+			}
+			deleted, err := purge(ctx)
+			if err != nil {
+				return fmt.Errorf("API-key replay cleanup: %w", err)
+			}
+			slog.Info(
+				"expired API-key replay cleanup completed",
+				"deleted", deleted,
+			)
+			if err := verifyCoverage(ctx); err != nil {
+				return fmt.Errorf("API-key replay coverage: %w", err)
+			}
+		}
+	}
+}
+
+func applicationReplayKeys(
+	configured []APIKeyReplayKey,
+) []application.APIKeyReplayKey {
+	keys := make([]application.APIKeyReplayKey, len(configured))
+	for index, configuredKey := range configured {
+		keys[index] = application.APIKeyReplayKey{
+			ID:  configuredKey.ID,
+			Key: configuredKey.Key,
+		}
+	}
+	return keys
 }
 
 // RunWorkers runs each requested compatible handler until cancellation.

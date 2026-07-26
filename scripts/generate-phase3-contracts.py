@@ -155,42 +155,50 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "success": "LoginResponse",
     },
     ("GET", "/v1/me"): {
-        "statuses": [200, 401, 404, 503],
+        "statuses": [200, 401, 404, 429, 503],
         "success": "UserProfile",
     },
     ("GET", "/v1/me/accounts"): {
-        "statuses": [200, 401, 503],
+        "statuses": [200, 401, 429, 503],
         "success_array": "MyAccountView",
         "security": "bearer",
+    },
+    ("POST", "/v1/me/api-keys"): {
+        "statuses": [201, 400, 401, 409, 429, 503],
+        "idempotency": True,
+        "request": "CreateAPIKeyRequest",
+        "success": "APIKeyCreated",
+        "security": "bearer",
+        "conflict_description": "Active API-key limit reached",
     },
     ("GET", "/v1/instruments"): {
         "statuses": [200, 503],
         "success_array": "InstrumentView",
     },
     ("POST", "/v1/me/realtime/token"): {
-        "statuses": [200, 401, 503],
+        "statuses": [200, 401, 429, 503],
         "success": "RealtimeToken",
     },
     ("POST", "/v1/accounts/{accountId}/orders"): {
-        "statuses": [202, 400, 401, 403, 409, 503],
+        "statuses": [202, 400, 401, 403, 409, 429, 503],
         "idempotency": True,
         "request": "SubmitOrderRequest",
         "success": "OrderAccepted",
     },
     ("GET", "/v1/accounts/{accountId}/orders"): {
-        "statuses": [200, 400, 401, 403, 503],
+        "statuses": [200, 400, 401, 403, 429, 503],
         "success_array": "OrderView",
     },
     ("GET", "/v1/accounts/{accountId}/positions"): {
-        "statuses": [200, 400, 401, 403, 503],
+        "statuses": [200, 400, 401, 403, 429, 503],
         "success_array": "PositionView",
     },
     ("GET", "/v1/accounts/{accountId}/balances"): {
-        "statuses": [200, 400, 401, 403, 503],
+        "statuses": [200, 400, 401, 403, 429, 503],
         "success_array": "BalanceView",
     },
     ("GET", "/v1/accounts/{accountId}/funding"): {
-        "statuses": [200, 400, 401, 403],
+        "statuses": [200, 400, 401, 403, 429],
         "success": "FundingPage",
         "success_description": "Funding history, newest first",
         "pagination": True,
@@ -235,6 +243,7 @@ def response(
         403: "Forbidden",
         404: "Not found",
         409: "Idempotency conflict",
+        429: "Rate limited",
         503: "Dependency unavailable",
     }
     value: dict[str, object] = {"description": descriptions[status]}
@@ -252,6 +261,16 @@ def response(
         value["content"] = {
             "application/json": {"schema": {"$ref": "#/components/schemas/Error"}}
         }
+        if status == 429:
+            value["headers"] = {
+                "Retry-After": {
+                    "required": False,
+                    "schema": {
+                        "type": "integer",
+                        "minimum": 1,
+                    },
+                }
+            }
     return value
 
 
@@ -287,6 +306,10 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                 operation["responses"]["200"]["description"] = accepted[
                     "success_description"
                 ]
+            if accepted.get("conflict_description") is not None:
+                operation["responses"]["409"]["description"] = accepted[
+                    "conflict_description"
+                ]
             operation["x-platformgo-contract-status"] = "phase3-accepted-runtime"
             request_schema = accepted.get("request")
             if request_schema is not None:
@@ -305,8 +328,13 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                 {
                     "name": "Idempotency-Key",
                     "in": "header",
-                    "required": False,
-                    "schema": {"type": "string"},
+                    "required": (
+                        method == "POST" and path == "/v1/me/api-keys"
+                    ),
+                    "schema": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
                 }
             ]
         if accepted is not None and accepted.get("pagination") is True:
@@ -374,6 +402,52 @@ def schemas(client: bool) -> dict[str, object]:
                 "refreshToken": {"type": "string"},
             },
         },
+        **({
+        "CreateAPIKeyRequest": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "scopes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                },
+                "ipAllowlist": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                },
+                "ttlSecs": {
+                    "type": ["integer", "null"],
+                    "minimum": 0,
+                },
+                "tenantId": {
+                    "type": ["string", "null"],
+                    "pattern": "^urn:xb:tenant:0*[0-9A-Za-z]{1,22}$",
+                    "description": "Standard-alphabet base62 value decodable as an unsigned 128-bit integer.",
+                },
+            },
+        },
+        "APIKeyCreated": {
+            "type": "object",
+            "required": ["id", "prefix", "token"],
+            "properties": {
+                "id": {"type": "string"},
+                "prefix": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{12}$",
+                },
+                "token": {
+                    "type": "string",
+                    "pattern": "^xbk_[0-9a-f]{12}\\.[0-9a-f]{48}$",
+                },
+            },
+        },
+        } if client else {}),
         "UserProfile": {
             "type": "object",
             "required": ["userId", "login", "email", "status"],

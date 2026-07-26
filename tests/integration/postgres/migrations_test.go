@@ -2979,6 +2979,555 @@ func TestAccountSummaryMigrationUsesBoundedLockAndPreservesExistingAccounts(
 	}
 }
 
+func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000600_phase3_account_summary_constraint_validation.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 47); err != nil {
+		t.Fatalf("apply previous API-key schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO identity.users (
+			user_id, login, normalized_login
+		) VALUES (
+			'urn:xb:user:key-upgrade', 'key-upgrade', 'key-upgrade'
+		)`,
+	); err != nil {
+		t.Fatalf("seed existing API-key owner: %v", err)
+	}
+
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin API-key migration blocker: %v", err)
+	}
+	defer func() { _ = blocker.Rollback(context.Background()) }()
+	if _, err := blocker.Exec(
+		ctx,
+		"LOCK TABLE identity.users IN SHARE MODE",
+	); err != nil {
+		t.Fatalf("lock identity users against API-key migration: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	startedAt := time.Now()
+	err = current.Migrate(ctx)
+	elapsed := time.Since(startedAt)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55P03" {
+		t.Fatalf(
+			"contended API-key migration error = %v, want SQLSTATE 55P03",
+			err,
+		)
+	}
+	if elapsed < 4*time.Second || elapsed > 8*time.Second {
+		t.Fatalf(
+			"bounded API-key migration wait = %s, want approximately 5s",
+			elapsed,
+		)
+	}
+	var (
+		lastMigration string
+		auditExists   bool
+		keysExist     bool
+		userCount     int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			EXISTS (
+				SELECT 1
+				  FROM information_schema.schemata
+				 WHERE schema_name = 'audit'
+			),
+			to_regclass('identity.api_keys') IS NOT NULL,
+			(
+				SELECT count(*)
+				  FROM identity.users
+				 WHERE user_id = 'urn:xb:user:key-upgrade'
+			)`,
+	).Scan(
+		&lastMigration,
+		&auditExists,
+		&keysExist,
+		&userCount,
+	); err != nil {
+		t.Fatalf("inspect rolled-back API-key migration: %v", err)
+	}
+	if lastMigration !=
+		"20260726000600_phase3_account_summary_constraint_validation.up.sql" ||
+		auditExists ||
+		keysExist ||
+		userCount != 1 {
+		t.Fatalf(
+			"contended API-key state = last %q audit %t keys %t users %d",
+			lastMigration,
+			auditExists,
+			keysExist,
+			userCount,
+		)
+	}
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry API-key migration: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify retried API-key migration: %v", err)
+	}
+	if err := platformpostgres.NewMigrator(pool, previous).
+		VerifyCurrent(ctx); !errors.Is(
+		err,
+		platformpostgres.ErrDatabaseSchemaAhead,
+	) {
+		t.Fatalf(
+			"prior binary verification after API-key migration = %v, want schema-ahead",
+			err,
+		)
+	}
+	assertFinalMigrationHistory(t, pool)
+
+	var (
+		apiCanInsert       bool
+		apiCanExecute      bool
+		apiCanReplay       bool
+		apiCanVerifyPolicy bool
+		apiCanPurgeReplay  bool
+		apiCanReadCoverage bool
+		apiCanUpdatePolicy bool
+		apiCanReadReplay   bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			has_table_privilege(
+				'platformgo_api',
+				'identity.api_keys',
+				'INSERT'
+			),
+				has_function_privilege(
+					'platformgo_api',
+					'identity.create_user_api_key(text,uuid,text,bytea,text,text[],uuid,text,bytea,bytea,text,bytea,bytea)',
+					'EXECUTE'
+				),
+				has_function_privilege(
+					'platformgo_api',
+					'identity.replay_user_api_key(text,bytea,bytea)',
+					'EXECUTE'
+				),
+				has_function_privilege(
+					'platformgo_api',
+					'identity.verify_api_key_policy(bigint,bigint,numeric,numeric)',
+					'EXECUTE'
+				),
+				has_function_privilege(
+					'platformgo_api',
+					'identity.purge_expired_api_key_replays(integer)',
+					'EXECUTE'
+				),
+				has_function_privilege(
+					'platformgo_api',
+					'identity.api_key_replay_coverage()',
+					'EXECUTE'
+				),
+				has_table_privilege(
+				'platformgo_api',
+				'identity.api_key_policy',
+				'UPDATE'
+			),
+			has_table_privilege(
+				'platformgo_api',
+				'identity.api_key_replays',
+				'SELECT'
+			)`,
+	).Scan(
+		&apiCanInsert,
+		&apiCanExecute,
+		&apiCanReplay,
+		&apiCanVerifyPolicy,
+		&apiCanPurgeReplay,
+		&apiCanReadCoverage,
+		&apiCanUpdatePolicy,
+		&apiCanReadReplay,
+	); err != nil {
+		t.Fatalf("inspect API-key role boundary: %v", err)
+	}
+	if apiCanInsert ||
+		!apiCanExecute ||
+		!apiCanReplay ||
+		!apiCanVerifyPolicy ||
+		!apiCanPurgeReplay ||
+		!apiCanReadCoverage ||
+		apiCanUpdatePolicy ||
+		apiCanReadReplay {
+		t.Fatalf(
+			"API-key role boundary = insert %t create %t replay %t verify %t purge %t coverage %t policy-update %t replay-read %t",
+			apiCanInsert,
+			apiCanExecute,
+			apiCanReplay,
+			apiCanVerifyPolicy,
+			apiCanPurgeReplay,
+			apiCanReadCoverage,
+			apiCanUpdatePolicy,
+			apiCanReadReplay,
+		)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE identity.api_key_policy
+		   SET max_active_per_owner = 26,
+		       client_rate_limit_max_requests = 4294967295,
+		       client_rate_limit_window_seconds = 18446744073709551615,
+		       idempotency_ttl_seconds = 18446744073709551615
+		 WHERE singleton`); err != nil {
+		t.Fatalf("set source-domain boundary policy: %v", err)
+	}
+	var boundaryPolicyMatches bool
+	if err := pool.QueryRow(ctx, `
+		SELECT identity.verify_api_key_policy(
+			26,
+			4294967295,
+			18446744073709551615,
+			18446744073709551615
+		)`,
+	).Scan(&boundaryPolicyMatches); err != nil || !boundaryPolicyMatches {
+		t.Fatalf(
+			"source-domain boundary policy = %t, error = %v",
+			boundaryPolicyMatches,
+			err,
+		)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE identity.api_key_policy
+		   SET version = 2,
+		       max_active_per_owner = 1,
+		       client_rate_limit_max_requests = 600,
+		       client_rate_limit_window_seconds = 60,
+		       idempotency_ttl_seconds = 86400
+		 WHERE singleton`); err != nil {
+		t.Fatalf("set durable API-key test policy: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		SELECT identity.create_user_api_key(
+			'urn:xb:user:key-upgrade',
+			'00000000-0000-4000-8000-000000000701',
+			'upgrade-key',
+			decode(repeat('01', 32), 'hex'),
+			'000000000701',
+			ARRAY['orders:write'],
+			'00000000-0000-4000-8000-000000000702',
+			'request-upgrade-key',
+			decode(repeat('09', 32), 'hex'),
+			decode(repeat('02', 32), 'hex'),
+			'test-v1',
+			decode(repeat('03', 12), 'hex'),
+			decode(repeat('04', 17), 'hex')
+		)`,
+	); err != nil {
+		t.Fatalf("create API key through authority function: %v", err)
+	}
+	_, missingIdempotencyErr := pool.Exec(ctx, `
+		SELECT identity.create_user_api_key(
+			'urn:xb:user:key-upgrade',
+			'00000000-0000-4000-8000-000000000705',
+			'missing-idempotency',
+			decode(repeat('0f', 32), 'hex'),
+			'000000000705',
+			ARRAY[]::text[],
+			'00000000-0000-4000-8000-000000000706',
+			'request-missing-idempotency',
+			''::bytea,
+			decode(repeat('10', 32), 'hex'),
+			'test-v1',
+			decode(repeat('11', 12), 'hex'),
+			decode(repeat('12', 17), 'hex')
+		)`)
+	var missingIdempotencyPostgresError *pgconn.PgError
+	if !errors.As(
+		missingIdempotencyErr,
+		&missingIdempotencyPostgresError,
+	) ||
+		missingIdempotencyPostgresError.Code != "22023" {
+		t.Fatalf(
+			"missing-idempotency authority error = %v, want SQLSTATE 22023",
+			missingIdempotencyErr,
+		)
+	}
+	var capOutcome string
+	if err := pool.QueryRow(ctx, `
+			SELECT outcome
+			  FROM identity.create_user_api_key(
+				'urn:xb:user:key-upgrade',
+			'00000000-0000-4000-8000-000000000703',
+			'over-cap-key',
+			decode(repeat('05', 32), 'hex'),
+			'000000000703',
+			ARRAY[]::text[],
+			'00000000-0000-4000-8000-000000000704',
+			'request-over-cap-key',
+			decode(repeat('0a', 32), 'hex'),
+			decode(repeat('06', 32), 'hex'),
+			'test-v1',
+			decode(repeat('07', 12), 'hex'),
+				decode(repeat('08', 17), 'hex')
+			)`).Scan(&capOutcome); err != nil {
+		t.Fatalf("durable owner-cap outcome: %v", err)
+	}
+	if capOutcome != "cap_conflict" {
+		t.Fatalf("durable owner-cap outcome = %q", capOutcome)
+	}
+	var (
+		auditConfigurationVersion int
+		auditEffectiveMax         int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(detail->>'configurationVersion')::integer,
+			(detail->>'effectiveMaxActive')::integer
+		  FROM audit.events
+		 WHERE event_id = '00000000-0000-4000-8000-000000000702'`,
+	).Scan(
+		&auditConfigurationVersion,
+		&auditEffectiveMax,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if auditConfigurationVersion != 2 || auditEffectiveMax != 1 {
+		t.Fatalf(
+			"audit policy = version %d max %d",
+			auditConfigurationVersion,
+			auditEffectiveMax,
+		)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE identity.api_keys
+		   SET revoked_at = created_at + interval '1 microsecond'
+		 WHERE api_key_id = '00000000-0000-4000-8000-000000000701'`,
+	); err != nil {
+		t.Fatalf("first API-key revocation: %v", err)
+	}
+	for name, statement := range map[string]string{
+		"second revocation": `
+			UPDATE identity.api_keys
+			   SET revoked_at = '2026-07-26T07:03:00Z'
+			 WHERE api_key_id = '00000000-0000-4000-8000-000000000701'`,
+		"key deletion": `
+			DELETE FROM identity.api_keys
+			 WHERE api_key_id = '00000000-0000-4000-8000-000000000701'`,
+		"audit mutation": `
+			UPDATE audit.events
+			   SET outcome = 'failure'
+			 WHERE event_id = '00000000-0000-4000-8000-000000000702'`,
+	} {
+		if _, err := pool.Exec(ctx, statement); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+		var policyMatches bool
+		if err := pool.QueryRow(ctx, `
+			SELECT identity.verify_api_key_policy(1,600,60,86400)`,
+		).Scan(&policyMatches); err != nil || !policyMatches {
+			t.Fatalf(
+				"matching legacy policy = %t, error = %v",
+				policyMatches,
+				err,
+			)
+		}
+		if err := pool.QueryRow(ctx, `
+			SELECT identity.verify_api_key_policy(2,600,60,86400)`,
+		).Scan(&policyMatches); err != nil || policyMatches {
+			t.Fatalf(
+				"mismatched legacy policy = %t, error = %v",
+				policyMatches,
+				err,
+			)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO identity.api_key_replays (
+				owner_user_id,
+				idempotency_key_hash,
+				request_hash,
+				response_status,
+				replay_key_id,
+				response_nonce,
+				response_ciphertext,
+				created_at,
+				expires_at
+			) VALUES
+			(
+				'urn:xb:user:key-upgrade',
+				decode(repeat('0c', 32), 'hex'),
+				decode(repeat('0c', 32), 'hex'),
+				201,
+				'test-v1',
+				decode(repeat('0d', 12), 'hex'),
+				decode(repeat('0e', 17), 'hex'),
+				statement_timestamp() - interval '2 seconds',
+				statement_timestamp() - interval '1 second'
+			),
+			(
+				'urn:xb:user:key-upgrade',
+				decode(repeat('1c', 32), 'hex'),
+				decode(repeat('1d', 32), 'hex'),
+				201,
+				'test-v1',
+				decode(repeat('1e', 12), 'hex'),
+				decode(repeat('1f', 17), 'hex'),
+				statement_timestamp() - interval '3 seconds',
+				statement_timestamp() - interval '2 seconds'
+			),
+			(
+				'urn:xb:user:key-upgrade',
+				decode(repeat('2c', 32), 'hex'),
+				decode(repeat('2d', 32), 'hex'),
+				201,
+				'test-v1',
+				decode(repeat('2e', 12), 'hex'),
+				decode(repeat('2f', 17), 'hex'),
+				statement_timestamp() - interval '4 seconds',
+				statement_timestamp() - interval '3 seconds'
+			),
+			(
+				'urn:xb:user:key-upgrade',
+				decode(repeat('09', 32), 'hex'),
+				decode(repeat('09', 32), 'hex'),
+				201,
+				'test-v1',
+				decode(repeat('0a', 12), 'hex'),
+				decode(repeat('0b', 17), 'hex'),
+				statement_timestamp(),
+				statement_timestamp() + interval '1 hour'
+			)
+			ON CONFLICT (owner_user_id, idempotency_key_hash) DO UPDATE
+			   SET created_at = EXCLUDED.created_at,
+			       expires_at = EXCLUDED.expires_at`); err != nil {
+			t.Fatalf("seed replay cleanup rows: %v", err)
+		}
+		var deleted int
+		if err := pool.QueryRow(ctx, `
+			SELECT identity.purge_expired_api_key_replays(2)`,
+		).Scan(&deleted); err != nil || deleted != 2 {
+			t.Fatalf("first replay cleanup = %d, error = %v", deleted, err)
+		}
+		if err := pool.QueryRow(ctx, `
+			SELECT identity.purge_expired_api_key_replays(2)`,
+		).Scan(&deleted); err != nil || deleted != 1 {
+			t.Fatalf("second replay cleanup = %d, error = %v", deleted, err)
+		}
+		if err := pool.QueryRow(ctx, `
+			SELECT identity.purge_expired_api_key_replays(2)`,
+		).Scan(&deleted); err != nil || deleted != 0 {
+			t.Fatalf("repeated replay cleanup = %d, error = %v", deleted, err)
+		}
+		var liveReplayCount int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*)
+			 FROM identity.api_key_replays
+			 WHERE idempotency_key_hash =
+			       decode(repeat('09', 32), 'hex')`,
+		).Scan(&liveReplayCount); err != nil || liveReplayCount != 1 {
+			t.Fatalf(
+				"live replay count = %d, error = %v",
+				liveReplayCount,
+				err,
+			)
+		}
+		var (
+			coverageKey    string
+			coverageCount  int64
+			coverageOldest string
+		)
+		if err := pool.QueryRow(ctx, `
+			SELECT replay_key_id, live_count, oldest_expires_at
+			  FROM identity.api_key_replay_coverage()
+			 WHERE replay_key_id = 'test-v1'`,
+		).Scan(
+			&coverageKey,
+			&coverageCount,
+			&coverageOldest,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if coverageKey != "test-v1" ||
+			coverageCount != 1 ||
+			coverageOldest == "" {
+			t.Fatalf(
+				"replay coverage = key %q count %d oldest %q",
+				coverageKey,
+				coverageCount,
+				coverageOldest,
+			)
+		}
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO identity.api_key_replays (
+			owner_user_id,
+			idempotency_key_hash,
+			request_hash,
+			response_status,
+			replay_key_id,
+			response_nonce,
+			response_ciphertext,
+			created_at,
+			expires_at
+		)
+		SELECT
+			'urn:xb:user:key-upgrade',
+			decode(lpad(to_hex(series), 64, '0'), 'hex'),
+			decode(repeat('5a', 32), 'hex'),
+			201,
+			'concurrent-cleanup-v1',
+			decode(repeat('5b', 12), 'hex'),
+			decode(repeat('5c', 17), 'hex'),
+			statement_timestamp() - interval '2 seconds',
+			statement_timestamp() - interval '1 second'
+		  FROM generate_series(101, 104) AS series`); err != nil {
+		t.Fatal(err)
+	}
+	cleanupResults := make(chan int, 2)
+	cleanupErrors := make(chan error, 2)
+	var cleanupWait sync.WaitGroup
+	for range 2 {
+		cleanupWait.Add(1)
+		go func() {
+			defer cleanupWait.Done()
+			var deleted int
+			err := pool.QueryRow(
+				context.Background(),
+				`SELECT identity.purge_expired_api_key_replays(2)`,
+			).Scan(&deleted)
+			cleanupResults <- deleted
+			cleanupErrors <- err
+		}()
+	}
+	cleanupWait.Wait()
+	close(cleanupResults)
+	close(cleanupErrors)
+	for err := range cleanupErrors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var concurrentlyDeleted int
+	for deleted := range cleanupResults {
+		concurrentlyDeleted += deleted
+	}
+	if concurrentlyDeleted != 4 {
+		t.Fatalf(
+			"concurrent cleanup deleted %d rows, want 4",
+			concurrentlyDeleted,
+		)
+	}
+}
+
 func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	var count int
@@ -2990,9 +3539,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 18 ||
+	if count != 19 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260726000600_phase3_account_summary_constraint_validation.up.sql" {
+		last != "20260726000700_phase3_user_api_keys.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,

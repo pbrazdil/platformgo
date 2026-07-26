@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/big"
 	"net/http"
 	"net/netip"
 	"regexp"
@@ -87,6 +88,8 @@ func (server *Server) route(writer http.ResponseWriter, request *http.Request) {
 		server.handleLogin(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/me/accounts":
 		server.handleMyAccounts(writer, request)
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/me/api-keys":
+		server.handleCreateMyAPIKey(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/me":
 		server.handleProfile(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/instruments":
@@ -199,6 +202,123 @@ func (server *Server) handleMyAccounts(
 		return
 	}
 	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) handleCreateMyAPIKey(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	principal, ok := server.authenticatedClientPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	if server.identity == nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"identity unavailable",
+		)
+		return
+	}
+	idempotencyKey := request.Header.Get("idempotency-key")
+	if strings.TrimSpace(idempotencyKey) == "" {
+		server.rejectInvalidAPIKeyRequest(
+			writer,
+			request,
+			principal,
+			"Idempotency-Key is required",
+		)
+		return
+	}
+	var body CreateAPIKeyRequest
+	if err := decodeCompatibleJSON(request.Body, &body); err != nil ||
+		!validOptionalTenantID(body.TenantID) {
+		server.rejectInvalidAPIKeyRequest(
+			writer,
+			request,
+			principal,
+			"invalid API-key request",
+		)
+		return
+	}
+	response, err := server.identity.CreateMyAPIKey(
+		request.Context(),
+		principal,
+		request.Header.Get("x-request-id"),
+		idempotencyKey,
+		body,
+	)
+	switch {
+	case errors.Is(err, ErrInvalidRequest):
+		server.rejectInvalidAPIKeyRequest(
+			writer,
+			request,
+			principal,
+			"invalid API-key request",
+		)
+	case errors.Is(err, ErrIdempotencyConflict):
+		writeError(
+			writer,
+			request,
+			http.StatusConflict,
+			"idempotency_conflict",
+			"idempotency key conflicts with another request",
+		)
+	case errors.Is(err, ErrConflict):
+		writeError(
+			writer,
+			request,
+			http.StatusConflict,
+			"conflict",
+			"active API-key limit reached",
+		)
+	case errors.Is(err, ErrRateLimited):
+		writeClientRateLimit(writer, request, err)
+	case err != nil:
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"identity unavailable",
+		)
+	default:
+		writeStoredResponse(writer, response.Response)
+	}
+}
+
+func (server *Server) rejectInvalidAPIKeyRequest(
+	writer http.ResponseWriter,
+	request *http.Request,
+	principal Principal,
+	message string,
+) {
+	if err := server.identity.CheckClientRate(
+		request.Context(),
+		principal,
+	); err != nil {
+		if errors.Is(err, ErrRateLimited) {
+			writeClientRateLimit(writer, request, err)
+		} else {
+			writeError(
+				writer,
+				request,
+				http.StatusServiceUnavailable,
+				"unavailable",
+				"identity unavailable",
+			)
+		}
+		return
+	}
+	writeError(
+		writer,
+		request,
+		http.StatusBadRequest,
+		"invalid_request",
+		message,
+	)
 }
 
 func (server *Server) handleInstruments(writer http.ResponseWriter, request *http.Request) {
@@ -559,6 +679,44 @@ func (server *Server) clientPrincipal(
 	writer http.ResponseWriter,
 	request *http.Request,
 ) (Principal, bool) {
+	principal, ok := server.authenticatedClientPrincipal(writer, request)
+	if !ok {
+		return Principal{}, false
+	}
+	if server.identity == nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"identity unavailable",
+		)
+		return Principal{}, false
+	}
+	if err := server.identity.CheckClientRate(
+		request.Context(),
+		principal,
+	); err != nil {
+		if errors.Is(err, ErrRateLimited) {
+			writeClientRateLimit(writer, request, err)
+		} else {
+			writeError(
+				writer,
+				request,
+				http.StatusServiceUnavailable,
+				"unavailable",
+				"identity unavailable",
+			)
+		}
+		return Principal{}, false
+	}
+	return principal, true
+}
+
+func (server *Server) authenticatedClientPrincipal(
+	writer http.ResponseWriter,
+	request *http.Request,
+) (Principal, bool) {
 	raw := strings.TrimSpace(strings.TrimPrefix(request.Header.Get("authorization"), "Bearer "))
 	if server.auth == nil || raw == "" {
 		writeError(writer, request, http.StatusUnauthorized, "unauthorized", "unauthorized")
@@ -647,6 +805,50 @@ func decodeJSON(reader io.Reader, target any) error {
 		return errors.New("request must contain one JSON value")
 	}
 	return nil
+}
+
+func decodeCompatibleJSON(reader io.Reader, target any) error {
+	decoder := json.NewDecoder(io.LimitReader(reader, maxRequestBodyBytes+1))
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return errors.New("request must contain one JSON value")
+	}
+	return nil
+}
+
+func validOptionalTenantID(value *string) bool {
+	if value == nil {
+		return true
+	}
+	const prefix = "urn:xb:tenant:"
+	body := strings.TrimPrefix(*value, prefix)
+	if body == *value || body == "" {
+		return false
+	}
+	decoded := new(big.Int)
+	base := big.NewInt(62)
+	for _, character := range []byte(body) {
+		var digit int64
+		switch {
+		case character >= '0' && character <= '9':
+			digit = int64(character - '0')
+		case character >= 'A' && character <= 'Z':
+			digit = int64(character-'A') + 10
+		case character >= 'a' && character <= 'z':
+			digit = int64(character-'a') + 36
+		default:
+			return false
+		}
+		decoded.Mul(decoded, base)
+		decoded.Add(decoded, big.NewInt(digit))
+		if decoded.BitLen() > 128 {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateSubmitOrder validates transport-level shape without performing
@@ -747,6 +949,28 @@ func writeStoredResponse(writer http.ResponseWriter, response StoredResponse) {
 	}
 	writer.WriteHeader(response.Status)
 	_, _ = writer.Write(response.Body)
+}
+
+func writeClientRateLimit(
+	writer http.ResponseWriter,
+	request *http.Request,
+	err error,
+) {
+	var rateLimit RateLimitError
+	retryAfter := uint64(0)
+	if errors.As(err, &rateLimit) {
+		retryAfter = rateLimit.RetryAfterSeconds
+	}
+	if retryAfter > 0 {
+		writer.Header().Set("retry-after", strconv.FormatUint(retryAfter, 10))
+	}
+	writeError(
+		writer,
+		request,
+		http.StatusTooManyRequests,
+		"too_many_requests",
+		"rate_limited",
+	)
 }
 
 func writeError(

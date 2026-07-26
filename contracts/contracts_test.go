@@ -63,6 +63,31 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 	if !contains(manifest.EnvironmentKeys, "UZO_TRUSTED_PROXY_CIDRS") {
 		t.Fatal("UZO_TRUSTED_PROXY_CIDRS missing from compatibility manifest")
 	}
+	if !contains(manifest.EnvironmentKeys, "UZO_AUTH_API_KEY_REPLAY_KEYS") {
+		t.Fatal("UZO_AUTH_API_KEY_REPLAY_KEYS missing from compatibility manifest")
+	}
+	for _, key := range []string{
+		"UZO_AUTH_API_KEY_REPLAY_ACTIVE_KEY_ID",
+		"UZO_AUTH_MAX_API_KEYS_PER_OWNER",
+		"UZO_API_RATE_LIMIT_MAX_REQUESTS",
+		"UZO_API_RATE_LIMIT_WINDOW_SECS",
+		"UZO_API_IDEMPOTENCY_TTL_SECS",
+	} {
+		if !contains(manifest.EnvironmentKeys, key) {
+			t.Fatalf("%s missing from compatibility manifest", key)
+		}
+	}
+	deviationFound := false
+	for _, raw := range manifest.IntentionalDeviations {
+		var name string
+		if json.Unmarshal(raw, &name) == nil &&
+			name == "client-api-key-creation-requires-idempotency-key" {
+			deviationFound = true
+		}
+	}
+	if !deviationFound {
+		t.Fatal("required API-key idempotency deviation missing from manifest")
+	}
 	if !reflect.DeepEqual(manifest.ImplementedWorkers, []string{
 		"outbox-publisher", "realtime-publisher",
 		"event-consumer", "event-consumer:<pattern>",
@@ -80,6 +105,9 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 	}
 	if !contains(manifest.ImplementedHTTPRoutes, "GET /v1/me/accounts") {
 		t.Fatal("GET /v1/me/accounts missing from compatibility manifest")
+	}
+	if !contains(manifest.ImplementedHTTPRoutes, "POST /v1/me/api-keys") {
+		t.Fatal("POST /v1/me/api-keys missing from compatibility manifest")
 	}
 }
 
@@ -109,6 +137,21 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 		)
 	}
 	assertOperationSecurity(t, myAccounts, "bearer")
+	myAPIKeys := assertMethod(t, client, "/v1/me/api-keys", "post")
+	assertPointer(t, client, "components", "schemas", "CreateAPIKeyRequest")
+	assertPointer(t, client, "components", "schemas", "APIKeyCreated")
+	for _, status := range []string{"201", "400", "401", "409", "429", "503"} {
+		assertResponse(t, myAPIKeys, status)
+	}
+	assertIdempotencyHeader(t, myAPIKeys)
+	assertOptionalRetryAfterHeader(t, myAPIKeys)
+	if myAPIKeys["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
+		t.Fatalf(
+			"my API keys contract status = %v",
+			myAPIKeys["x-platformgo-contract-status"],
+		)
+	}
+	assertOperationSecurity(t, myAPIKeys, "bearer")
 	funding := assertMethod(t, client, "/v1/accounts/{accountId}/funding", "get")
 	assertPointer(t, client, "components", "schemas", "FundingView")
 	assertPointer(t, client, "components", "schemas", "FundingPage")
@@ -118,19 +161,7 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 	}
 	assertOperationSecurity(t, funding, "bearer")
 	order := assertMethod(t, client, "/v1/accounts/{accountId}/orders", "post")
-	parameters, ok := order["parameters"].([]any)
-	if !ok {
-		t.Fatal("submit-order parameters missing")
-	}
-	found := false
-	for _, value := range parameters {
-		parameter, _ := value.(map[string]any)
-		found = found ||
-			(parameter["name"] == "Idempotency-Key" && parameter["in"] == "header")
-	}
-	if !found {
-		t.Fatalf("Idempotency-Key header missing: %v", parameters)
-	}
+	assertIdempotencyHeader(t, order)
 
 	broker := decodeDocument(t, documents["/broker/v1/openapi.json"])
 	assertMethod(t, broker, "/broker/v1/ping", "get")
@@ -146,6 +177,22 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 	}
 }
 
+func assertIdempotencyHeader(t *testing.T, operation map[string]any) {
+	t.Helper()
+	parameters, ok := operation["parameters"].([]any)
+	if !ok {
+		t.Fatal("idempotent operation parameters missing")
+	}
+	for _, value := range parameters {
+		parameter, _ := value.(map[string]any)
+		if parameter["name"] == "Idempotency-Key" &&
+			parameter["in"] == "header" {
+			return
+		}
+	}
+	t.Fatalf("Idempotency-Key header missing: %v", parameters)
+}
+
 func assertResponse(t *testing.T, operation map[string]any, status string) {
 	t.Helper()
 	responses, ok := operation["responses"].(map[string]any)
@@ -154,6 +201,41 @@ func assertResponse(t *testing.T, operation map[string]any, status string) {
 	}
 	if _, ok := responses[status]; !ok {
 		t.Fatalf("response %s missing: %v", status, responses)
+	}
+}
+
+func assertOptionalRetryAfterHeader(
+	t *testing.T,
+	operation map[string]any,
+) {
+	t.Helper()
+	responses, ok := operation["responses"].(map[string]any)
+	if !ok {
+		t.Fatal("responses missing")
+	}
+	rateLimited, ok := responses["429"].(map[string]any)
+	if !ok {
+		t.Fatal("429 response missing")
+	}
+	headers, ok := rateLimited["headers"].(map[string]any)
+	if !ok {
+		t.Fatal("429 headers missing")
+	}
+	retryAfter, ok := headers["Retry-After"].(map[string]any)
+	if !ok {
+		t.Fatal("Retry-After header missing")
+	}
+	if required, ok := retryAfter["required"].(bool); !ok || required {
+		t.Fatalf(
+			"Retry-After required = %v, want explicit false",
+			retryAfter["required"],
+		)
+	}
+	schema, ok := retryAfter["schema"].(map[string]any)
+	if !ok ||
+		schema["type"] != "integer" ||
+		schema["minimum"] != float64(1) {
+		t.Fatalf("Retry-After schema = %v", retryAfter["schema"])
 	}
 }
 

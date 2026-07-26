@@ -301,6 +301,225 @@ func (store *CompatibilityStore) CreateSession(
 	return nil
 }
 
+// ClaimClientRateLimit uses shared PostgreSQL authority across API replicas.
+func (store *CompatibilityStore) ClaimClientRateLimit(
+	ctx context.Context,
+	principal string,
+) (application.ClientRateLimitResult, error) {
+	var result application.ClientRateLimitResult
+	var retryAfter string
+	if err := store.pool.QueryRow(ctx, `
+		SELECT allowed, retry_after_seconds::text
+		  FROM identity.claim_client_rate_limit($1)`,
+		principal,
+	).Scan(&result.Allowed, &retryAfter); err != nil {
+		return application.ClientRateLimitResult{},
+			fmt.Errorf("claim client rate limit: %w", err)
+	}
+	parsedRetryAfter, err := strconv.ParseUint(retryAfter, 10, 64)
+	if err != nil {
+		return application.ClientRateLimitResult{},
+			fmt.Errorf("claim client rate limit: retry after: %w", err)
+	}
+	result.RetryAfter = parsedRetryAfter
+	return result, nil
+}
+
+// ReplayUserAPIKey resolves a committed response before new entropy or rate
+// capacity is consumed.
+func (store *CompatibilityStore) ReplayUserAPIKey(
+	ctx context.Context,
+	principal string,
+	idempotencyHash [sha256.Size]byte,
+	requestHash [sha256.Size]byte,
+) (application.UserAPIKeyReplayResult, error) {
+	var result application.UserAPIKeyReplayResult
+	if err := store.pool.QueryRow(ctx, `
+		SELECT
+			found,
+			response_status,
+			replay_key_id,
+			response_nonce,
+			response_ciphertext
+		  FROM identity.replay_user_api_key($1,$2,$3)`,
+		principal,
+		idempotencyHash[:],
+		requestHash[:],
+	).Scan(
+		&result.Found,
+		&result.ResponseStatus,
+		&result.ReplayKeyID,
+		&result.ReplayNonce,
+		&result.ReplayCiphertext,
+	); err != nil {
+		var postgresError *pgconn.PgError
+		if errors.As(err, &postgresError) &&
+			postgresError.Code == "P0003" {
+			return application.UserAPIKeyReplayResult{},
+				edge.ErrIdempotencyConflict
+		}
+		return application.UserAPIKeyReplayResult{},
+			fmt.Errorf("replay user API key: %w", err)
+	}
+	return result, nil
+}
+
+// VerifyAPIKeyPolicy fails closed when source deployment overrides have not
+// been reconciled into the PostgreSQL-authoritative policy.
+func (store *CompatibilityStore) VerifyAPIKeyPolicy(
+	ctx context.Context,
+	maxActive *int64,
+	rateMax *uint64,
+	rateWindow *uint64,
+	idempotencyTTL *uint64,
+) error {
+	var matches bool
+	if err := store.pool.QueryRow(ctx, `
+		SELECT identity.verify_api_key_policy($1,$2,$3,$4)`,
+		nullableInt64(maxActive),
+		nullableUint64Decimal(rateMax),
+		nullableUint64Decimal(rateWindow),
+		nullableUint64Decimal(idempotencyTTL),
+	).Scan(&matches); err != nil {
+		return fmt.Errorf("verify API-key policy: %w", err)
+	}
+	if !matches {
+		return errors.New(
+			"API-key policy differs from configured source deployment values",
+		)
+	}
+	return nil
+}
+
+// PurgeExpiredAPIKeyReplays deletes one bounded database-time batch.
+func (store *CompatibilityStore) PurgeExpiredAPIKeyReplays(
+	ctx context.Context,
+	batchLimit int,
+) (int64, error) {
+	var deleted int64
+	if err := store.pool.QueryRow(ctx, `
+		SELECT identity.purge_expired_api_key_replays($1)`,
+		batchLimit,
+	).Scan(&deleted); err != nil {
+		return 0, fmt.Errorf("purge expired API-key replays: %w", err)
+	}
+	return deleted, nil
+}
+
+// APIKeyReplayCoverage reports the live encrypted replay backlog by key ID.
+type APIKeyReplayCoverage struct {
+	KeyID           string
+	LiveCount       int64
+	OldestExpiresAt string
+}
+
+// APIKeyReplayCoverage loads the least-privilege readiness and rotation view.
+func (store *CompatibilityStore) APIKeyReplayCoverage(
+	ctx context.Context,
+) ([]APIKeyReplayCoverage, error) {
+	rows, err := store.pool.Query(ctx, `
+		SELECT replay_key_id, live_count, oldest_expires_at
+		  FROM identity.api_key_replay_coverage()`)
+	if err != nil {
+		return nil, fmt.Errorf("load API-key replay coverage: %w", err)
+	}
+	defer rows.Close()
+	coverage := make([]APIKeyReplayCoverage, 0)
+	for rows.Next() {
+		var item APIKeyReplayCoverage
+		if scanErr := rows.Scan(
+			&item.KeyID,
+			&item.LiveCount,
+			&item.OldestExpiresAt,
+		); scanErr != nil {
+			return nil, fmt.Errorf(
+				"load API-key replay coverage: %w",
+				scanErr,
+			)
+		}
+		coverage = append(coverage, item)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("load API-key replay coverage: %w", rowsErr)
+	}
+	return coverage, nil
+}
+
+// CreateUserAPIKey atomically claims optional idempotency, enforces the
+// PostgreSQL-authoritative owner cap, stores only the secret hash, and appends
+// the corresponding audit fact.
+func (store *CompatibilityStore) CreateUserAPIKey(
+	ctx context.Context,
+	creation application.UserAPIKeyCreation,
+) (application.UserAPIKeyCreationResult, error) {
+	var result application.UserAPIKeyCreationResult
+	var retryAfter string
+	if err := store.pool.QueryRow(ctx, `
+		SELECT
+			outcome,
+			response_status,
+			retry_after_seconds::text,
+			replay_key_id,
+			response_nonce,
+			response_ciphertext
+		  FROM identity.create_user_api_key(
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
+		)`,
+		creation.OwnerUserID,
+		creation.APIKeyID.String(),
+		creation.Name,
+		creation.KeyHash[:],
+		creation.Prefix,
+		creation.Scopes,
+		creation.AuditEventID.String(),
+		creation.RequestID,
+		creation.IdempotencyHash[:],
+		creation.RequestHash[:],
+		creation.ReplayKeyID,
+		creation.ReplayNonce,
+		creation.ReplayCiphertext,
+	).Scan(
+		&result.Outcome,
+		&result.ResponseStatus,
+		&retryAfter,
+		&result.ReplayKeyID,
+		&result.ReplayNonce,
+		&result.ReplayCiphertext,
+	); err != nil {
+		var postgresError *pgconn.PgError
+		switch {
+		case errors.As(err, &postgresError) &&
+			postgresError.Code == "P0002":
+			return application.UserAPIKeyCreationResult{},
+				application.ErrIdentityNotFound
+		default:
+			return application.UserAPIKeyCreationResult{},
+				fmt.Errorf("create user API key: %w", err)
+		}
+	}
+	parsedRetryAfter, err := strconv.ParseUint(retryAfter, 10, 64)
+	if err != nil {
+		return application.UserAPIKeyCreationResult{},
+			fmt.Errorf("create user API key: retry after: %w", err)
+	}
+	result.RetryAfter = parsedRetryAfter
+	return result, nil
+}
+
+func nullableInt64(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableUint64Decimal(value *uint64) any {
+	if value == nil {
+		return nil
+	}
+	return strconv.FormatUint(*value, 10)
+}
+
 // BrokerEcho atomically stores or replays the exact principal-scoped response.
 func (store *CompatibilityStore) BrokerEcho(
 	ctx context.Context,

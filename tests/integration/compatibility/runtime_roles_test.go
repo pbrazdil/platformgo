@@ -75,6 +75,12 @@ func TestRuntimeCompositionRejectsPrivilegedAndWrongDatabaseLogins(
 		ClientTokenSecret: []byte(
 			"0123456789abcdef0123456789abcdef",
 		),
+		APIKeyReplayKeys: []platformruntime.APIKeyReplayKey{{
+			ID: "test-v1",
+			Key: [32]byte{
+				1, 2, 3, 4, 5, 6, 7, 8,
+			},
+		}},
 		CentrifugoAPIURL: "http://127.0.0.1:1",
 		CentrifugoTokenSecret: []byte(
 			"abcdef0123456789abcdef0123456789",
