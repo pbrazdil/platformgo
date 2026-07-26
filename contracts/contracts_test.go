@@ -144,6 +144,7 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 		assertResponse(t, myAPIKeys, status)
 	}
 	assertIdempotencyHeader(t, myAPIKeys)
+	assertOptionalRetryAfterHeader(t, myAPIKeys)
 	if myAPIKeys["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
 		t.Fatalf(
 			"my API keys contract status = %v",
@@ -200,6 +201,41 @@ func assertResponse(t *testing.T, operation map[string]any, status string) {
 	}
 	if _, ok := responses[status]; !ok {
 		t.Fatalf("response %s missing: %v", status, responses)
+	}
+}
+
+func assertOptionalRetryAfterHeader(
+	t *testing.T,
+	operation map[string]any,
+) {
+	t.Helper()
+	responses, ok := operation["responses"].(map[string]any)
+	if !ok {
+		t.Fatal("responses missing")
+	}
+	rateLimited, ok := responses["429"].(map[string]any)
+	if !ok {
+		t.Fatal("429 response missing")
+	}
+	headers, ok := rateLimited["headers"].(map[string]any)
+	if !ok {
+		t.Fatal("429 headers missing")
+	}
+	retryAfter, ok := headers["Retry-After"].(map[string]any)
+	if !ok {
+		t.Fatal("Retry-After header missing")
+	}
+	if required, ok := retryAfter["required"].(bool); !ok || required {
+		t.Fatalf(
+			"Retry-After required = %v, want explicit false",
+			retryAfter["required"],
+		)
+	}
+	schema, ok := retryAfter["schema"].(map[string]any)
+	if !ok ||
+		schema["type"] != "integer" ||
+		schema["minimum"] != float64(1) {
+		t.Fatalf("Retry-After schema = %v", retryAfter["schema"])
 	}
 }
 

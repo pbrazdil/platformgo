@@ -938,6 +938,106 @@ func TestUserAPIKeyCreationIsRateLimitedPerPrincipal(t *testing.T) {
 	}
 }
 
+func TestUserAPIKeyZeroRatePolicyOmitsRetryAfter(t *testing.T) {
+	ctx, admin, apiPool, serverURL := newMyAPIKeyFixture(t, 25)
+	defer admin.Close()
+	defer apiPool.Close()
+	if _, err := admin.Exec(ctx, `
+		UPDATE identity.api_key_policy
+		   SET client_rate_limit_max_requests = 0,
+		       client_rate_limit_window_seconds = 0,
+		       version = version + 1
+		 WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+	accessToken := loginMyAPIKeyOwner(t, serverURL)
+
+	valid := createMyAPIKey(
+		t,
+		serverURL,
+		accessToken,
+		`{"name":"zero-rate-valid"}`,
+		"zero-rate-valid",
+	)
+	if valid.status != http.StatusTooManyRequests ||
+		valid.header.Get("retry-after") != "" ||
+		!strings.Contains(valid.body, `"code":"too_many_requests"`) ||
+		!strings.Contains(valid.body, `"message":"rate_limited"`) {
+		t.Fatalf(
+			"zero-rate valid response = %d headers %#v body %s",
+			valid.status,
+			valid.header,
+			valid.body,
+		)
+	}
+
+	invalidResponse := requestJSON(
+		t,
+		http.MethodPost,
+		serverURL+"/v1/me/api-keys",
+		`{`,
+		map[string]string{
+			"authorization":   "Bearer " + accessToken,
+			"idempotency-key": "zero-rate-invalid",
+			"x-request-id":    "zero-rate-invalid",
+		},
+	)
+	var invalidBody string
+	{
+		var raw bytes.Buffer
+		if _, err := raw.ReadFrom(invalidResponse.Body); err != nil {
+			_ = invalidResponse.Body.Close()
+			t.Fatal(err)
+		}
+		_ = invalidResponse.Body.Close()
+		invalidBody = raw.String()
+	}
+	if invalidResponse.StatusCode != http.StatusTooManyRequests ||
+		invalidResponse.Header.Get("retry-after") != "" ||
+		!strings.Contains(invalidBody, `"code":"too_many_requests"`) ||
+		!strings.Contains(invalidBody, `"message":"rate_limited"`) {
+		t.Fatalf(
+			"zero-rate invalid response = %d headers %#v body %s",
+			invalidResponse.StatusCode,
+			invalidResponse.Header,
+			invalidBody,
+		)
+	}
+
+	var (
+		rateCount   int64
+		keyCount    int
+		auditCount  int
+		replayCount int
+	)
+	if err := admin.QueryRow(ctx, `
+		SELECT
+			(SELECT request_count FROM identity.client_rate_limits
+			  WHERE owner_user_id = 'urn:xb:user:bot-owner'),
+			(SELECT count(*) FROM identity.api_keys),
+			(SELECT count(*) FROM audit.events
+			  WHERE action = 'user-key.create'),
+			(SELECT count(*) FROM identity.api_key_replays)`,
+	).Scan(
+		&rateCount,
+		&keyCount,
+		&auditCount,
+		&replayCount,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if rateCount != 1 || keyCount != 0 || auditCount != 0 ||
+		replayCount != 0 {
+		t.Fatalf(
+			"zero-rate durable state = rate %d keys %d audits %d replays %d",
+			rateCount,
+			keyCount,
+			auditCount,
+			replayCount,
+		)
+	}
+}
+
 func TestInvalidUserAPIKeyRequestsConsumeSharedRate(t *testing.T) {
 	ctx, admin, apiPool, serverURL := newMyAPIKeyFixture(t, 25)
 	defer admin.Close()

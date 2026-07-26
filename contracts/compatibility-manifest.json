@@ -66,7 +66,7 @@
   "openAPIArtifacts": {
     "openapi/admin-v1.json": "615e8a49f9e6a71f6a3ea0108bd71353bd5b7050cc79cee6b17d98af84a6aeb3",
     "openapi/broker-v1.json": "fa8e295fac856f566fb58239a3dcb10ae2288948a7d63131b6d6688d38101e0e",
-    "openapi/client-v1.json": "a9afe54d4de6982b8862cd554eb648c8b0c7e54bc806b1560d5ff34a82b0aa18"
+    "openapi/client-v1.json": "15e029fce613c3ce3f8bdc8d67d6d71eaf27de3e47862ea275838cb3739c82ac"
   },
   "platformSourceRevision": "50141367492be46ebf5623f6191a14b94af2f2bd",
   "protobufDescriptor": {

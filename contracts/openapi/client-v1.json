@@ -793,7 +793,7 @@
             "description": "Rate limited",
             "headers": {
               "Retry-After": {
-                "required": true,
+                "required": false,
                 "schema": {
                   "minimum": 1,
                   "type": "integer"
@@ -933,7 +933,7 @@
             "description": "Rate limited",
             "headers": {
               "Retry-After": {
-                "required": true,
+                "required": false,
                 "schema": {
                   "minimum": 1,
                   "type": "integer"
@@ -1028,7 +1028,7 @@
             "description": "Rate limited",
             "headers": {
               "Retry-After": {
-                "required": true,
+                "required": false,
                 "schema": {
                   "minimum": 1,
                   "type": "integer"
@@ -1134,7 +1134,7 @@
             "description": "Rate limited",
             "headers": {
               "Retry-After": {
-                "required": true,
+                "required": false,
                 "schema": {
                   "minimum": 1,
                   "type": "integer"
@@ -1245,7 +1245,7 @@
             "description": "Rate limited",
             "headers": {
               "Retry-After": {
-                "required": true,
+                "required": false,
                 "schema": {
                   "minimum": 1,
                   "type": "integer"
@@ -1467,7 +1467,7 @@
             "description": "Rate limited",
             "headers": {
               "Retry-After": {
-                "required": true,
+                "required": false,
                 "schema": {
                   "minimum": 1,
                   "type": "integer"
@@ -1527,7 +1527,7 @@
             "description": "Rate limited",
             "headers": {
               "Retry-After": {
-                "required": true,
+                "required": false,
                 "schema": {
                   "minimum": 1,
                   "type": "integer"
@@ -1630,7 +1630,7 @@
             "description": "Rate limited",
             "headers": {
               "Retry-After": {
-                "required": true,
+                "required": false,
                 "schema": {
                   "minimum": 1,
                   "type": "integer"
@@ -1703,7 +1703,7 @@
             "description": "Rate limited",
             "headers": {
               "Retry-After": {
-                "required": true,
+                "required": false,
                 "schema": {
                   "minimum": 1,
                   "type": "integer"

@@ -264,7 +264,7 @@ def response(
         if status == 429:
             value["headers"] = {
                 "Retry-After": {
-                    "required": True,
+                    "required": False,
                     "schema": {
                         "type": "integer",
                         "minimum": 1,
