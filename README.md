@@ -43,7 +43,9 @@ source-derived behavior has separate port-ledger acceptance. The external
 fills route remains inventory. The landed filtering slice adds account-scoped,
 case-insensitive side filtering and exact fill-ID filtering over immutable
 fills, with a filtered total from the same PostgreSQL statement and separate
-port-ledger acceptance.
+port-ledger acceptance. A current candidate also projects each fill's immutable
+order reference through the same `urn:xb:order:` namespace as the existing
+order surface; its source-port acceptance remains a separate gate.
 
 The client account-summary slice now implements authenticated
 `GET /v1/me/accounts`. It reads only the caller's complete durable account
@@ -106,7 +108,7 @@ This repository is not yet a production-capable replacement.
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
 | 2 — Durable execution | Complete | PostgreSQL 17 authority, immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
-| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, authenticated caller-scoped account summaries, and hash-only self-service API-key creation with encrypted durable replay, a PostgreSQL-authoritative owner cap, protected-client rate limiting, and an atomic audit fact. Funding, account-summary, and API-key implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first two separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, and same-statement filtered totals; the external fills route remains inventory until its complete source contract is implemented and reviewed. |
+| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, authenticated caller-scoped account summaries, and hash-only self-service API-key creation with encrypted durable replay, a PostgreSQL-authoritative owner cap, protected-client rate limiting, and an atomic audit fact. Funding, account-summary, and API-key implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first two separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, and same-statement filtered totals. A current candidate adds a correlatable fill-to-order URN projection; the external fills route remains inventory until its complete source contract is implemented and reviewed. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
@@ -128,6 +130,10 @@ The landed filtering slice additionally has live PostgreSQL 17 proof for
 lowercase side and exact fill-ID filters, same-statement totals, the exact
 production query plan over a representative 100,000-fill multi-account
 dataset, bounded migration rollback/retry, and separate source-port acceptance.
+The current fill-order correlation candidate additionally proves on PostgreSQL
+17 that a fill references the same stable `urn:xb:order:` identity exposed by
+the existing order surface; it does not activate the external fills route or
+accept the pinned source row by itself.
 The client account-summary slice additionally has live PostgreSQL 17 HTTP
 proof through the least-privilege API role, cross-user isolation, exact full
 wire-shape assertions, and a contended additive-schema upgrade that rolls back
