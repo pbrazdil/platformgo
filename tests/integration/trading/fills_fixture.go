@@ -46,12 +46,18 @@ type fillPage struct {
 	NextCursor string
 }
 
+type sagaRecord struct {
+	ID, Type, Correlation, State, Status string
+	History                              []string
+}
+
 // fillFixture replaces Postgres, the application container, and runtime
 // catalog loading with one synchronous authoritative writer.
 type fillFixture struct {
 	instruments map[string]fillInstrument
 	fills       []fillSeed
 	orders      map[string]*fillOrder
+	sagas       map[string]*sagaRecord
 }
 
 func newFillFixture() *fillFixture {
@@ -67,6 +73,7 @@ func newFillFixture() *fillFixture {
 			},
 		},
 		orders: make(map[string]*fillOrder),
+		sagas:  make(map[string]*sagaRecord),
 	}
 }
 
@@ -205,4 +212,18 @@ func (fixture *fillFixture) markRejected(orderID, reason string) bool {
 	}
 	order.Status, order.RejectReason = "rejected", reason
 	return true
+}
+
+func (fixture *fillFixture) startSaga(record sagaRecord) {
+	copy := record
+	copy.Status = "running"
+	fixture.sagas[record.ID] = &copy
+}
+
+func (fixture *fillFixture) advanceSaga(id, state, status string) {
+	saga := fixture.sagas[id]
+	saga.State, saga.Status = state, status
+	if status != "running" {
+		saga.History = append(saga.History, state)
+	}
 }
