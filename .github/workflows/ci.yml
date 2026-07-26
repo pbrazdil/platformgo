@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:19beta2-alpine
         env:
           POSTGRES_DB: platformgo_test
           POSTGRES_PASSWORD: platformgo
@@ -133,7 +133,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:19beta2-alpine
         env:
           POSTGRES_DB: platformgo_test
           POSTGRES_PASSWORD: platformgo
