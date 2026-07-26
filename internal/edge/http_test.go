@@ -154,7 +154,7 @@ func (testIdentity) MyAccounts(
 	}}, nil
 }
 
-func (testIdentity) CheckClientMutationRate(
+func (testIdentity) CheckClientRate(
 	_ context.Context,
 	_ Principal,
 ) error {
@@ -167,12 +167,18 @@ func (testIdentity) CreateMyAPIKey(
 	_ string,
 	_ string,
 	_ CreateAPIKeyRequest,
-) (APIKeyCreated, error) {
-	return APIKeyCreated{
+) (APIKeyAdmission, error) {
+	response := APIKeyCreated{
 		ID:     "urn:xb:apikey:00000000-0000-4000-8000-000000000001",
 		Prefix: "000000000001",
 		Token:  "xbk_000000000001.secret",
-	}, nil
+	}
+	body, _ := json.Marshal(response)
+	return APIKeyAdmission{Response: StoredResponse{
+		Status:  http.StatusCreated,
+		Headers: []byte(`{"Content-Type":["application/json"]}`),
+		Body:    append(body, '\n'),
+	}}, nil
 }
 
 type rateLimitedIdentity struct {
@@ -180,7 +186,7 @@ type rateLimitedIdentity struct {
 	createCalls int
 }
 
-func (identity *rateLimitedIdentity) CheckClientMutationRate(
+func (identity *rateLimitedIdentity) CheckClientRate(
 	_ context.Context,
 	_ Principal,
 ) error {
@@ -193,9 +199,9 @@ func (identity *rateLimitedIdentity) CreateMyAPIKey(
 	_ string,
 	_ string,
 	_ CreateAPIKeyRequest,
-) (APIKeyCreated, error) {
+) (APIKeyAdmission, error) {
 	identity.createCalls++
-	return APIKeyCreated{}, nil
+	return APIKeyAdmission{}, RateLimitError{RetryAfterSeconds: 60}
 }
 
 func (testIdentity) BrokerEcho(
@@ -389,7 +395,7 @@ func TestCORSPreflightAndRequestHardening(t *testing.T) {
 	}
 }
 
-func TestAPIKeyRateLimitRejectsBeforeCredentialCreation(t *testing.T) {
+func TestAPIKeyRateLimitResponseComesFromAtomicCredentialAdmission(t *testing.T) {
 	identity := &rateLimitedIdentity{}
 	handler := NewServer(ServerConfig{
 		Authenticator: testAuthenticator{},
@@ -402,8 +408,9 @@ func TestAPIKeyRateLimitRejectsBeforeCredentialCreation(t *testing.T) {
 		"/v1/me/api-keys",
 		[]byte(`{"name":"blocked"}`),
 		map[string]string{
-			"authorization": "Bearer client-token",
-			"content-type":  "application/json",
+			"authorization":   "Bearer client-token",
+			"content-type":    "application/json",
+			"idempotency-key": "blocked-key",
 		},
 	)
 	if response.Code != http.StatusTooManyRequests {
@@ -413,8 +420,50 @@ func TestAPIKeyRateLimitRejectsBeforeCredentialCreation(t *testing.T) {
 			response.Body.String(),
 		)
 	}
+	if identity.createCalls != 1 {
+		t.Fatalf("credential admission calls = %d, want 1", identity.createCalls)
+	}
+	if got := response.Header().Get("retry-after"); got != "60" {
+		t.Fatalf("Retry-After = %q, want 60", got)
+	}
+	if !strings.Contains(response.Body.String(), `"code":"too_many_requests"`) {
+		t.Fatalf("unexpected rate-limit body: %s", response.Body.String())
+	}
+}
+
+func TestAPIKeyRequiresIdempotencyBeforeRequestDecoding(t *testing.T) {
+	identity := &rateLimitedIdentity{}
+	handler := NewServer(ServerConfig{
+		Authenticator: testAuthenticator{},
+		Identity:      identity,
+	}).Handler()
+	response := performRequest(
+		t,
+		handler,
+		http.MethodPost,
+		"/v1/me/api-keys",
+		[]byte(`not-json`),
+		map[string]string{
+			"authorization": "Bearer client-token",
+			"content-type":  "application/json",
+		},
+	)
+	if response.Code != http.StatusBadRequest ||
+		!strings.Contains(
+			response.Body.String(),
+			`"message":"Idempotency-Key is required"`,
+		) {
+		t.Fatalf(
+			"missing-idempotency response = %d %s",
+			response.Code,
+			response.Body.String(),
+		)
+	}
 	if identity.createCalls != 0 {
-		t.Fatalf("credential creation calls = %d, want 0", identity.createCalls)
+		t.Fatalf(
+			"credential admission calls = %d, want 0",
+			identity.createCalls,
+		)
 	}
 }
 

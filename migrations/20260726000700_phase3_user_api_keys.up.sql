@@ -147,10 +147,12 @@ BEFORE UPDATE OR DELETE ON audit.events
 FOR EACH ROW EXECUTE FUNCTION engine.reject_immutable_change();
 
 CREATE FUNCTION identity.claim_client_rate_limit(
-    requested_owner_user_id text,
-    requested_at timestamptz
+    requested_owner_user_id text
 )
-RETURNS boolean
+RETURNS TABLE (
+    allowed boolean,
+    retry_after_seconds bigint
+)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog
@@ -165,10 +167,7 @@ DECLARE
     authority_time timestamptz;
 BEGIN
     authority_time := statement_timestamp();
-    IF requested_owner_user_id NOT LIKE 'urn:xb:user:%'
-        OR NOT isfinite(requested_at)
-        OR abs(extract(epoch FROM requested_at - authority_time)) > 5
-    THEN
+    IF requested_owner_user_id NOT LIKE 'urn:xb:user:%' THEN
         RAISE EXCEPTION USING
             ERRCODE = '22023',
             MESSAGE = 'invalid client rate-limit claim';
@@ -194,7 +193,8 @@ BEGIN
     ON CONFLICT (owner_user_id) DO NOTHING;
     GET DIAGNOSTICS inserted_count = ROW_COUNT;
     IF inserted_count = 1 THEN
-        RETURN true;
+        RETURN QUERY SELECT true, 0::bigint;
+        RETURN;
     END IF;
 
     SELECT limits.window_started_at, limits.request_count
@@ -204,7 +204,8 @@ BEGIN
      FOR UPDATE;
 
     IF authority_time < stored_window_started_at THEN
-        RETURN false;
+        RETURN QUERY SELECT false, policy_window_seconds::bigint;
+        RETURN;
     END IF;
     IF authority_time >= stored_window_started_at
         + make_interval(secs => policy_window_seconds)
@@ -213,16 +214,160 @@ BEGIN
            SET window_started_at = authority_time,
                request_count = 1
          WHERE owner_user_id = requested_owner_user_id;
-        RETURN true;
+        RETURN QUERY SELECT true, 0::bigint;
+        RETURN;
     END IF;
     IF stored_request_count >= policy_max THEN
-        RETURN false;
+        RETURN QUERY SELECT false, policy_window_seconds::bigint;
+        RETURN;
     END IF;
 
     UPDATE identity.client_rate_limits
        SET request_count = request_count + 1
      WHERE owner_user_id = requested_owner_user_id;
-    RETURN true;
+    RETURN QUERY SELECT true, 0::bigint;
+    RETURN;
+END;
+$$;
+
+CREATE FUNCTION identity.replay_user_api_key(
+    requested_owner_user_id text,
+    requested_idempotency_key text,
+    requested_request_hash bytea
+)
+RETURNS TABLE (
+    found boolean,
+    response_status integer,
+    replay_key_id text,
+    response_nonce bytea,
+    response_ciphertext bytea
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+SET lock_timeout = '5s'
+AS $$
+DECLARE
+    stored_request_hash bytea;
+    stored_response_status integer;
+    stored_replay_key_id text;
+    stored_response_nonce bytea;
+    stored_response_ciphertext bytea;
+    stored_expires_at timestamptz;
+BEGIN
+    IF requested_owner_user_id NOT LIKE 'urn:xb:user:%'
+        OR requested_idempotency_key = ''
+        OR octet_length(requested_request_hash) <> 32
+    THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '22023',
+            MESSAGE = 'invalid API-key replay request';
+    END IF;
+
+    SELECT
+        replays.request_hash,
+        replays.response_status,
+        replays.replay_key_id,
+        replays.response_nonce,
+        replays.response_ciphertext,
+        replays.expires_at
+      INTO
+        stored_request_hash,
+        stored_response_status,
+        stored_replay_key_id,
+        stored_response_nonce,
+        stored_response_ciphertext,
+        stored_expires_at
+      FROM identity.api_key_replays AS replays
+     WHERE replays.owner_user_id = requested_owner_user_id
+       AND replays.idempotency_key = requested_idempotency_key;
+
+    IF NOT FOUND OR stored_expires_at <= statement_timestamp() THEN
+        RETURN QUERY SELECT
+            false,
+            0,
+            ''::text,
+            ''::bytea,
+            ''::bytea;
+        RETURN;
+    END IF;
+    IF stored_request_hash <> requested_request_hash THEN
+        RAISE EXCEPTION USING
+            ERRCODE = 'P0003',
+            MESSAGE = 'API-key idempotency conflict';
+    END IF;
+    RETURN QUERY SELECT
+        true,
+        stored_response_status,
+        stored_replay_key_id,
+        stored_response_nonce,
+        stored_response_ciphertext;
+END;
+$$;
+
+CREATE FUNCTION identity.verify_api_key_policy(
+    expected_max_active_per_owner bigint,
+    expected_rate_limit_max_requests bigint,
+    expected_rate_limit_window_seconds bigint,
+    expected_idempotency_ttl_seconds bigint
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+    SELECT
+        (expected_max_active_per_owner IS NULL
+            OR policy.max_active_per_owner = expected_max_active_per_owner)
+        AND (expected_rate_limit_max_requests IS NULL
+            OR policy.client_rate_limit_max_requests
+                = expected_rate_limit_max_requests)
+        AND (expected_rate_limit_window_seconds IS NULL
+            OR policy.client_rate_limit_window_seconds
+                = expected_rate_limit_window_seconds)
+        AND (expected_idempotency_ttl_seconds IS NULL
+            OR policy.idempotency_ttl_seconds
+                = expected_idempotency_ttl_seconds)
+      FROM identity.api_key_policy AS policy
+     WHERE policy.singleton
+$$;
+
+CREATE FUNCTION identity.purge_expired_api_key_replays(
+    requested_batch_limit integer
+)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+SET lock_timeout = '5s'
+AS $$
+DECLARE
+    deleted_count bigint;
+BEGIN
+    IF requested_batch_limit NOT BETWEEN 1 AND 1000 THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '22023',
+            MESSAGE = 'invalid API-key replay cleanup batch';
+    END IF;
+
+    WITH expired AS (
+        SELECT replays.owner_user_id, replays.idempotency_key
+          FROM identity.api_key_replays AS replays
+         WHERE replays.expires_at <= statement_timestamp()
+         ORDER BY
+            replays.expires_at,
+            replays.owner_user_id,
+            replays.idempotency_key
+         FOR UPDATE SKIP LOCKED
+         LIMIT requested_batch_limit
+    )
+    DELETE FROM identity.api_key_replays AS replays
+     USING expired
+     WHERE replays.owner_user_id = expired.owner_user_id
+       AND replays.idempotency_key = expired.idempotency_key;
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    RETURN deleted_count;
 END;
 $$;
 
@@ -242,7 +387,9 @@ CREATE FUNCTION identity.create_user_api_key(
     requested_response_ciphertext bytea
 )
 RETURNS TABLE (
-    replayed boolean,
+    outcome text,
+    response_status integer,
+    retry_after_seconds bigint,
     replay_key_id text,
     response_nonce bytea,
     response_ciphertext bytea
@@ -264,8 +411,11 @@ DECLARE
     stored_response_nonce bytea;
     stored_response_ciphertext bytea;
     stored_expires_at timestamptz;
+    rate_allowed boolean;
+    rate_retry_after bigint;
 BEGIN
     IF requested_name = ''
+        OR requested_idempotency_key = ''
         OR octet_length(requested_key_hash) <> 32
         OR requested_prefix !~ '^[0-9a-f]{12}$'
         OR requested_scopes IS NULL
@@ -330,17 +480,40 @@ BEGIN
             stored_request_hash := NULL;
         ELSIF FOUND THEN
             IF stored_request_hash <> requested_request_hash THEN
-                RAISE EXCEPTION USING
-                    ERRCODE = 'P0003',
-                    MESSAGE = 'API-key idempotency conflict';
+                RETURN QUERY SELECT
+                    'idempotency_conflict'::text,
+                    0,
+                    0::bigint,
+                    ''::text,
+                    ''::bytea,
+                    ''::bytea;
+                RETURN;
             END IF;
             RETURN QUERY SELECT
-                true,
+                'replayed'::text,
+                201,
+                0::bigint,
                 stored_replay_key_id,
                 stored_response_nonce,
                 stored_response_ciphertext;
             RETURN;
         END IF;
+    END IF;
+
+    SELECT rate.allowed, rate.retry_after_seconds
+      INTO STRICT rate_allowed, rate_retry_after
+      FROM identity.claim_client_rate_limit(
+        requested_owner_user_id
+      ) AS rate;
+    IF NOT rate_allowed THEN
+        RETURN QUERY SELECT
+            'rate_limited'::text,
+            0,
+            rate_retry_after,
+            ''::text,
+            ''::bytea,
+            ''::bytea;
+        RETURN;
     END IF;
 
     SELECT count(*)
@@ -350,9 +523,14 @@ BEGIN
        AND keys.revoked_at IS NULL;
 
     IF active_count >= policy_max_active THEN
-        RAISE EXCEPTION USING
-            ERRCODE = 'P0001',
-            MESSAGE = 'active API-key limit reached';
+        RETURN QUERY SELECT
+            'cap_conflict'::text,
+            0,
+            0::bigint,
+            ''::text,
+            ''::bytea,
+            ''::bytea;
+        RETURN;
     END IF;
 
     INSERT INTO identity.api_keys (
@@ -430,7 +608,9 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT
-        false,
+        'created'::text,
+        201,
+        0::bigint,
         requested_replay_key_id,
         requested_response_nonce,
         requested_response_ciphertext;
@@ -445,8 +625,21 @@ REVOKE ALL ON identity.api_key_replays FROM PUBLIC;
 REVOKE ALL ON identity.client_rate_limits FROM PUBLIC;
 
 REVOKE ALL ON FUNCTION identity.claim_client_rate_limit(
+    text
+) FROM PUBLIC;
+REVOKE ALL ON FUNCTION identity.replay_user_api_key(
     text,
-    timestamptz
+    text,
+    bytea
+) FROM PUBLIC;
+REVOKE ALL ON FUNCTION identity.verify_api_key_policy(
+    bigint,
+    bigint,
+    bigint,
+    bigint
+) FROM PUBLIC;
+REVOKE ALL ON FUNCTION identity.purge_expired_api_key_replays(
+    integer
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION identity.create_user_api_key(
     text,
@@ -465,8 +658,21 @@ REVOKE ALL ON FUNCTION identity.create_user_api_key(
 ) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION identity.claim_client_rate_limit(
+    text
+) TO platformgo_api;
+GRANT EXECUTE ON FUNCTION identity.replay_user_api_key(
     text,
-    timestamptz
+    text,
+    bytea
+) TO platformgo_api;
+GRANT EXECUTE ON FUNCTION identity.verify_api_key_policy(
+    bigint,
+    bigint,
+    bigint,
+    bigint
+) TO platformgo_api;
+GRANT EXECUTE ON FUNCTION identity.purge_expired_api_key_replays(
+    integer
 ) TO platformgo_api;
 GRANT EXECUTE ON FUNCTION identity.create_user_api_key(
     text,

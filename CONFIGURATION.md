@@ -61,24 +61,40 @@ Freeze the environment key list in the compatibility manifest.
 
 The effective API-key policy is a versioned singleton in PostgreSQL, not a
 process-local environment value. Migration `20260726000700` installs the pinned
-defaults: `25` active keys per owner, `600` authenticated client mutations per
-`60` seconds, and a `24` hour idempotency replay window. Every successful audit
+defaults: `25` active keys per owner, `600` authenticated client requests per
+`60` seconds, and a `24` hour idempotency replay window. The source deployment
+names `UZO_AUTH_MAX_API_KEYS_PER_OWNER`,
+`UZO_API_RATE_LIMIT_MAX_REQUESTS`, `UZO_API_RATE_LIMIT_WINDOW_SECS`, and
+`UZO_API_IDEMPOTENCY_TTL_SECS` remain cutover inputs. When any is present, the
+API compares it with the durable singleton before serving and on every
+readiness probe. A mismatch fails closed until a separately reviewed policy
+operation reconciles PostgreSQL; an API replica never applies a local override.
+Every successful audit
 fact records the durable policy version and effective owner cap. Policy changes
 require a separately reviewed, audited PostgreSQL operation; mixed API replicas
 cannot submit different limits.
 
-`UZO_AUTH_API_KEY_REPLAY_KEYS` is secret JSON containing an ordered AES-256-GCM
-keyring. The first entry encrypts new idempotency responses; following entries
-decrypt responses created before rotation:
+`POST /v1/me/api-keys` requires a nonempty client-stable
+`Idempotency-Key`. This is an owner-approved safety deviation from the pinned
+source's optional middleware contract: a shown-once credential is never made
+active unless its exact encrypted response can be recovered after an unknown
+HTTP outcome.
+
+`UZO_AUTH_API_KEY_REPLAY_KEYS` is secret JSON containing an AES-256-GCM
+keyring. `UZO_AUTH_API_KEY_REPLAY_ACTIVE_KEY_ID` explicitly selects the key that
+encrypts new idempotency responses:
 
 ```json
 [{"id":"2026-07-primary","key":"<base64-encoded 32 bytes>"}]
 ```
 
-Rotation prepends the new key, retains every previous key for at least the
-durable replay TTL, and removes an old key only after that interval has elapsed.
-The API fails closed when replay material names an unavailable key. Plaintext
-API-key tokens are never stored in the key table, audit trail, or replay table.
+Rotation is two-stage. First distribute the future key to every serving replica
+while the old active ID remains unchanged, and verify that every replica can
+decrypt both keys. Only then change the active ID across the fleet. Retain the
+old key for at least the durable replay TTL and until bounded cleanup reports no
+live response encrypted under it. The API fails closed when replay material
+names an unavailable key. Plaintext API-key tokens are never stored in the key
+table, audit trail, or replay table.
 
 `platformgo_api` is the trusted authenticated-principal authority for this
 slice. PostgreSQL independently enforces the durable policy, transaction, and

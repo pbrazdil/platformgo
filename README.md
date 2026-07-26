@@ -59,15 +59,19 @@ The current user API-key candidate implements authenticated
 `POST /v1/me/api-keys` as a single PostgreSQL transaction. It returns the
 opaque `xbk_` credential once, persists only its SHA-256 digest, serializes the
 PostgreSQL-authoritative per-owner cap under the durable user-row lock, and
-appends the attributed audit fact atomically. Optional `Idempotency-Key`
-retries replay authenticated ciphertext under a rotatable external AES-256-GCM
-keyring, including after a post-commit unknown outcome, without storing the
-plaintext token. A shared PostgreSQL limiter enforces the pinned protected-
-client rate policy before credential entropy or mutation work. The additive
-migration grants the API role only execution of the bounded authority
-functions, not direct table mutation. Its three source behaviors still require
-replacement independent implementation review and separate port-ledger
-acceptance.
+appends the attributed audit fact atomically. Explicit `Idempotency-Key`
+retries replay an encrypted exact HTTP envelope before new entropy or rate
+capacity is consumed, including after a post-commit unknown outcome. A shared
+PostgreSQL limiter covers the complete protected-client surface and admits a
+new credential in the same transaction only after replay/conflict resolution.
+Legacy source policy inputs are frozen and fail readiness closed when they do
+not match the durable singleton. Replay-key rotation uses an explicit active
+key and distribute-then-promote procedure; expired ciphertext is removed by a
+bounded owned cleanup loop. The additive migration grants the API role only
+execution of bounded authority functions, not direct table mutation. The
+shown-once endpoint requires a client-stable `Idempotency-Key`; this
+owner-approved safety deviation prevents an active credential whose only
+plaintext response was lost.
 
 Phase 3 is not complete. The runtime must still:
 
@@ -120,19 +124,21 @@ proof through the least-privilege API role, cross-user isolation, exact full
 wire-shape assertions, and a contended additive-schema upgrade that rolls back
 within the bounded lock window and retries without data loss. Its pinned source
 behavior has separate port-ledger acceptance.
-The current API-key candidate has focused PostgreSQL 17 HTTP proof for the
-source `201`/`401` behavior, a concurrent race for the final owner slot,
-hash-only secret persistence, exact actor/request audit attribution, direct
-API-role mutation denial, and bounded migration rollback/retry. Review of its
-first exact candidate rejected missing idempotent recovery, rate limiting,
-durable policy authority, and source-compatible input behavior. The replacement
-has focused live PostgreSQL 17 proof for encrypted replay after an injected
-post-commit unknown outcome, concurrent duplicate delivery, retained-key
-rotation, request-hash conflict, shared rate limiting, and source-compatible
-names/scopes. The complete compatibility and PostgreSQL packages pass live
-against disposable PostgreSQL 17, and repository-wide policy, formatting,
-lint, unit, race, repeat, and vulnerability gates pass locally. Replacement
-hosted validation and replacement independent review remain pending.
+The exact API-key candidate `d512d657` passed hosted CI 7/7 but all four
+independent reviewers rejected it. Their blockers were incomplete exact-wire
+recovery, rate/replay ordering and incomplete protected-route rate coverage,
+silent legacy-policy override loss, request-decoder mismatches, unsafe rolling
+key activation, and missing replay cleanup. The working replacement now has
+focused PostgreSQL 17 proof for exact encrypted status/header/body replay after
+an injected post-commit unknown outcome, recovery and conflict without entropy,
+concurrent duplicates with one rate token, cross-route/cross-replica limiting
+with source `429`/`Retry-After`, additive-field and known-field compatibility,
+fail-closed legacy-policy reconciliation, two-stage key rotation, and bounded
+idempotent ciphertext cleanup. The complete compatibility and PostgreSQL
+packages pass live against disposable PostgreSQL 17, and `go test ./...`,
+base-aware policy, and diff checks pass locally. The required-header deviation
+is selected and represented in the frozen contract; full gates, hosted
+validation, and replacement independent review remain.
 These results do not activate the external fills route or complete the
 remaining Phase 3 scope.
 

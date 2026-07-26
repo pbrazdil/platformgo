@@ -205,13 +205,14 @@
             "type": "array"
           },
           "tenantId": {
+            "pattern": "^urn:xb:tenant:[0-9A-Za-z]{1,22}$",
             "type": [
               "string",
               "null"
             ]
           },
           "ttlSecs": {
-            "minimum": 1,
+            "minimum": 0,
             "type": [
               "integer",
               "null"
@@ -780,6 +781,25 @@
             },
             "description": "Forbidden"
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "required": true,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          },
           "503": {
             "content": {
               "application/json": {
@@ -900,6 +920,25 @@
               }
             },
             "description": "Forbidden"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "required": true,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -977,6 +1016,25 @@
             },
             "description": "Forbidden"
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "required": true,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          },
           "503": {
             "content": {
               "application/json": {
@@ -998,6 +1056,7 @@
             "name": "Idempotency-Key",
             "required": false,
             "schema": {
+              "minLength": 1,
               "type": "string"
             }
           }
@@ -1062,6 +1121,25 @@
               }
             },
             "description": "Idempotency conflict"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "required": true,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -1154,6 +1232,25 @@
               }
             },
             "description": "Forbidden"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "required": true,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -1358,6 +1455,25 @@
             },
             "description": "Not found"
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "required": true,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          },
           "503": {
             "content": {
               "application/json": {
@@ -1399,6 +1515,25 @@
             },
             "description": "Missing or invalid credentials"
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "required": true,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          },
           "503": {
             "content": {
               "application/json": {
@@ -1425,8 +1560,9 @@
           {
             "in": "header",
             "name": "Idempotency-Key",
-            "required": false,
+            "required": true,
             "schema": {
+              "minLength": 1,
               "type": "string"
             }
           }
@@ -1490,7 +1626,16 @@
                 }
               }
             },
-            "description": "Rate limited"
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "required": true,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "503": {
             "content": {
@@ -1545,6 +1690,25 @@
               }
             },
             "description": "Missing or invalid credentials"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "required": true,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "503": {
             "content": {

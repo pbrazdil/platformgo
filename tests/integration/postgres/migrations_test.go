@@ -3090,6 +3090,9 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 	var (
 		apiCanInsert       bool
 		apiCanExecute      bool
+		apiCanReplay       bool
+		apiCanVerifyPolicy bool
+		apiCanPurgeReplay  bool
 		apiCanUpdatePolicy bool
 		apiCanReadReplay   bool
 	)
@@ -3100,12 +3103,27 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 				'identity.api_keys',
 				'INSERT'
 			),
-			has_function_privilege(
-				'platformgo_api',
-				'identity.create_user_api_key(text,uuid,text,bytea,text,text[],uuid,text,text,bytea,text,bytea,bytea)',
-				'EXECUTE'
-			),
-			has_table_privilege(
+				has_function_privilege(
+					'platformgo_api',
+					'identity.create_user_api_key(text,uuid,text,bytea,text,text[],uuid,text,text,bytea,text,bytea,bytea)',
+					'EXECUTE'
+				),
+				has_function_privilege(
+					'platformgo_api',
+					'identity.replay_user_api_key(text,text,bytea)',
+					'EXECUTE'
+				),
+				has_function_privilege(
+					'platformgo_api',
+					'identity.verify_api_key_policy(bigint,bigint,bigint,bigint)',
+					'EXECUTE'
+				),
+				has_function_privilege(
+					'platformgo_api',
+					'identity.purge_expired_api_key_replays(integer)',
+					'EXECUTE'
+				),
+				has_table_privilege(
 				'platformgo_api',
 				'identity.api_key_policy',
 				'UPDATE'
@@ -3118,6 +3136,9 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 	).Scan(
 		&apiCanInsert,
 		&apiCanExecute,
+		&apiCanReplay,
+		&apiCanVerifyPolicy,
+		&apiCanPurgeReplay,
 		&apiCanUpdatePolicy,
 		&apiCanReadReplay,
 	); err != nil {
@@ -3125,12 +3146,18 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 	}
 	if apiCanInsert ||
 		!apiCanExecute ||
+		!apiCanReplay ||
+		!apiCanVerifyPolicy ||
+		!apiCanPurgeReplay ||
 		apiCanUpdatePolicy ||
 		apiCanReadReplay {
 		t.Fatalf(
-			"API-key role boundary = insert %t execute %t policy-update %t replay-read %t",
+			"API-key role boundary = insert %t create %t replay %t verify %t purge %t policy-update %t replay-read %t",
 			apiCanInsert,
 			apiCanExecute,
+			apiCanReplay,
+			apiCanVerifyPolicy,
+			apiCanPurgeReplay,
 			apiCanUpdatePolicy,
 			apiCanReadReplay,
 		)
@@ -3162,9 +3189,38 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 	); err != nil {
 		t.Fatalf("create API key through authority function: %v", err)
 	}
-	_, overCapErr := pool.Exec(ctx, `
+	_, missingIdempotencyErr := pool.Exec(ctx, `
 		SELECT identity.create_user_api_key(
 			'urn:xb:user:key-upgrade',
+			'00000000-0000-4000-8000-000000000705',
+			'missing-idempotency',
+			decode(repeat('0f', 32), 'hex'),
+			'000000000705',
+			ARRAY[]::text[],
+			'00000000-0000-4000-8000-000000000706',
+			'request-missing-idempotency',
+			'',
+			decode(repeat('10', 32), 'hex'),
+			'test-v1',
+			decode(repeat('11', 12), 'hex'),
+			decode(repeat('12', 17), 'hex')
+		)`)
+	var missingIdempotencyPostgresError *pgconn.PgError
+	if !errors.As(
+		missingIdempotencyErr,
+		&missingIdempotencyPostgresError,
+	) ||
+		missingIdempotencyPostgresError.Code != "22023" {
+		t.Fatalf(
+			"missing-idempotency authority error = %v, want SQLSTATE 22023",
+			missingIdempotencyErr,
+		)
+	}
+	var capOutcome string
+	if err := pool.QueryRow(ctx, `
+			SELECT outcome
+			  FROM identity.create_user_api_key(
+				'urn:xb:user:key-upgrade',
 			'00000000-0000-4000-8000-000000000703',
 			'over-cap-key',
 			decode(repeat('05', 32), 'hex'),
@@ -3176,11 +3232,12 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 			decode(repeat('06', 32), 'hex'),
 			'test-v1',
 			decode(repeat('07', 12), 'hex'),
-			decode(repeat('08', 17), 'hex')
-		)`)
-	var capError *pgconn.PgError
-	if !errors.As(overCapErr, &capError) || capError.Code != "P0001" {
-		t.Fatalf("durable owner-cap error = %v, want SQLSTATE P0001", overCapErr)
+				decode(repeat('08', 17), 'hex')
+			)`).Scan(&capOutcome); err != nil {
+		t.Fatalf("durable owner-cap outcome: %v", err)
+	}
+	if capOutcome != "cap_conflict" {
+		t.Fatalf("durable owner-cap outcome = %q", capOutcome)
 	}
 	var (
 		auditConfigurationVersion int
@@ -3227,6 +3284,87 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 	} {
 		if _, err := pool.Exec(ctx, statement); err == nil {
 			t.Fatalf("%s was accepted", name)
+		}
+		var policyMatches bool
+		if err := pool.QueryRow(ctx, `
+			SELECT identity.verify_api_key_policy(1,600,60,86400)`,
+		).Scan(&policyMatches); err != nil || !policyMatches {
+			t.Fatalf(
+				"matching legacy policy = %t, error = %v",
+				policyMatches,
+				err,
+			)
+		}
+		if err := pool.QueryRow(ctx, `
+			SELECT identity.verify_api_key_policy(2,600,60,86400)`,
+		).Scan(&policyMatches); err != nil || policyMatches {
+			t.Fatalf(
+				"mismatched legacy policy = %t, error = %v",
+				policyMatches,
+				err,
+			)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO identity.api_key_replays (
+				owner_user_id,
+				idempotency_key,
+				request_hash,
+				response_status,
+				replay_key_id,
+				response_nonce,
+				response_ciphertext,
+				created_at,
+				expires_at
+			) VALUES
+			(
+				'urn:xb:user:key-upgrade',
+				'expired-replay',
+				decode(repeat('0c', 32), 'hex'),
+				201,
+				'test-v1',
+				decode(repeat('0d', 12), 'hex'),
+				decode(repeat('0e', 17), 'hex'),
+				statement_timestamp() - interval '2 seconds',
+				statement_timestamp() - interval '1 second'
+			),
+			(
+				'urn:xb:user:key-upgrade',
+				'live-replay',
+				decode(repeat('09', 32), 'hex'),
+				201,
+				'test-v1',
+				decode(repeat('0a', 12), 'hex'),
+				decode(repeat('0b', 17), 'hex'),
+				statement_timestamp(),
+				statement_timestamp() + interval '1 hour'
+			)
+			ON CONFLICT (owner_user_id, idempotency_key) DO UPDATE
+			   SET created_at = EXCLUDED.created_at,
+			       expires_at = EXCLUDED.expires_at`); err != nil {
+			t.Fatalf("seed replay cleanup rows: %v", err)
+		}
+		var deleted int
+		if err := pool.QueryRow(ctx, `
+			SELECT identity.purge_expired_api_key_replays(1)`,
+		).Scan(&deleted); err != nil || deleted != 1 {
+			t.Fatalf("first replay cleanup = %d, error = %v", deleted, err)
+		}
+		if err := pool.QueryRow(ctx, `
+			SELECT identity.purge_expired_api_key_replays(1)`,
+		).Scan(&deleted); err != nil || deleted != 0 {
+			t.Fatalf("repeated replay cleanup = %d, error = %v", deleted, err)
+		}
+		var liveReplayCount int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*)
+			  FROM identity.api_key_replays
+			 WHERE idempotency_key = 'live-replay'`,
+		).Scan(&liveReplayCount); err != nil || liveReplayCount != 1 {
+			t.Fatalf(
+				"live replay count = %d, error = %v",
+				liveReplayCount,
+				err,
+			)
 		}
 	}
 }

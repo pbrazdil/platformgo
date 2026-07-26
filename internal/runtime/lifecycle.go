@@ -28,15 +28,17 @@ import (
 )
 
 const (
-	outboxBatchSize         = 100
-	outboxLease             = 30 * time.Second
-	outboxRetry             = time.Second
-	realtimeBatchSize       = 1
-	realtimeLease           = 30 * time.Second
-	realtimeRetry           = time.Second
-	realtimeMaxAttempts     = uint32(10)
-	realtimeFinalizeTimeout = 5 * time.Second
-	runtimeSchemaRevision   = "20260725001100_phase3_committed_realtime_outbox"
+	outboxBatchSize          = 100
+	outboxLease              = 30 * time.Second
+	outboxRetry              = time.Second
+	realtimeBatchSize        = 1
+	realtimeLease            = 30 * time.Second
+	realtimeRetry            = time.Second
+	realtimeMaxAttempts      = uint32(10)
+	realtimeFinalizeTimeout  = 5 * time.Second
+	apiKeyReplayCleanupBatch = 100
+	apiKeyReplayCleanupEvery = time.Minute
+	runtimeSchemaRevision    = "20260725001100_phase3_committed_realtime_outbox"
 )
 
 type databaseRuntimeRole string
@@ -125,14 +127,36 @@ func Serve(ctx context.Context, config Config) error {
 		return err
 	}
 	compatibilityStore := platformpostgres.NewCompatibilityStore(pool)
+	verifyAPIKeyPolicy := func(checkContext context.Context) error {
+		policy := config.LegacyAPIKeyPolicy
+		return compatibilityStore.VerifyAPIKeyPolicy(
+			checkContext,
+			policy.MaxActivePerOwner,
+			policy.RateLimitMaxRequests,
+			policy.RateLimitWindowSecs,
+			policy.IdempotencyTTLSecs,
+		)
+	}
+	if err := verifyAPIKeyPolicy(ctx); err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+	if _, err := compatibilityStore.PurgeExpiredAPIKeyReplays(
+		ctx,
+		apiKeyReplayCleanupBatch,
+	); err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
 	postgresReady := func(checkContext context.Context) error {
 		if pingErr := pool.Ping(checkContext); pingErr != nil {
 			return pingErr
 		}
-		return compatibilityStore.RuntimeCommandReady(
+		if readyErr := compatibilityStore.RuntimeCommandReady(
 			checkContext,
 			config.ShardID,
-		)
+		); readyErr != nil {
+			return readyErr
+		}
+		return verifyAPIKeyPolicy(checkContext)
 	}
 	natsReady := func(checkContext context.Context) error {
 		if flushErr := flushNATS(checkContext, natsConnection); flushErr != nil {
@@ -159,6 +183,7 @@ func Serve(ctx context.Context, config Config) error {
 			APIKeyReplayKeys: applicationReplayKeys(
 				config.APIKeyReplayKeys,
 			),
+			APIKeyReplayActiveKeyID: config.APIKeyReplayActiveID,
 		},
 	)
 	if err != nil {
@@ -221,7 +246,9 @@ func Serve(ctx context.Context, config Config) error {
 		grpcServer,
 		edge.NewGRPCServer(authenticator, submission),
 	)
-	errorsChannel := make(chan error, 2)
+	errorsChannel := make(chan error, 3)
+	cleanupContext, cancelCleanup := context.WithCancel(ctx)
+	defer cancelCleanup()
 	go func() {
 		if serveErr := httpServer.Serve(restListener); !errors.Is(serveErr, http.ErrServerClosed) {
 			errorsChannel <- fmt.Errorf("serve REST: %w", serveErr)
@@ -230,6 +257,35 @@ func Serve(ctx context.Context, config Config) error {
 	go func() {
 		if serveErr := grpcServer.Serve(grpcListener); serveErr != nil {
 			errorsChannel <- fmt.Errorf("serve gRPC: %w", serveErr)
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(apiKeyReplayCleanupEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-cleanupContext.Done():
+				return
+			case <-ticker.C:
+				deleted, cleanupErr := compatibilityStore.
+					PurgeExpiredAPIKeyReplays(
+						cleanupContext,
+						apiKeyReplayCleanupBatch,
+					)
+				if cleanupErr != nil {
+					errorsChannel <- fmt.Errorf(
+						"API-key replay cleanup: %w",
+						cleanupErr,
+					)
+					return
+				}
+				if deleted > 0 {
+					slog.Info(
+						"expired API-key replay cleanup completed",
+						"deleted", deleted,
+					)
+				}
+			}
 		}
 	}()
 

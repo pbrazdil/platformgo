@@ -155,11 +155,11 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "success": "LoginResponse",
     },
     ("GET", "/v1/me"): {
-        "statuses": [200, 401, 404, 503],
+        "statuses": [200, 401, 404, 429, 503],
         "success": "UserProfile",
     },
     ("GET", "/v1/me/accounts"): {
-        "statuses": [200, 401, 503],
+        "statuses": [200, 401, 429, 503],
         "success_array": "MyAccountView",
         "security": "bearer",
     },
@@ -176,29 +176,29 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "success_array": "InstrumentView",
     },
     ("POST", "/v1/me/realtime/token"): {
-        "statuses": [200, 401, 503],
+        "statuses": [200, 401, 429, 503],
         "success": "RealtimeToken",
     },
     ("POST", "/v1/accounts/{accountId}/orders"): {
-        "statuses": [202, 400, 401, 403, 409, 503],
+        "statuses": [202, 400, 401, 403, 409, 429, 503],
         "idempotency": True,
         "request": "SubmitOrderRequest",
         "success": "OrderAccepted",
     },
     ("GET", "/v1/accounts/{accountId}/orders"): {
-        "statuses": [200, 400, 401, 403, 503],
+        "statuses": [200, 400, 401, 403, 429, 503],
         "success_array": "OrderView",
     },
     ("GET", "/v1/accounts/{accountId}/positions"): {
-        "statuses": [200, 400, 401, 403, 503],
+        "statuses": [200, 400, 401, 403, 429, 503],
         "success_array": "PositionView",
     },
     ("GET", "/v1/accounts/{accountId}/balances"): {
-        "statuses": [200, 400, 401, 403, 503],
+        "statuses": [200, 400, 401, 403, 429, 503],
         "success_array": "BalanceView",
     },
     ("GET", "/v1/accounts/{accountId}/funding"): {
-        "statuses": [200, 400, 401, 403],
+        "statuses": [200, 400, 401, 403, 429],
         "success": "FundingPage",
         "success_description": "Funding history, newest first",
         "pagination": True,
@@ -261,6 +261,16 @@ def response(
         value["content"] = {
             "application/json": {"schema": {"$ref": "#/components/schemas/Error"}}
         }
+        if status == 429:
+            value["headers"] = {
+                "Retry-After": {
+                    "required": True,
+                    "schema": {
+                        "type": "integer",
+                        "minimum": 1,
+                    },
+                }
+            }
     return value
 
 
@@ -318,8 +328,13 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                 {
                     "name": "Idempotency-Key",
                     "in": "header",
-                    "required": False,
-                    "schema": {"type": "string"},
+                    "required": (
+                        method == "POST" and path == "/v1/me/api-keys"
+                    ),
+                    "schema": {
+                        "type": "string",
+                        "minLength": 1,
+                    },
                 }
             ]
         if accepted is not None and accepted.get("pagination") is True:
@@ -408,9 +423,12 @@ def schemas(client: bool) -> dict[str, object]:
                 },
                 "ttlSecs": {
                     "type": ["integer", "null"],
-                    "minimum": 1,
+                    "minimum": 0,
                 },
-                "tenantId": {"type": ["string", "null"]},
+                "tenantId": {
+                    "type": ["string", "null"],
+                    "pattern": "^urn:xb:tenant:[0-9A-Za-z]{1,22}$",
+                },
             },
         },
         "APIKeyCreated": {

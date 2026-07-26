@@ -66,6 +66,28 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 	if !contains(manifest.EnvironmentKeys, "UZO_AUTH_API_KEY_REPLAY_KEYS") {
 		t.Fatal("UZO_AUTH_API_KEY_REPLAY_KEYS missing from compatibility manifest")
 	}
+	for _, key := range []string{
+		"UZO_AUTH_API_KEY_REPLAY_ACTIVE_KEY_ID",
+		"UZO_AUTH_MAX_API_KEYS_PER_OWNER",
+		"UZO_API_RATE_LIMIT_MAX_REQUESTS",
+		"UZO_API_RATE_LIMIT_WINDOW_SECS",
+		"UZO_API_IDEMPOTENCY_TTL_SECS",
+	} {
+		if !contains(manifest.EnvironmentKeys, key) {
+			t.Fatalf("%s missing from compatibility manifest", key)
+		}
+	}
+	deviationFound := false
+	for _, raw := range manifest.IntentionalDeviations {
+		var name string
+		if json.Unmarshal(raw, &name) == nil &&
+			name == "client-api-key-creation-requires-idempotency-key" {
+			deviationFound = true
+		}
+	}
+	if !deviationFound {
+		t.Fatal("required API-key idempotency deviation missing from manifest")
+	}
 	if !reflect.DeepEqual(manifest.ImplementedWorkers, []string{
 		"outbox-publisher", "realtime-publisher",
 		"event-consumer", "event-consumer:<pattern>",

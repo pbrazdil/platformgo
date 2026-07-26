@@ -305,17 +305,98 @@ func (store *CompatibilityStore) CreateSession(
 func (store *CompatibilityStore) ClaimClientRateLimit(
 	ctx context.Context,
 	principal string,
-	at time.Time,
-) (bool, error) {
-	var allowed bool
+) (application.ClientRateLimitResult, error) {
+	var result application.ClientRateLimitResult
 	if err := store.pool.QueryRow(ctx, `
-		SELECT identity.claim_client_rate_limit($1,$2)`,
+		SELECT allowed, retry_after_seconds
+		  FROM identity.claim_client_rate_limit($1)`,
 		principal,
-		at,
-	).Scan(&allowed); err != nil {
-		return false, fmt.Errorf("claim client rate limit: %w", err)
+	).Scan(&result.Allowed, &result.RetryAfter); err != nil {
+		return application.ClientRateLimitResult{},
+			fmt.Errorf("claim client rate limit: %w", err)
 	}
-	return allowed, nil
+	return result, nil
+}
+
+// ReplayUserAPIKey resolves a committed response before new entropy or rate
+// capacity is consumed.
+func (store *CompatibilityStore) ReplayUserAPIKey(
+	ctx context.Context,
+	principal string,
+	idempotencyKey string,
+	requestHash [sha256.Size]byte,
+) (application.UserAPIKeyReplayResult, error) {
+	var result application.UserAPIKeyReplayResult
+	if err := store.pool.QueryRow(ctx, `
+		SELECT
+			found,
+			response_status,
+			replay_key_id,
+			response_nonce,
+			response_ciphertext
+		  FROM identity.replay_user_api_key($1,$2,$3)`,
+		principal,
+		idempotencyKey,
+		requestHash[:],
+	).Scan(
+		&result.Found,
+		&result.ResponseStatus,
+		&result.ReplayKeyID,
+		&result.ReplayNonce,
+		&result.ReplayCiphertext,
+	); err != nil {
+		var postgresError *pgconn.PgError
+		if errors.As(err, &postgresError) &&
+			postgresError.Code == "P0003" {
+			return application.UserAPIKeyReplayResult{},
+				edge.ErrIdempotencyConflict
+		}
+		return application.UserAPIKeyReplayResult{},
+			fmt.Errorf("replay user API key: %w", err)
+	}
+	return result, nil
+}
+
+// VerifyAPIKeyPolicy fails closed when source deployment overrides have not
+// been reconciled into the PostgreSQL-authoritative policy.
+func (store *CompatibilityStore) VerifyAPIKeyPolicy(
+	ctx context.Context,
+	maxActive *uint64,
+	rateMax *uint64,
+	rateWindow *uint64,
+	idempotencyTTL *uint64,
+) error {
+	var matches bool
+	if err := store.pool.QueryRow(ctx, `
+		SELECT identity.verify_api_key_policy($1,$2,$3,$4)`,
+		nullableUint64(maxActive),
+		nullableUint64(rateMax),
+		nullableUint64(rateWindow),
+		nullableUint64(idempotencyTTL),
+	).Scan(&matches); err != nil {
+		return fmt.Errorf("verify API-key policy: %w", err)
+	}
+	if !matches {
+		return errors.New(
+			"API-key policy differs from configured source deployment values",
+		)
+	}
+	return nil
+}
+
+// PurgeExpiredAPIKeyReplays deletes one bounded database-time batch.
+func (store *CompatibilityStore) PurgeExpiredAPIKeyReplays(
+	ctx context.Context,
+	batchLimit int,
+) (int64, error) {
+	var deleted int64
+	if err := store.pool.QueryRow(ctx, `
+		SELECT identity.purge_expired_api_key_replays($1)`,
+		batchLimit,
+	).Scan(&deleted); err != nil {
+		return 0, fmt.Errorf("purge expired API-key replays: %w", err)
+	}
+	return deleted, nil
 }
 
 // CreateUserAPIKey atomically claims optional idempotency, enforces the
@@ -328,7 +409,9 @@ func (store *CompatibilityStore) CreateUserAPIKey(
 	var result application.UserAPIKeyCreationResult
 	if err := store.pool.QueryRow(ctx, `
 		SELECT
-			replayed,
+			outcome,
+			response_status,
+			retry_after_seconds,
 			replay_key_id,
 			response_nonce,
 			response_ciphertext
@@ -349,7 +432,9 @@ func (store *CompatibilityStore) CreateUserAPIKey(
 		creation.ReplayNonce,
 		creation.ReplayCiphertext,
 	).Scan(
-		&result.Replayed,
+		&result.Outcome,
+		&result.ResponseStatus,
+		&result.RetryAfter,
 		&result.ReplayKeyID,
 		&result.ReplayNonce,
 		&result.ReplayCiphertext,
@@ -357,22 +442,22 @@ func (store *CompatibilityStore) CreateUserAPIKey(
 		var postgresError *pgconn.PgError
 		switch {
 		case errors.As(err, &postgresError) &&
-			postgresError.Code == "P0001":
-			return application.UserAPIKeyCreationResult{}, edge.ErrConflict
-		case errors.As(err, &postgresError) &&
 			postgresError.Code == "P0002":
 			return application.UserAPIKeyCreationResult{},
 				application.ErrIdentityNotFound
-		case errors.As(err, &postgresError) &&
-			postgresError.Code == "P0003":
-			return application.UserAPIKeyCreationResult{},
-				edge.ErrIdempotencyConflict
 		default:
 			return application.UserAPIKeyCreationResult{},
 				fmt.Errorf("create user API key: %w", err)
 		}
 	}
 	return result, nil
+}
+
+func nullableUint64(value *uint64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 // BrokerEcho atomically stores or replays the exact principal-scoped response.

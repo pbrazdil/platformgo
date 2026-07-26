@@ -40,6 +40,8 @@ type Config struct {
 	TrustedProxies        []netip.Prefix
 	ClientTokenSecret     []byte
 	APIKeyReplayKeys      []APIKeyReplayKey
+	APIKeyReplayActiveID  string
+	LegacyAPIKeyPolicy    LegacyAPIKeyPolicy
 	BrokerCredentials     []edge.BrokerCredential
 	CentrifugoAPIURL      string
 	CentrifugoAPIKey      string
@@ -62,6 +64,15 @@ type brokerEnvironment struct {
 type APIKeyReplayKey struct {
 	ID  string
 	Key [32]byte
+}
+
+// LegacyAPIKeyPolicy preserves source deployment inputs at the cutover into
+// PostgreSQL authority. A configured mismatch fails readiness closed.
+type LegacyAPIKeyPolicy struct {
+	MaxActivePerOwner    *uint64
+	RateLimitMaxRequests *uint64
+	RateLimitWindowSecs  *uint64
+	IdempotencyTTLSecs   *uint64
 }
 
 type apiKeyReplayEnvironment struct {
@@ -101,6 +112,32 @@ func loadConfig(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	activeReplayKeyID := strings.TrimSpace(
+		getenv("UZO_AUTH_API_KEY_REPLAY_ACTIVE_KEY_ID"),
+	)
+	if len(replayKeys) > 1 && activeReplayKeyID == "" {
+		return Config{}, errors.New(
+			"UZO_AUTH_API_KEY_REPLAY_ACTIVE_KEY_ID is required with multiple replay keys",
+		)
+	}
+	if activeReplayKeyID == "" && len(replayKeys) == 1 {
+		activeReplayKeyID = replayKeys[0].ID
+	}
+	if activeReplayKeyID != "" {
+		found := false
+		for _, replayKey := range replayKeys {
+			found = found || replayKey.ID == activeReplayKeyID
+		}
+		if !found {
+			return Config{}, errors.New(
+				"UZO_AUTH_API_KEY_REPLAY_ACTIVE_KEY_ID is not present in the replay keyring",
+			)
+		}
+	}
+	legacyPolicy, err := loadLegacyAPIKeyPolicy(getenv)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		DatabaseURL:           getenv("UZO_DATABASE_URL"),
 		NATSURL:               getenv("UZO_NATS_URL"),
@@ -112,12 +149,53 @@ func loadConfig(getenv func(string) string) (Config, error) {
 		TrustedProxies:        trustedProxies,
 		ClientTokenSecret:     []byte(getenv("UZO_AUTH_CLIENT_TOKEN_SECRET")),
 		APIKeyReplayKeys:      replayKeys,
+		APIKeyReplayActiveID:  activeReplayKeyID,
+		LegacyAPIKeyPolicy:    legacyPolicy,
 		BrokerCredentials:     brokers,
 		CentrifugoAPIURL:      getenv("UZO_REALTIME_API_URL"),
 		CentrifugoAPIKey:      getenv("UZO_REALTIME_API_KEY"),
 		CentrifugoTokenSecret: []byte(getenv("UZO_REALTIME_TOKEN_SECRET")),
 		CentrifugoTokenTTL:    tokenTTL,
 		ShardID:               engine.ShardID(shard),
+	}, nil
+}
+
+func loadLegacyAPIKeyPolicy(
+	getenv func(string) string,
+) (LegacyAPIKeyPolicy, error) {
+	maxActive, err := optionalPositiveUint(
+		getenv,
+		"UZO_AUTH_MAX_API_KEYS_PER_OWNER",
+	)
+	if err != nil {
+		return LegacyAPIKeyPolicy{}, err
+	}
+	rateMax, err := optionalPositiveUint(
+		getenv,
+		"UZO_API_RATE_LIMIT_MAX_REQUESTS",
+	)
+	if err != nil {
+		return LegacyAPIKeyPolicy{}, err
+	}
+	rateWindow, err := optionalPositiveUint(
+		getenv,
+		"UZO_API_RATE_LIMIT_WINDOW_SECS",
+	)
+	if err != nil {
+		return LegacyAPIKeyPolicy{}, err
+	}
+	idempotencyTTL, err := optionalPositiveUint(
+		getenv,
+		"UZO_API_IDEMPOTENCY_TTL_SECS",
+	)
+	if err != nil {
+		return LegacyAPIKeyPolicy{}, err
+	}
+	return LegacyAPIKeyPolicy{
+		MaxActivePerOwner:    maxActive,
+		RateLimitMaxRequests: rateMax,
+		RateLimitWindowSecs:  rateWindow,
+		IdempotencyTTLSecs:   idempotencyTTL,
 	}, nil
 }
 
@@ -410,4 +488,19 @@ func unsignedValue(getenv func(string) string, name string, fallback uint64) (ui
 		return 0, fmt.Errorf("%s must be an unsigned integer", name)
 	}
 	return value, nil
+}
+
+func optionalPositiveUint(
+	getenv func(string) string,
+	name string,
+) (*uint64, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return nil, nil
+	}
+	value, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || value == 0 {
+		return nil, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return &value, nil
 }

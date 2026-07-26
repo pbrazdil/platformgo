@@ -557,6 +557,7 @@
             "name": "Idempotency-Key",
             "required": false,
             "schema": {
+              "minLength": 1,
               "type": "string"
             }
           }
@@ -777,6 +778,7 @@
             "name": "Idempotency-Key",
             "required": false,
             "schema": {
+              "minLength": 1,
               "type": "string"
             }
           }

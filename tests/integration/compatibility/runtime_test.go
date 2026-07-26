@@ -185,6 +185,20 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 	)`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE identity.api_key_policy
+		   SET version = version + 1,
+		       max_active_per_owner = 17,
+		       client_rate_limit_max_requests = 321,
+		       client_rate_limit_window_seconds = 45,
+		       idempotency_ttl_seconds = 7200
+		 WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+	legacyMaxActive := uint64(17)
+	legacyRateMax := uint64(321)
+	legacyRateWindow := uint64(45)
+	legacyIdempotencyTTL := uint64(7200)
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	serveConfig := platformruntime.Config{
@@ -199,6 +213,12 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 			netip.MustParsePrefix("::1/128"),
 		},
 		ClientTokenSecret: []byte("0123456789abcdef0123456789abcdef"),
+		LegacyAPIKeyPolicy: platformruntime.LegacyAPIKeyPolicy{
+			MaxActivePerOwner:    &legacyMaxActive,
+			RateLimitMaxRequests: &legacyRateMax,
+			RateLimitWindowSecs:  &legacyRateWindow,
+			IdempotencyTTLSecs:   &legacyIdempotencyTTL,
+		},
 		APIKeyReplayKeys: []platformruntime.APIKeyReplayKey{{
 			ID: "test-v1",
 			Key: [32]byte{
@@ -245,6 +265,20 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 		),
 		CentrifugoTokenTTL: time.Hour,
 		ShardID:            7,
+	}
+	mismatchedMaxActive := uint64(18)
+	mismatchedConfig := serveConfig
+	mismatchedConfig.LegacyAPIKeyPolicy.MaxActivePerOwner =
+		&mismatchedMaxActive
+	if err := platformruntime.Serve(
+		context.Background(),
+		mismatchedConfig,
+	); err == nil ||
+		!strings.Contains(
+			err.Error(),
+			"differs from configured source deployment values",
+		) {
+		t.Fatalf("unreconciled legacy policy error = %v", err)
 	}
 	serveContext, stopServe := context.WithCancel(runContext)
 	startServer := func(serverContext context.Context) <-chan error {
