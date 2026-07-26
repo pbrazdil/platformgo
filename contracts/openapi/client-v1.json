@@ -190,6 +190,152 @@
         ],
         "type": "object"
       },
+      "FillPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FillView"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "type": "string"
+          },
+          "prevCursor": {
+            "type": "string"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "FillView": {
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "base": {
+            "type": "string"
+          },
+          "commission": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "exchange": {
+            "type": "string"
+          },
+          "feeAsset": {
+            "type": "string"
+          },
+          "feeRate": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "fillId": {
+            "type": "string"
+          },
+          "filledAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "leverage": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "liquidity": {
+            "type": "string"
+          },
+          "orderId": {
+            "type": "string"
+          },
+          "orderType": {
+            "type": "string"
+          },
+          "positionId": {
+            "type": "string"
+          },
+          "price": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "productType": {
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "quote": {
+            "type": "string"
+          },
+          "quoteQuantity": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "realizedPnl": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "side": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "fillId",
+          "orderId",
+          "accountId",
+          "userId",
+          "exchange",
+          "symbol",
+          "side",
+          "quantity",
+          "price",
+          "quoteQuantity",
+          "commission",
+          "reason",
+          "filledAt"
+        ],
+        "type": "object"
+      },
+      "FundingPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FundingView"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "type": "string"
+          },
+          "prevCursor": {
+            "type": "string"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "FundingView": {
         "properties": {
           "accountLogin": {
@@ -238,29 +384,6 @@
           "fundingAmount",
           "currency",
           "fundingTime"
-        ],
-        "type": "object"
-      },
-      "FundingPage": {
-        "properties": {
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/FundingView"
-            },
-            "type": "array"
-          },
-          "nextCursor": {
-            "type": "string"
-          },
-          "prevCursor": {
-            "type": "string"
-          },
-          "total": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "items"
         ],
         "type": "object"
       },
@@ -674,12 +797,100 @@
     "/v1/accounts/{accountId}/fills": {
       "get": {
         "operationId": "get_v1_accounts_accountId_fills",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "accountId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "direction",
+            "required": false,
+            "schema": {
+              "enum": [
+                "next",
+                "prev",
+                "backward"
+              ],
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
-          "default": {
-            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FillPage"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid credentials"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
           }
         },
-        "x-platformgo-contract-status": "source-route-inventory"
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
       }
     },
     "/v1/accounts/{accountId}/funding": {
@@ -735,7 +946,7 @@
                 }
               }
             },
-            "description": "Funding history, newest first"
+            "description": "Success"
           },
           "400": {
             "content": {
@@ -766,13 +977,18 @@
               }
             },
             "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
           }
         },
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
         "x-platformgo-contract-status": "phase3-accepted-runtime"
       }
     },

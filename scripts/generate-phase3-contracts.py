@@ -184,6 +184,16 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "statuses": [200, 400, 401, 403, 503],
         "success_array": "BalanceView",
     },
+    ("GET", "/v1/accounts/{accountId}/fills"): {
+        "statuses": [200, 400, 401, 403, 503],
+        "success": "FillPage",
+        "pagination": True,
+    },
+    ("GET", "/v1/accounts/{accountId}/funding"): {
+        "statuses": [200, 400, 401, 403, 503],
+        "success": "FundingPage",
+        "pagination": True,
+    },
     ("GET", "/broker/v1/ping"): {"statuses": [200, 401]},
     ("POST", "/broker/v1/echo"): {
         "statuses": [200, 401, 403, 409, 503],
@@ -292,6 +302,36 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                     "required": False,
                     "schema": {"type": "string"},
                 }
+            ]
+        if accepted is not None and accepted.get("pagination") is True:
+            operation["parameters"] = [
+                {
+                    "name": "accountId",
+                    "in": "path",
+                    "required": True,
+                    "schema": {"type": "string"},
+                },
+                {
+                    "name": "limit",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "integer", "minimum": 1, "maximum": 200},
+                },
+                {
+                    "name": "cursor",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                },
+                {
+                    "name": "direction",
+                    "in": "query",
+                    "required": False,
+                    "schema": {
+                        "type": "string",
+                        "enum": ["next", "prev", "backward"],
+                    },
+                },
             ]
         paths.setdefault(path, {})[method.lower()] = operation
     return paths
@@ -464,6 +504,63 @@ def schemas() -> dict[str, object]:
                 "equity": decimal,
             },
         },
+        "FillView": {
+            "type": "object",
+            "required": [
+                "fillId",
+                "orderId",
+                "accountId",
+                "userId",
+                "exchange",
+                "symbol",
+                "side",
+                "quantity",
+                "price",
+                "quoteQuantity",
+                "commission",
+                "reason",
+                "filledAt",
+            ],
+            "properties": {
+                "fillId": {"type": "string"},
+                "orderId": {"type": "string"},
+                "positionId": {"type": "string"},
+                "accountId": {"type": "string"},
+                "userId": {"type": "string"},
+                "exchange": {"type": "string"},
+                "symbol": {"type": "string"},
+                "base": {"type": "string"},
+                "quote": {"type": "string"},
+                "productType": {"type": "string"},
+                "side": {"type": "string"},
+                "orderType": {"type": "string"},
+                "type": {"type": "string"},
+                "quantity": decimal,
+                "price": decimal,
+                "quoteQuantity": decimal,
+                "commission": decimal,
+                "feeRate": decimal,
+                "feeAsset": {"type": "string"},
+                "realizedPnl": decimal,
+                "liquidity": {"type": "string"},
+                "reason": {"type": "string"},
+                "leverage": decimal,
+                "filledAt": {"type": "string", "format": "date-time"},
+            },
+        },
+        "FillPage": {
+            "type": "object",
+            "required": ["items"],
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/FillView"},
+                },
+                "nextCursor": {"type": "string"},
+                "prevCursor": {"type": "string"},
+                "total": {"type": "integer"},
+            },
+        },
         "BrokerEcho": {
             "type": "object",
             "required": ["id"],
@@ -534,9 +631,41 @@ def schemas() -> dict[str, object]:
         },
         "FundingView": {
             "type": "object",
+            "required": [
+                "fundingId",
+                "symbol",
+                "positionId",
+                "positionSignedQty",
+                "oraclePrice",
+                "fundingRate",
+                "fundingAmount",
+                "currency",
+                "fundingTime",
+            ],
             "properties": {
-                "amount": decimal,
-                "rate": decimal,
+                "fundingId": {"type": "string"},
+                "symbol": {"type": "string"},
+                "positionId": {"type": "string"},
+                "positionSignedQty": decimal,
+                "oraclePrice": decimal,
+                "fundingRate": decimal,
+                "fundingAmount": decimal,
+                "currency": {"type": "string"},
+                "fundingTime": {"type": "string", "format": "date-time"},
+                "accountLogin": {"type": "integer"},
+            },
+        },
+        "FundingPage": {
+            "type": "object",
+            "required": ["items"],
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/FundingView"},
+                },
+                "nextCursor": {"type": "string"},
+                "prevCursor": {"type": "string"},
+                "total": {"type": "integer"},
             },
         },
         "RealtimeToken": {

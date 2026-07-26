@@ -424,6 +424,7 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 	clientOpenAPI := openAPIDocuments["/v1/openapi.json"]
 	requireJSONPath(t, clientOpenAPI, "paths", "/v1/accounts/{accountId}/funding", "get")
 	requireJSONPath(t, clientOpenAPI, "components", "schemas", "FundingView")
+	requireJSONPath(t, clientOpenAPI, "components", "schemas", "FillView")
 	requireJSONPath(t, clientOpenAPI, "components", "securitySchemes", "bearer")
 	parameters, ok := requireJSONPath(
 		t,

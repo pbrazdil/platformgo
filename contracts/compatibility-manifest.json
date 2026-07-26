@@ -35,6 +35,7 @@
     "GET /v1/accounts/{accountId}/orders",
     "GET /v1/accounts/{accountId}/positions",
     "GET /v1/accounts/{accountId}/balances",
+    "GET /v1/accounts/{accountId}/fills",
     "GET /v1/accounts/{accountId}/funding",
     "GET /broker/v1/ping",
     "POST /broker/v1/echo",
@@ -53,9 +54,9 @@
     "status": "additive-versioned-go-contract"
   },
   "openAPIArtifacts": {
-    "openapi/admin-v1.json": "615e8a49f9e6a71f6a3ea0108bd71353bd5b7050cc79cee6b17d98af84a6aeb3",
-    "openapi/broker-v1.json": "f8bd15b8c0c9fee3069f779dcbf9ade2cea82e7583804999f6c3e117a91fdac6",
-    "openapi/client-v1.json": "dc711a2136e601408ea99f1cd7b67e2ec1f3fc7dfa46dbbc7f7f336955b5e085"
+    "openapi/admin-v1.json": "d69d6145102ba8ead69b92634ac6c3c174d037987ca89c26626d089c0ecb84ab",
+    "openapi/broker-v1.json": "c5b2f471dd5996d4be71da2de3169df2945307ddc58201167eefb560746715b3",
+    "openapi/client-v1.json": "a54f86518b4dfb774f1827f71c03fc6b0134addd01cc812d283e19e1bc6596d0"
   },
   "platformSourceRevision": "50141367492be46ebf5623f6191a14b94af2f2bd",
   "protobufDescriptor": {

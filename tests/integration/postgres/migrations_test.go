@@ -791,6 +791,79 @@ func TestFundingHistoryMigrationUpgradesPopulatedRealtimeSchema(t *testing.T) {
 	assertFinalMigrationHistory(t, pool)
 }
 
+func TestFillHistoryMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000100_phase3_funding_history_read_model.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 41); err != nil {
+		t.Fatalf("apply previous funding schema: %v", err)
+	}
+
+	lockingTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin fill-history lock: %v", err)
+	}
+	defer func() { _ = lockingTx.Rollback(context.Background()) }()
+	if _, err := lockingTx.Exec(
+		ctx,
+		"LOCK TABLE trading.fills IN ROW EXCLUSIVE MODE",
+	); err != nil {
+		t.Fatalf("lock fills: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	startedAt := time.Now()
+	err = current.Migrate(ctx)
+	elapsed := time.Since(startedAt)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55P03" {
+		t.Fatalf("contended fill-history upgrade error = %v, want SQLSTATE 55P03", err)
+	}
+	if elapsed < 4*time.Second || elapsed > 8*time.Second {
+		t.Fatalf("bounded fill-history lock wait = %s, want approximately 5s", elapsed)
+	}
+	var (
+		lastMigration string
+		indexExists   bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			to_regclass('trading.fills_account_history_idx') IS NOT NULL`,
+	).Scan(&lastMigration, &indexExists); err != nil {
+		t.Fatalf("inspect rolled-back fill-history migration: %v", err)
+	}
+	if lastMigration != "20260726000100_phase3_funding_history_read_model.up.sql" ||
+		indexExists {
+		t.Fatalf(
+			"contended fill-history migration state = last %q index %t",
+			lastMigration,
+			indexExists,
+		)
+	}
+
+	if err := lockingTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry uncontended fill-history upgrade: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify retried fill-history upgrade: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
 func TestRuntimeMigrationVerificationIsExactAndOldEngineIsFenced(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
@@ -2257,9 +2330,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 13 ||
+	if count != 14 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260726000100_phase3_funding_history_read_model.up.sql" {
+		last != "20260726000200_phase3_fill_history_read_model.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,

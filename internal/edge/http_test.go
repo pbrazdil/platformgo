@@ -226,6 +226,32 @@ func (testTradingReader) Balances(context.Context, string) ([]BalanceView, error
 	return []BalanceView{{Currency: "USDC", Total: "1000", Free: "1000", Equity: "1000"}}, nil
 }
 
+func (testTradingReader) Fills(
+	_ context.Context,
+	accountID string,
+	_ PageParams,
+) (FillPage, error) {
+	total := int64(1)
+	return FillPage{
+		Items: []FillView{{
+			FillID:        "019fa844-26c0-7000-8000-000000000002",
+			OrderID:       "urn:xb:order:019fa844-26c0-7000-8000-000000000001",
+			AccountID:     accountID,
+			UserID:        "urn:xb:user:user-7",
+			Exchange:      "HYPERLIQUID",
+			Symbol:        "BTC-PERP",
+			Side:          "BUY",
+			Quantity:      "0.01",
+			Price:         "60000",
+			QuoteQuantity: "600",
+			Commission:    "0.5",
+			Reason:        "manual",
+			FilledAt:      "2020-09-13T12:26:40.123456789Z",
+		}},
+		Total: &total,
+	}, nil
+}
+
 func (testTradingReader) Funding(
 	_ context.Context,
 	_ string,
@@ -398,7 +424,7 @@ func TestSubmitOrderAuthenticatesOwnsAndReplaysExactly(t *testing.T) {
 	if accepted.IntentID != "intent-7" || accepted.OrderID == "" {
 		t.Fatalf("accepted = %#v", accepted)
 	}
-	for _, resource := range []string{"orders", "positions", "balances", "funding"} {
+	for _, resource := range []string{"orders", "positions", "balances", "fills", "funding"} {
 		response := performRequest(
 			t,
 			handler,
@@ -418,6 +444,11 @@ func TestSubmitOrderAuthenticatesOwnsAndReplaysExactly(t *testing.T) {
 		}
 		if resource == "balances" && !strings.Contains(response.Body.String(), `"currency":"USDC"`) {
 			t.Fatalf("balances = %s", response.Body.String())
+		}
+		if resource == "fills" &&
+			(!strings.Contains(response.Body.String(), `"filledAt":"2020-09-13T12:26:40.123456789Z"`) ||
+				!strings.Contains(response.Body.String(), `"total":1`)) {
+			t.Fatalf("fills = %s", response.Body.String())
 		}
 		if resource == "funding" &&
 			(!strings.Contains(response.Body.String(), `"fundingAmount":"-2"`) ||

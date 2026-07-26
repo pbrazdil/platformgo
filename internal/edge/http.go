@@ -211,8 +211,25 @@ func (server *Server) handleAccountRead(
 		response, err = server.trading.Positions(request.Context(), accountID)
 	case "balances":
 		response, err = server.trading.Balances(request.Context(), accountID)
+	case "fills":
+		params, parseErr := historyPageParams(request)
+		if parseErr != nil {
+			writeError(
+				writer,
+				request,
+				http.StatusBadRequest,
+				"invalid_request",
+				"invalid fill page",
+			)
+			return
+		}
+		response, err = server.trading.Fills(
+			request.Context(),
+			accountID,
+			params,
+		)
 	case "funding":
-		params, parseErr := fundingPageParams(request)
+		params, parseErr := historyPageParams(request)
 		if parseErr != nil {
 			writeError(
 				writer,
@@ -234,12 +251,16 @@ func (server *Server) handleAccountRead(
 	}
 	if err != nil {
 		if errors.Is(err, ErrInvalidRequest) {
+			message := "invalid funding page"
+			if resource == "fills" {
+				message = "invalid fill page"
+			}
 			writeError(
 				writer,
 				request,
 				http.StatusBadRequest,
 				"invalid_request",
-				"invalid funding page",
+				message,
 			)
 			return
 		}
@@ -575,7 +596,7 @@ func accountReadRoute(path string) (string, string, bool) {
 		return "", "", false
 	}
 	remainder := strings.TrimPrefix(path, prefix)
-	for _, resource := range []string{"orders", "positions", "balances", "funding"} {
+	for _, resource := range []string{"orders", "positions", "balances", "fills", "funding"} {
 		suffix := "/" + resource
 		if strings.HasSuffix(remainder, suffix) {
 			accountID := strings.TrimSuffix(remainder, suffix)
@@ -585,7 +606,7 @@ func accountReadRoute(path string) (string, string, bool) {
 	return "", "", false
 }
 
-func fundingPageParams(request *http.Request) (PageParams, error) {
+func historyPageParams(request *http.Request) (PageParams, error) {
 	params := PageParams{
 		Cursor:    request.URL.Query().Get("cursor"),
 		Direction: request.URL.Query().Get("direction"),
