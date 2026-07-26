@@ -1,6 +1,27 @@
 {
   "components": {
     "schemas": {
+      "APIKeyCreated": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "prefix": {
+            "pattern": "^[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "token": {
+            "pattern": "^xbk_[0-9a-f]{12}\\.[0-9a-f]{48}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "prefix",
+          "token"
+        ],
+        "type": "object"
+      },
       "BalanceView": {
         "properties": {
           "currency": {
@@ -160,6 +181,49 @@
         "required": [
           "id",
           "created"
+        ],
+        "type": "object"
+      },
+      "CreateAPIKeyRequest": {
+        "properties": {
+          "ipAllowlist": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "scopes": {
+            "default": [],
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "tenantId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ttlSecs": {
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
         ],
         "type": "object"
       },
@@ -1361,12 +1425,74 @@
     "/v1/me/api-keys": {
       "post": {
         "operationId": "post_v1_me_api-keys",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAPIKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
-          "default": {
-            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIKeyCreated"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid credentials"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Active API-key limit reached"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
           }
         },
-        "x-platformgo-contract-status": "source-route-inventory"
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
       }
     },
     "/v1/me/logout": {

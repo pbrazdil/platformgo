@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	"github.com/upcomers-org/platformgo/internal/application"
@@ -30,6 +32,8 @@ import (
 //   - The Rust runtime is replaced by the Go HTTP edge and real PostgreSQL 17.
 //   - Fixture password length follows the accepted Go credential policy; the
 //     source test asserts successful authentication, not a password minimum.
+//   - Shared request fields unused by the source client handler are accepted
+//     but do not alter the user-owned key.
 //   - Persistence is inspected to prove that the returned secret is shown once
 //     and only its SHA-256 digest is stored.
 //
@@ -58,7 +62,7 @@ func TestClientCreatesOwnAPIKey(t *testing.T) {
 		t,
 		http.MethodPost,
 		serverURL+"/v1/me/api-keys",
-		`{"name":"my-bot","scopes":["orders:write"]}`,
+		`{"name":"my-bot","scopes":["orders:write"],"ipAllowlist":["203.0.113.7"],"ttlSecs":3600,"tenantId":"urn:xb:tenant:ignored-by-client-route"}`,
 		map[string]string{
 			"authorization": "Bearer " + accessToken,
 			"x-request-id":  "request-create-my-bot",
@@ -102,7 +106,7 @@ func TestClientCreatesOwnAPIKey(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	wantHash := sha256.Sum256(secret)
+	wantHash := sha256.Sum256([]byte(parts[1]))
 	if storedName != "my-bot" ||
 		storedPrefix != created.Prefix ||
 		!bytes.Equal(storedHash, wantHash[:]) ||
@@ -118,6 +122,27 @@ func TestClientCreatesOwnAPIKey(t *testing.T) {
 	}
 	if strings.Contains(string(storedHash), created.Token) {
 		t.Fatal("stored API-key hash contains the returned token")
+	}
+	invalid := createMyAPIKey(
+		t,
+		serverURL,
+		accessToken,
+		`{"name":" bad ","scopes":["orders:write","orders:write"]}`,
+		"request-invalid-key",
+	)
+	if invalid.status != http.StatusBadRequest {
+		t.Fatalf("invalid status = %d, body = %s", invalid.status, invalid.body)
+	}
+	var unchangedCount int
+	if err := admin.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM identity.api_keys
+		 WHERE owner_user_id = 'urn:xb:user:bot-owner'`,
+	).Scan(&unchangedCount); err != nil {
+		t.Fatal(err)
+	}
+	if unchangedCount != 1 {
+		t.Fatalf("key count after invalid request = %d, want 1", unchangedCount)
 	}
 }
 
@@ -232,6 +257,18 @@ func TestPerOwnerAPIKeyCapIsEnforced(t *testing.T) {
 	if keyCount != 2 {
 		t.Fatalf("active key count = %d, want 2", keyCount)
 	}
+	var auditCount int
+	if err := admin.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM audit.events
+		 WHERE action = 'user-key.create'
+		   AND outcome = 'success'`,
+	).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 2 {
+		t.Fatalf("successful audit count = %d, want 2", auditCount)
+	}
 }
 
 // Ported from:
@@ -272,9 +309,11 @@ func TestUserAPIKeyCreateIsAuditedWithActor(t *testing.T) {
 		outcome    string
 		requestID  string
 		detail     string
+		eventCount int
 	)
 	if err := admin.QueryRow(ctx, `
 		SELECT
+			count(*) OVER (),
 			actor_kind,
 			actor_id,
 			action,
@@ -286,6 +325,7 @@ func TestUserAPIKeyCreateIsAuditedWithActor(t *testing.T) {
 		  FROM audit.events
 		 WHERE action = 'user-key.create'`,
 	).Scan(
+		&eventCount,
 		&actorKind,
 		&actorID,
 		&action,
@@ -298,6 +338,7 @@ func TestUserAPIKeyCreateIsAuditedWithActor(t *testing.T) {
 		t.Fatal(err)
 	}
 	if actorKind != "user" ||
+		eventCount != 1 ||
 		actorID != "urn:xb:user:bot-owner" ||
 		action != "user-key.create" ||
 		targetKind != "api_key" ||
@@ -319,7 +360,7 @@ func TestUserAPIKeyCreateIsAuditedWithActor(t *testing.T) {
 		t.Fatal("audit detail contains the returned API-key token")
 	}
 
-	if _, err := apiPool.Exec(ctx, `
+	_, directInsertErr := apiPool.Exec(ctx, `
 		INSERT INTO identity.api_keys (
 			api_key_id,
 			owner_user_id,
@@ -336,9 +377,14 @@ func TestUserAPIKeyCreateIsAuditedWithActor(t *testing.T) {
 			'000000000001',
 			ARRAY[]::text[],
 			'2026-07-26T00:00:00Z'
-		)`,
-	); err == nil {
-		t.Fatal("least-privilege API role inserted an API key directly")
+		)`)
+	var postgresError *pgconn.PgError
+	if !errors.As(directInsertErr, &postgresError) ||
+		postgresError.Code != "42501" {
+		t.Fatalf(
+			"direct API-role insert error = %v, want SQLSTATE 42501",
+			directInsertErr,
+		)
 	}
 }
 

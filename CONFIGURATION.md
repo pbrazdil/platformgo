@@ -57,6 +57,15 @@ Existing environment names required for drop-in deployment are retained or expli
 
 Freeze the environment key list in the compatibility manifest.
 
+### Phase 3 user API-key limit
+
+`UZO_AUTH_MAX_API_KEYS_PER_OWNER` is a non-secret positive integer with a
+default and hard maximum of `25`, matching the pinned platform default. The
+value is parsed once at API startup and passed immutably to the identity
+application service. PostgreSQL serializes creation for one durable owner and
+enforces the same hard ceiling inside the creation function, so concurrent
+requests or a compromised caller cannot raise the cap beyond `25`.
+
 ## 6. Reloading
 
 - Secret rotation and economic configuration use separate mechanisms.

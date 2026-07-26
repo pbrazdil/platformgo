@@ -301,6 +301,43 @@ func (store *CompatibilityStore) CreateSession(
 	return nil
 }
 
+// CreateUserAPIKey atomically enforces the owner cap, stores only the secret
+// hash, and appends the corresponding audit fact.
+func (store *CompatibilityStore) CreateUserAPIKey(
+	ctx context.Context,
+	creation application.UserAPIKeyCreation,
+) error {
+	if _, err := store.pool.Exec(ctx, `
+		SELECT identity.create_user_api_key(
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
+		)`,
+		creation.OwnerUserID,
+		creation.APIKeyID.String(),
+		creation.Name,
+		creation.KeyHash[:],
+		creation.Prefix,
+		creation.Scopes,
+		creation.CreatedAt,
+		creation.AuditEventID.String(),
+		creation.RequestID,
+		creation.MaxActive,
+		creation.ConfigurationVersion,
+	); err != nil {
+		var postgresError *pgconn.PgError
+		switch {
+		case errors.As(err, &postgresError) &&
+			postgresError.Code == "P0001":
+			return edge.ErrConflict
+		case errors.As(err, &postgresError) &&
+			postgresError.Code == "P0002":
+			return application.ErrIdentityNotFound
+		default:
+			return fmt.Errorf("create user API key: %w", err)
+		}
+	}
+	return nil
+}
+
 // BrokerEcho atomically stores or replays the exact principal-scoped response.
 func (store *CompatibilityStore) BrokerEcho(
 	ctx context.Context,

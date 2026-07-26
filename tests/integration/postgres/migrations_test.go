@@ -2979,6 +2979,184 @@ func TestAccountSummaryMigrationUsesBoundedLockAndPreservesExistingAccounts(
 	}
 }
 
+func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000600_phase3_account_summary_constraint_validation.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 47); err != nil {
+		t.Fatalf("apply previous API-key schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO identity.users (
+			user_id, login, normalized_login
+		) VALUES (
+			'urn:xb:user:key-upgrade', 'key-upgrade', 'key-upgrade'
+		)`,
+	); err != nil {
+		t.Fatalf("seed existing API-key owner: %v", err)
+	}
+
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin API-key migration blocker: %v", err)
+	}
+	defer func() { _ = blocker.Rollback(context.Background()) }()
+	if _, err := blocker.Exec(
+		ctx,
+		"LOCK TABLE identity.users IN SHARE MODE",
+	); err != nil {
+		t.Fatalf("lock identity users against API-key migration: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	startedAt := time.Now()
+	err = current.Migrate(ctx)
+	elapsed := time.Since(startedAt)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55P03" {
+		t.Fatalf(
+			"contended API-key migration error = %v, want SQLSTATE 55P03",
+			err,
+		)
+	}
+	if elapsed < 4*time.Second || elapsed > 8*time.Second {
+		t.Fatalf(
+			"bounded API-key migration wait = %s, want approximately 5s",
+			elapsed,
+		)
+	}
+	var (
+		lastMigration string
+		auditExists   bool
+		keysExist     bool
+		userCount     int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			EXISTS (
+				SELECT 1
+				  FROM information_schema.schemata
+				 WHERE schema_name = 'audit'
+			),
+			to_regclass('identity.api_keys') IS NOT NULL,
+			(
+				SELECT count(*)
+				  FROM identity.users
+				 WHERE user_id = 'urn:xb:user:key-upgrade'
+			)`,
+	).Scan(
+		&lastMigration,
+		&auditExists,
+		&keysExist,
+		&userCount,
+	); err != nil {
+		t.Fatalf("inspect rolled-back API-key migration: %v", err)
+	}
+	if lastMigration !=
+		"20260726000600_phase3_account_summary_constraint_validation.up.sql" ||
+		auditExists ||
+		keysExist ||
+		userCount != 1 {
+		t.Fatalf(
+			"contended API-key state = last %q audit %t keys %t users %d",
+			lastMigration,
+			auditExists,
+			keysExist,
+			userCount,
+		)
+	}
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry API-key migration: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify retried API-key migration: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+
+	var (
+		apiCanInsert  bool
+		apiCanExecute bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			has_table_privilege(
+				'platformgo_api',
+				'identity.api_keys',
+				'INSERT'
+			),
+			has_function_privilege(
+				'platformgo_api',
+				'identity.create_user_api_key(text,uuid,text,bytea,text,text[],timestamptz,uuid,text,integer,bigint)',
+				'EXECUTE'
+			)`,
+	).Scan(&apiCanInsert, &apiCanExecute); err != nil {
+		t.Fatalf("inspect API-key role boundary: %v", err)
+	}
+	if apiCanInsert || !apiCanExecute {
+		t.Fatalf(
+			"API-key role boundary = insert %t execute %t",
+			apiCanInsert,
+			apiCanExecute,
+		)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		SELECT identity.create_user_api_key(
+			'urn:xb:user:key-upgrade',
+			'00000000-0000-4000-8000-000000000701',
+			'upgrade-key',
+			decode(repeat('01', 32), 'hex'),
+			'000000000701',
+			ARRAY['orders:write'],
+			'2026-07-26T07:01:00Z',
+			'00000000-0000-4000-8000-000000000702',
+			'request-upgrade-key',
+			25,
+			1
+		)`,
+	); err != nil {
+		t.Fatalf("create API key through authority function: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE identity.api_keys
+		   SET revoked_at = '2026-07-26T07:02:00Z'
+		 WHERE api_key_id = '00000000-0000-4000-8000-000000000701'`,
+	); err != nil {
+		t.Fatalf("first API-key revocation: %v", err)
+	}
+	for name, statement := range map[string]string{
+		"second revocation": `
+			UPDATE identity.api_keys
+			   SET revoked_at = '2026-07-26T07:03:00Z'
+			 WHERE api_key_id = '00000000-0000-4000-8000-000000000701'`,
+		"key deletion": `
+			DELETE FROM identity.api_keys
+			 WHERE api_key_id = '00000000-0000-4000-8000-000000000701'`,
+		"audit mutation": `
+			UPDATE audit.events
+			   SET outcome = 'failure'
+			 WHERE event_id = '00000000-0000-4000-8000-000000000702'`,
+	} {
+		if _, err := pool.Exec(ctx, statement); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+	}
+}
+
 func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	var count int
@@ -2990,9 +3168,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 18 ||
+	if count != 19 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260726000600_phase3_account_summary_constraint_validation.up.sql" {
+		last != "20260726000700_phase3_user_api_keys.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,

@@ -1,6 +1,7 @@
 {
   "environmentKeys": [
     "UZO_AUTH_CLIENT_TOKEN_SECRET",
+    "UZO_AUTH_MAX_API_KEYS_PER_OWNER",
     "UZO_BROKER_API_KEYS",
     "UZO_CORS_ALLOWED_ORIGINS",
     "UZO_DATABASE_URL",
@@ -30,6 +31,7 @@
     "POST /v1/auth/login",
     "GET /v1/me",
     "GET /v1/me/accounts",
+    "POST /v1/me/api-keys",
     "GET /v1/instruments",
     "POST /v1/me/realtime/token",
     "POST /v1/accounts/{accountId}/orders",
@@ -56,7 +58,7 @@
   "openAPIArtifacts": {
     "openapi/admin-v1.json": "615e8a49f9e6a71f6a3ea0108bd71353bd5b7050cc79cee6b17d98af84a6aeb3",
     "openapi/broker-v1.json": "f8bd15b8c0c9fee3069f779dcbf9ade2cea82e7583804999f6c3e117a91fdac6",
-    "openapi/client-v1.json": "eae3672aeaeddaab3c2d0f4de366154f9e96225923c94bb31cdcaac90c0079c0"
+    "openapi/client-v1.json": "f6b8db80df5f70833b8fadbdf8be9a58bf391f4876b797d4eef6d97323ba5f65"
   },
   "platformSourceRevision": "50141367492be46ebf5623f6191a14b94af2f2bd",
   "protobufDescriptor": {

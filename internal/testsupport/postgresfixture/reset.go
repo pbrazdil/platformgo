@@ -44,7 +44,7 @@ func ResetDurableSchemas(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	if _, err := pool.Exec(
 		ctx,
-		`DROP SCHEMA IF EXISTS realtime, identity, market, messaging, ledger, trading, engine CASCADE`,
+		`DROP SCHEMA IF EXISTS audit, realtime, identity, market, messaging, ledger, trading, engine CASCADE`,
 	); err != nil {
 		return fmt.Errorf("drop durable test schemas: %w", err)
 	}

@@ -20,6 +20,7 @@ var (
 	ErrInvalidCredentials  = errors.New("invalid credentials")
 	ErrInvalidRequest      = errors.New("invalid request")
 	ErrNotFound            = errors.New("not found")
+	ErrConflict            = errors.New("conflict")
 	ErrIdempotencyConflict = errors.New("idempotency key conflicts with another request")
 )
 
@@ -137,8 +138,11 @@ type LoginResponse struct {
 
 // CreateAPIKeyRequest is the client self-service credential request.
 type CreateAPIKeyRequest struct {
-	Name   string   `json:"name"`
-	Scopes []string `json:"scopes"`
+	Name        string   `json:"name"`
+	Scopes      []string `json:"scopes"`
+	IPAllowlist []string `json:"ipAllowlist"`
+	TTLSeconds  *uint64  `json:"ttlSecs,omitempty"`
+	TenantID    *string  `json:"tenantId,omitempty"`
 }
 
 // APIKeyCreated returns metadata plus the credential shown exactly once.
@@ -222,6 +226,12 @@ type IdentityService interface {
 	Login(context.Context, LoginRequest) (LoginResponse, error)
 	Profile(context.Context, Principal) (UserProfile, error)
 	MyAccounts(context.Context, Principal) ([]MyAccountView, error)
+	CreateMyAPIKey(
+		context.Context,
+		Principal,
+		string,
+		CreateAPIKeyRequest,
+	) (APIKeyCreated, error)
 	BrokerEcho(
 		context.Context,
 		Principal,

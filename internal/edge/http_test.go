@@ -154,6 +154,19 @@ func (testIdentity) MyAccounts(
 	}}, nil
 }
 
+func (testIdentity) CreateMyAPIKey(
+	_ context.Context,
+	_ Principal,
+	_ string,
+	_ CreateAPIKeyRequest,
+) (APIKeyCreated, error) {
+	return APIKeyCreated{
+		ID:     "urn:xb:apikey:00000000-0000-4000-8000-000000000001",
+		Prefix: "000000000001",
+		Token:  "xbk_000000000001.secret",
+	}, nil
+}
+
 func (testIdentity) BrokerEcho(
 	_ context.Context,
 	principal Principal,

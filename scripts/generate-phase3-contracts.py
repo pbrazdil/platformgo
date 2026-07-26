@@ -163,6 +163,13 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "success_array": "MyAccountView",
         "security": "bearer",
     },
+    ("POST", "/v1/me/api-keys"): {
+        "statuses": [201, 400, 401, 409, 503],
+        "request": "CreateAPIKeyRequest",
+        "success": "APIKeyCreated",
+        "security": "bearer",
+        "conflict_description": "Active API-key limit reached",
+    },
     ("GET", "/v1/instruments"): {
         "statuses": [200, 503],
         "success_array": "InstrumentView",
@@ -287,6 +294,10 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                 operation["responses"]["200"]["description"] = accepted[
                     "success_description"
                 ]
+            if accepted.get("conflict_description") is not None:
+                operation["responses"]["409"]["description"] = accepted[
+                    "conflict_description"
+                ]
             operation["x-platformgo-contract-status"] = "phase3-accepted-runtime"
             request_schema = accepted.get("request")
             if request_schema is not None:
@@ -374,6 +385,54 @@ def schemas(client: bool) -> dict[str, object]:
                 "refreshToken": {"type": "string"},
             },
         },
+        **({
+        "CreateAPIKeyRequest": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                },
+                "scopes": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                    },
+                    "default": [],
+                },
+                "ipAllowlist": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                },
+                "ttlSecs": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                },
+                "tenantId": {"type": ["string", "null"]},
+            },
+        },
+        "APIKeyCreated": {
+            "type": "object",
+            "required": ["id", "prefix", "token"],
+            "properties": {
+                "id": {"type": "string"},
+                "prefix": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{12}$",
+                },
+                "token": {
+                    "type": "string",
+                    "pattern": "^xbk_[0-9a-f]{12}\\.[0-9a-f]{48}$",
+                },
+            },
+        },
+        } if client else {}),
         "UserProfile": {
             "type": "object",
             "required": ["userId", "login", "email", "status"],

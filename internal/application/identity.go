@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/upcomers-org/platformgo/internal/edge"
 	"github.com/upcomers-org/platformgo/internal/engine"
@@ -27,6 +28,7 @@ const (
 	defaultBrokerTokenTTL = 15 * time.Minute
 	brokerIdempotencyTTL  = 24 * time.Hour
 	defaultMaxAPIKeys     = 25
+	maximumMaxAPIKeys     = 25
 )
 
 // ErrIdentityNotFound is returned by durable identity lookup ports.
@@ -52,6 +54,27 @@ type AccountRecord struct {
 	PermittedClasses []string
 	Status           string
 	CreatedAt        time.Time
+}
+
+// UserAPIKeyCreation is the complete non-secret durable mutation passed to
+// PostgreSQL. The plaintext token is intentionally absent.
+type UserAPIKeyCreation struct {
+	OwnerUserID          string
+	APIKeyID             engine.ID
+	Name                 string
+	KeyHash              [sha256.Size]byte
+	Prefix               string
+	Scopes               []string
+	CreatedAt            time.Time
+	AuditEventID         engine.ID
+	RequestID            string
+	MaxActive            int
+	ConfigurationVersion uint64
+}
+
+// UserAPIKeyStore atomically owns key persistence, cap enforcement, and audit.
+type UserAPIKeyStore interface {
+	CreateUserAPIKey(context.Context, UserAPIKeyCreation) error
 }
 
 // IdentityStore is the durable identity boundary.
@@ -150,8 +173,11 @@ func NewIdentity(
 	if config.MaxAPIKeysPerOwner == 0 {
 		config.MaxAPIKeysPerOwner = defaultMaxAPIKeys
 	}
-	if config.MaxAPIKeysPerOwner < 0 {
-		return nil, errors.New("identity: API-key owner limit must be positive")
+	if config.MaxAPIKeysPerOwner < 0 ||
+		config.MaxAPIKeysPerOwner > maximumMaxAPIKeys {
+		return nil, errors.New(
+			"identity: API-key owner limit must be between 1 and 25",
+		)
 	}
 	return &Identity{
 		store: store, signer: signer, clock: config.Clock, entropy: config.Entropy,
@@ -242,6 +268,123 @@ func (identity *Identity) MyAccounts(
 		accounts = append(accounts, account)
 	}
 	return accounts, nil
+}
+
+// CreateMyAPIKey returns one opaque credential while persisting only its hash.
+func (identity *Identity) CreateMyAPIKey(
+	ctx context.Context,
+	principal edge.Principal,
+	requestID string,
+	request edge.CreateAPIKeyRequest,
+) (edge.APIKeyCreated, error) {
+	store, ok := identity.store.(UserAPIKeyStore)
+	if !ok {
+		return edge.APIKeyCreated{}, errors.New(
+			"identity API-key store is unavailable",
+		)
+	}
+	name := strings.TrimSpace(request.Name)
+	requestID = strings.TrimSpace(requestID)
+	if principal.Subject == "" ||
+		principal.Audience != edge.AudienceClient ||
+		!strings.HasPrefix(principal.Subject, "urn:xb:user:") ||
+		name == "" ||
+		name != request.Name ||
+		utf8.RuneCountInString(name) > 128 ||
+		requestID == "" ||
+		utf8.RuneCountInString(requestID) > 128 ||
+		len(request.Scopes) > 32 {
+		return edge.APIKeyCreated{}, edge.ErrInvalidRequest
+	}
+	scopes := make([]string, len(request.Scopes))
+	seenScopes := make(map[string]struct{}, len(request.Scopes))
+	for index, scope := range request.Scopes {
+		if scope == "" ||
+			scope != strings.TrimSpace(scope) ||
+			utf8.RuneCountInString(scope) > 128 {
+			return edge.APIKeyCreated{}, edge.ErrInvalidRequest
+		}
+		if _, exists := seenScopes[scope]; exists {
+			return edge.APIKeyCreated{}, edge.ErrInvalidRequest
+		}
+		seenScopes[scope] = struct{}{}
+		scopes[index] = scope
+	}
+
+	apiKeyID, err := identity.randomIdentityID()
+	if err != nil {
+		return edge.APIKeyCreated{}, fmt.Errorf(
+			"identity create API key: key ID entropy: %w",
+			err,
+		)
+	}
+	var prefixBytes [6]byte
+	if _, readErr := io.ReadFull(
+		identity.entropy,
+		prefixBytes[:],
+	); readErr != nil {
+		return edge.APIKeyCreated{}, fmt.Errorf(
+			"identity create API key: prefix entropy: %w",
+			readErr,
+		)
+	}
+	var secretBytes [24]byte
+	if _, readErr := io.ReadFull(
+		identity.entropy,
+		secretBytes[:],
+	); readErr != nil {
+		return edge.APIKeyCreated{}, fmt.Errorf(
+			"identity create API key: secret entropy: %w",
+			readErr,
+		)
+	}
+	auditEventID, err := identity.randomIdentityID()
+	if err != nil {
+		return edge.APIKeyCreated{}, fmt.Errorf(
+			"identity create API key: audit ID entropy: %w",
+			err,
+		)
+	}
+	prefix := fmt.Sprintf("%x", prefixBytes)
+	secret := fmt.Sprintf("%x", secretBytes)
+	keyHash := sha256.Sum256([]byte(secret))
+	now := identity.clock.Now().UTC()
+	if err := store.CreateUserAPIKey(ctx, UserAPIKeyCreation{
+		OwnerUserID:          principal.Subject,
+		APIKeyID:             apiKeyID,
+		Name:                 name,
+		KeyHash:              keyHash,
+		Prefix:               prefix,
+		Scopes:               scopes,
+		CreatedAt:            now,
+		AuditEventID:         auditEventID,
+		RequestID:            requestID,
+		MaxActive:            identity.maxAPIKeys,
+		ConfigurationVersion: 1,
+	}); err != nil {
+		if errors.Is(err, edge.ErrConflict) {
+			return edge.APIKeyCreated{}, edge.ErrConflict
+		}
+		return edge.APIKeyCreated{}, fmt.Errorf(
+			"identity create API key: %w",
+			err,
+		)
+	}
+	return edge.APIKeyCreated{
+		ID:     "urn:xb:apikey:" + apiKeyID.String(),
+		Prefix: prefix,
+		Token:  "xbk_" + prefix + "." + secret,
+	}, nil
+}
+
+func (identity *Identity) randomIdentityID() (engine.ID, error) {
+	var id engine.ID
+	if _, err := io.ReadFull(identity.entropy, id[:]); err != nil {
+		return engine.ID{}, err
+	}
+	id[6] = (id[6] & 0x0f) | 0x40
+	id[8] = (id[8] & 0x3f) | 0x80
+	return id, nil
 }
 
 func clientAccountSummary(record AccountRecord) (edge.MyAccountView, error) {

@@ -55,6 +55,15 @@ without rewriting existing rows, commits metadata locks before constraint
 validation, and has bounded-lock rollback/retry plus concurrent read/write
 coverage. Its pinned source behavior now has separate port-ledger acceptance.
 
+The current user API-key candidate implements authenticated
+`POST /v1/me/api-keys` as a single PostgreSQL transaction. It returns the
+opaque `xbk_` credential once, persists only its SHA-256 digest, serializes the
+configurable per-owner cap under the durable user-row lock, and appends the
+attributed audit fact atomically. The additive migration grants the API role
+only execution of the bounded creation function, not direct table mutation.
+Its three source behaviors still require independent implementation review and
+separate port-ledger acceptance.
+
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
@@ -79,7 +88,7 @@ This repository is not yet a production-capable replacement.
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
 | 2 — Durable execution | Complete | PostgreSQL 17 authority, immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
-| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, and authenticated caller-scoped account summaries. Funding and account-summary implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first two separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, and same-statement filtered totals; the external fills route remains inventory until its complete source contract is implemented and reviewed. |
+| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, and authenticated caller-scoped account summaries. Funding and account-summary implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first two separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, and same-statement filtered totals; the external fills route remains inventory until its complete source contract is implemented and reviewed. A current candidate adds hash-only self-service API-key creation with an atomic owner cap and audit fact. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
@@ -106,15 +115,24 @@ proof through the least-privilege API role, cross-user isolation, exact full
 wire-shape assertions, and a contended additive-schema upgrade that rolls back
 within the bounded lock window and retries without data loss. Its pinned source
 behavior has separate port-ledger acceptance.
+The current API-key candidate has focused PostgreSQL 17 HTTP proof for the
+source `201`/`401` behavior, a concurrent race for the final owner slot,
+hash-only secret persistence, exact actor/request audit attribution, direct
+API-role mutation denial, and bounded migration rollback/retry. The complete
+compatibility and PostgreSQL integration packages pass against disposable
+PostgreSQL 17, and repository-wide formatting, lint, unit, race, repeat,
+vulnerability, and policy checks pass locally. Hosted validation and
+independent review remain pending for that candidate.
 These results do not activate the external fills route or complete the
 remaining Phase 3 scope.
 
 ## Next milestone
 
-Continue the remaining fill-history behaviors and frozen compatibility
-operations through vertically narrow implementation and ledger-acceptance
-changes. Phase 4 begins only after the Phase 3 charter and release gates are
-fully satisfied.
+Review and land the user API-key implementation, accept its three source ports
+in a separate governance change, then continue the remaining fill-history
+behaviors and frozen compatibility operations through vertically narrow
+implementation and ledger-acceptance changes. Phase 4 begins only after the
+Phase 3 charter and release gates are fully satisfied.
 
 The authoritative scope and completion criteria are in
 `PROJECT_CHARTER.md`. Repository-wide execution rules are in `AGENTS.md`.

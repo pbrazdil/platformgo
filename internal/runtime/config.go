@@ -35,6 +35,7 @@ type Config struct {
 	AllowedOrigin         string
 	TrustedProxies        []netip.Prefix
 	ClientTokenSecret     []byte
+	MaxAPIKeysPerOwner    int
 	BrokerCredentials     []edge.BrokerCredential
 	CentrifugoAPIURL      string
 	CentrifugoAPIKey      string
@@ -78,6 +79,16 @@ func loadConfig(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	maxAPIKeys, err := unsignedValue(
+		getenv,
+		"UZO_AUTH_MAX_API_KEYS_PER_OWNER",
+		25,
+	)
+	if err != nil || maxAPIKeys == 0 || maxAPIKeys > 25 {
+		return Config{}, errors.New(
+			"UZO_AUTH_MAX_API_KEYS_PER_OWNER must be between 1 and 25",
+		)
+	}
 	return Config{
 		DatabaseURL:           getenv("UZO_DATABASE_URL"),
 		NATSURL:               getenv("UZO_NATS_URL"),
@@ -88,6 +99,7 @@ func loadConfig(getenv func(string) string) (Config, error) {
 		AllowedOrigin:         valueOrDefault(getenv, "UZO_CORS_ALLOWED_ORIGINS", "*"),
 		TrustedProxies:        trustedProxies,
 		ClientTokenSecret:     []byte(getenv("UZO_AUTH_CLIENT_TOKEN_SECRET")),
+		MaxAPIKeysPerOwner:    int(maxAPIKeys),
 		BrokerCredentials:     brokers,
 		CentrifugoAPIURL:      getenv("UZO_REALTIME_API_URL"),
 		CentrifugoAPIKey:      getenv("UZO_REALTIME_API_KEY"),

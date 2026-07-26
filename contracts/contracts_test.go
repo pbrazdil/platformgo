@@ -63,6 +63,9 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 	if !contains(manifest.EnvironmentKeys, "UZO_TRUSTED_PROXY_CIDRS") {
 		t.Fatal("UZO_TRUSTED_PROXY_CIDRS missing from compatibility manifest")
 	}
+	if !contains(manifest.EnvironmentKeys, "UZO_AUTH_MAX_API_KEYS_PER_OWNER") {
+		t.Fatal("UZO_AUTH_MAX_API_KEYS_PER_OWNER missing from compatibility manifest")
+	}
 	if !reflect.DeepEqual(manifest.ImplementedWorkers, []string{
 		"outbox-publisher", "realtime-publisher",
 		"event-consumer", "event-consumer:<pattern>",
@@ -80,6 +83,9 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 	}
 	if !contains(manifest.ImplementedHTTPRoutes, "GET /v1/me/accounts") {
 		t.Fatal("GET /v1/me/accounts missing from compatibility manifest")
+	}
+	if !contains(manifest.ImplementedHTTPRoutes, "POST /v1/me/api-keys") {
+		t.Fatal("POST /v1/me/api-keys missing from compatibility manifest")
 	}
 }
 
@@ -109,6 +115,19 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 		)
 	}
 	assertOperationSecurity(t, myAccounts, "bearer")
+	myAPIKeys := assertMethod(t, client, "/v1/me/api-keys", "post")
+	assertPointer(t, client, "components", "schemas", "CreateAPIKeyRequest")
+	assertPointer(t, client, "components", "schemas", "APIKeyCreated")
+	for _, status := range []string{"201", "400", "401", "409", "503"} {
+		assertResponse(t, myAPIKeys, status)
+	}
+	if myAPIKeys["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
+		t.Fatalf(
+			"my API keys contract status = %v",
+			myAPIKeys["x-platformgo-contract-status"],
+		)
+	}
+	assertOperationSecurity(t, myAPIKeys, "bearer")
 	funding := assertMethod(t, client, "/v1/accounts/{accountId}/funding", "get")
 	assertPointer(t, client, "components", "schemas", "FundingView")
 	assertPointer(t, client, "components", "schemas", "FundingPage")

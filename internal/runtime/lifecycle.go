@@ -154,7 +154,10 @@ func Serve(ctx context.Context, config Config) error {
 	identityService, err := application.NewIdentity(
 		compatibilityStore,
 		authenticator,
-		application.IdentityConfig{CommandReadiness: commandReady},
+		application.IdentityConfig{
+			CommandReadiness:   commandReady,
+			MaxAPIKeysPerOwner: config.MaxAPIKeysPerOwner,
+		},
 	)
 	if err != nil {
 		return err

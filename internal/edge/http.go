@@ -87,6 +87,8 @@ func (server *Server) route(writer http.ResponseWriter, request *http.Request) {
 		server.handleLogin(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/me/accounts":
 		server.handleMyAccounts(writer, request)
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/me/api-keys":
+		server.handleCreateMyAPIKey(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/me":
 		server.handleProfile(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/instruments":
@@ -199,6 +201,71 @@ func (server *Server) handleMyAccounts(
 		return
 	}
 	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) handleCreateMyAPIKey(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	principal, ok := server.clientPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	if server.identity == nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"identity unavailable",
+		)
+		return
+	}
+	var body CreateAPIKeyRequest
+	if err := decodeJSON(request.Body, &body); err != nil {
+		writeError(
+			writer,
+			request,
+			http.StatusBadRequest,
+			"invalid_request",
+			"invalid API-key request",
+		)
+		return
+	}
+	response, err := server.identity.CreateMyAPIKey(
+		request.Context(),
+		principal,
+		request.Header.Get("x-request-id"),
+		body,
+	)
+	switch {
+	case errors.Is(err, ErrInvalidRequest):
+		writeError(
+			writer,
+			request,
+			http.StatusBadRequest,
+			"invalid_request",
+			"invalid API-key request",
+		)
+	case errors.Is(err, ErrConflict):
+		writeError(
+			writer,
+			request,
+			http.StatusConflict,
+			"conflict",
+			"active API-key limit reached",
+		)
+	case err != nil:
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"identity unavailable",
+		)
+	default:
+		writeJSON(writer, http.StatusCreated, response)
+	}
 }
 
 func (server *Server) handleInstruments(writer http.ResponseWriter, request *http.Request) {
