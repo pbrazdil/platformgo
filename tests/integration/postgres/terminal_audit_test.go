@@ -48,6 +48,9 @@ import (
 //   - PostgreSQL transaction rollback, fresh-store recovery, same-sequence
 //     replay, and later-sequence duplicate delivery cannot add a second
 //     terminal fact or business effect.
+//   - The terminal decision may persist only the configured NETTING account;
+//     every other economic, event, and realtime projection remains empty
+//     across rollback, replay, duplicate delivery, and restart.
 func TestTerminalOnlyAuditSkipsRunningHistoryButKeepsRecoveryAndTerminalRow(
 	t *testing.T,
 ) {
@@ -99,6 +102,12 @@ func TestTerminalOnlyAuditSkipsRunningHistoryButKeepsRecoveryAndTerminalRow(
 		0,
 		0,
 	)
+	assertTerminalAuditDurableEffects(
+		t,
+		rootPool,
+		commandID,
+		terminalAuditDurableEffects{},
+	)
 
 	// A new journal instance represents the independent recovery path. The
 	// same correlation must lock and return the original running identity.
@@ -140,6 +149,12 @@ func TestTerminalOnlyAuditSkipsRunningHistoryButKeepsRecoveryAndTerminalRow(
 		0,
 		0,
 		0,
+	)
+	assertTerminalAuditDurableEffects(
+		t,
+		rootPool,
+		commandID,
+		terminalAuditDurableEffects{},
 	)
 
 	input, action, err := engine.DecodeInputMessage(request.OutboxPayload)
@@ -216,6 +231,12 @@ func TestTerminalOnlyAuditSkipsRunningHistoryButKeepsRecoveryAndTerminalRow(
 		0,
 		0,
 	)
+	assertTerminalAuditDurableEffects(
+		t,
+		rootPool,
+		commandID,
+		terminalAuditDurableEffects{},
+	)
 
 	if err := ownership.Close(ctx); err != nil {
 		t.Fatalf("close pre-fault ownership: %v", err)
@@ -266,6 +287,12 @@ func TestTerminalOnlyAuditSkipsRunningHistoryButKeepsRecoveryAndTerminalRow(
 			runningState.NextStreamSequence(),
 		)
 	}
+	assertTerminalAuditDurableEffects(
+		t,
+		rootPool,
+		commandID,
+		terminalAuditDurableEffects{},
+	)
 
 	terminalState, terminalDecision, duplicate, err := restartedStore.ApplyTrading(
 		ctx,
@@ -289,6 +316,8 @@ func TestTerminalOnlyAuditSkipsRunningHistoryButKeepsRecoveryAndTerminalRow(
 			terminalState.NextStreamSequence(),
 		)
 	}
+	assertTerminalConfigureAccountEffects(t, terminalDecision, accountID)
+	terminalEffects := terminalAuditDurableEffects{accounts: 1}
 	assertTerminalAuditLifecycle(
 		t,
 		rootPool,
@@ -301,6 +330,12 @@ func TestTerminalOnlyAuditSkipsRunningHistoryButKeepsRecoveryAndTerminalRow(
 		0,
 		1,
 		1,
+	)
+	assertTerminalAuditDurableEffects(
+		t,
+		rootPool,
+		commandID,
+		terminalEffects,
 	)
 	assertStoredTerminalDecision(
 		t,
@@ -331,6 +366,12 @@ func TestTerminalOnlyAuditSkipsRunningHistoryButKeepsRecoveryAndTerminalRow(
 			completedReplay,
 		)
 	}
+	assertTerminalAuditDurableEffects(
+		t,
+		rootPool,
+		commandID,
+		terminalEffects,
+	)
 
 	sameSequenceState, sameSequenceDecision, duplicate, err :=
 		restartedStore.ApplyTrading(
@@ -373,6 +414,12 @@ func TestTerminalOnlyAuditSkipsRunningHistoryButKeepsRecoveryAndTerminalRow(
 		0,
 		1,
 		1,
+	)
+	assertTerminalAuditDurableEffects(
+		t,
+		rootPool,
+		commandID,
+		terminalEffects,
 	)
 
 	republishedInput := input
@@ -420,6 +467,12 @@ func TestTerminalOnlyAuditSkipsRunningHistoryButKeepsRecoveryAndTerminalRow(
 		1,
 		1,
 		1,
+	)
+	assertTerminalAuditDurableEffects(
+		t,
+		rootPool,
+		commandID,
+		terminalEffects,
 	)
 	assertStoredDuplicateDecision(
 		t,
@@ -470,6 +523,12 @@ func TestTerminalOnlyAuditSkipsRunningHistoryButKeepsRecoveryAndTerminalRow(
 		1,
 		1,
 	)
+	assertTerminalAuditDurableEffects(
+		t,
+		rootPool,
+		commandID,
+		terminalEffects,
+	)
 
 	if err := restartedOwnership.Close(ctx); err != nil {
 		t.Fatalf("close terminal ownership: %v", err)
@@ -515,6 +574,12 @@ func TestTerminalOnlyAuditSkipsRunningHistoryButKeepsRecoveryAndTerminalRow(
 		1,
 		1,
 		1,
+	)
+	assertTerminalAuditDurableEffects(
+		t,
+		rootPool,
+		commandID,
+		terminalEffects,
 	)
 	assertStoredTerminalDecision(
 		t,
@@ -855,6 +920,124 @@ func assertCanonicalJSONEqual(
 			label,
 			gotJSON,
 			wantJSON,
+		)
+	}
+}
+
+type terminalAuditDurableEffects struct {
+	instruments            int
+	currencyScales         int
+	accounts               int
+	userAccounts           int
+	accountProfiles        int
+	riskConfigs            int
+	balances               int
+	ledgerTransactions     int
+	ledgerEntries          int
+	fundingSettlements     int
+	fundingHistory         int
+	books                  int
+	orders                 int
+	fills                  int
+	positions              int
+	engineOutboxEvents     int
+	realtimeSequences      int
+	realtimePublications   int
+	realtimeRequeueRecords int
+}
+
+func assertTerminalAuditDurableEffects(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	commandID engine.ID,
+	want terminalAuditDurableEffects,
+) {
+	t.Helper()
+	var got terminalAuditDurableEffects
+	if err := pool.QueryRow(context.Background(), `
+		SELECT
+			(SELECT count(*) FROM trading.instruments),
+			(SELECT count(*) FROM trading.currency_scales),
+			(SELECT count(*) FROM trading.accounts),
+			(SELECT count(*) FROM identity.user_accounts),
+			(SELECT count(*) FROM identity.account_profiles),
+			(SELECT count(*) FROM trading.risk_configs),
+			(SELECT count(*) FROM ledger.balances),
+			(SELECT count(*) FROM ledger.transactions),
+			(SELECT count(*) FROM ledger.entries),
+			(SELECT count(*) FROM trading.funding_settlements),
+			(SELECT count(*) FROM trading.funding_history_projection),
+			(SELECT count(*) FROM market.books),
+			(SELECT count(*) FROM trading.orders),
+			(SELECT count(*) FROM trading.fills),
+			(SELECT count(*) FROM trading.positions),
+			(SELECT count(*)
+			   FROM messaging.outbox
+			  WHERE producer_class = 'engine'
+			    AND engine_input_id = $1),
+			(SELECT count(*) FROM realtime.channel_sequences),
+			(SELECT count(*) FROM realtime.publications),
+			(SELECT count(*) FROM realtime.publication_requeues)`,
+		commandID.String(),
+	).Scan(
+		&got.instruments,
+		&got.currencyScales,
+		&got.accounts,
+		&got.userAccounts,
+		&got.accountProfiles,
+		&got.riskConfigs,
+		&got.balances,
+		&got.ledgerTransactions,
+		&got.ledgerEntries,
+		&got.fundingSettlements,
+		&got.fundingHistory,
+		&got.books,
+		&got.orders,
+		&got.fills,
+		&got.positions,
+		&got.engineOutboxEvents,
+		&got.realtimeSequences,
+		&got.realtimePublications,
+		&got.realtimeRequeueRecords,
+	); err != nil {
+		t.Fatalf("inspect terminal audit durable effects: %v", err)
+	}
+	if got != want {
+		t.Fatalf("terminal audit durable effects = %+v, want %+v", got, want)
+	}
+}
+
+func assertTerminalConfigureAccountEffects(
+	t *testing.T,
+	decision engine.Decision,
+	accountID string,
+) {
+	t.Helper()
+	if decision.CommandResult.Status != engine.CommandStatusAccepted ||
+		decision.CommandResult.Reason != "" ||
+		len(decision.AccountChanges) != 1 ||
+		decision.AccountChanges[0].AccountID != accountID ||
+		decision.AccountChanges[0].OmsMode != engine.OmsModeNetting {
+		t.Fatalf(
+			"terminal result/effects = %+v/%+v, want accepted with one %s/NETTING account",
+			decision.CommandResult,
+			decision.AccountChanges,
+			accountID,
+		)
+	}
+	if len(decision.InstrumentChanges) != 0 ||
+		len(decision.RiskChanges) != 0 ||
+		len(decision.BalanceChanges) != 0 ||
+		len(decision.LedgerChanges) != 0 ||
+		len(decision.FundingChanges) != 0 ||
+		len(decision.BookChanges) != 0 ||
+		len(decision.OrderChanges) != 0 ||
+		len(decision.Fills) != 0 ||
+		len(decision.PositionChanges) != 0 ||
+		len(decision.Events) != 0 {
+		t.Fatalf(
+			"terminal ConfigureAccount contains forbidden effects: %+v",
+			decision,
 		)
 	}
 }
