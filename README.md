@@ -50,6 +50,11 @@ as the authoritative cross-surface contract. Every durable fill's source-cased
 side and required classified position effect now also project as its exact
 lowercase trade type, with separate source-port acceptance preserving current
 Go classification as authoritative.
+The next fill-adjacent implementation slice ports durable order-rejection
+reason persistence through the real engine transaction and PostgreSQL recovery
+path. It preserves the current Go lifecycle: a working order rejected for
+`slippage_exceeded` remains terminal, and later market inputs cannot rewrite
+its reason or version. Its separate source-ledger acceptance is still pending.
 
 The client account-summary slice now implements authenticated
 `GET /v1/me/accounts`. It reads only the caller's complete durable account
@@ -112,7 +117,7 @@ This repository is not yet a production-capable replacement.
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
 | 2 — Durable execution | Complete | PostgreSQL 17 authority, immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
-| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, authenticated caller-scoped account summaries, and hash-only self-service API-key creation with encrypted durable replay, a PostgreSQL-authoritative owner cap, protected-client rate limiting, and an atomic audit fact. Funding, account-summary, and API-key implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first four separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, same-statement filtered totals, a correlatable fill-to-order identity using the current Go `urn:xb:order:<UUID>` representation, and exact classified side/trade-type projection. The external fills route remains inventory until its complete source contract is implemented and reviewed. |
+| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, authenticated caller-scoped account summaries, and hash-only self-service API-key creation with encrypted durable replay, a PostgreSQL-authoritative owner cap, protected-client rate limiting, and an atomic audit fact. Funding, account-summary, and API-key implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first four separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, same-statement filtered totals, a correlatable fill-to-order identity using the current Go `urn:xb:order:<UUID>` representation, and exact classified side/trade-type projection. The next implementation candidate proves durable rejection-reason persistence and terminal no-rewrite behavior through PostgreSQL recovery; its ledger gate remains separate. The external fills route remains inventory until its complete source contract is implemented and reviewed. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
@@ -143,6 +148,11 @@ five current Go position effects through the exact production query and
 least-privilege API role. Its separate source acceptance records the
 owner-approved decision to preserve the required classified effect instead of
 importing an unclassified legacy mirror row.
+The current order-rejection candidate additionally proves on PostgreSQL 17
+that the engine atomically persists `slippage_exceeded`, recovers the same
+ready state and canonical hash after restart, and leaves the terminal reason
+and order version unchanged under later market inputs. It does not add an
+unapproved field to the frozen external order contract.
 The client account-summary slice additionally has live PostgreSQL 17 HTTP
 proof through the least-privilege API role, cross-user isolation, exact full
 wire-shape assertions, and a contended additive-schema upgrade that rolls back
@@ -162,10 +172,10 @@ remaining Phase 3 scope.
 
 ## Next milestone
 
-Continue the remaining fill-history behaviors and frozen compatibility
-operations through vertically narrow implementation and ledger-acceptance
-changes. Phase 4 begins only after the Phase 3 charter and release gates are
-fully satisfied.
+Land the separate rejection-reason source-ledger acceptance, then continue the
+remaining fill-history behaviors and frozen compatibility operations through
+vertically narrow implementation and ledger-acceptance changes. Phase 4 begins
+only after the Phase 3 charter and release gates are fully satisfied.
 
 The authoritative scope and completion criteria are in
 `PROJECT_CHARTER.md`. Repository-wide execution rules are in `AGENTS.md`.
