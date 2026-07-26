@@ -90,6 +90,31 @@ The engine transaction for an input includes, as applicable:
 
 Network calls are outside the transaction.
 
+### Balance projection and decision-hash authority
+
+- The authoritative funded balance is the raw account/currency total. Ledger
+  derivation compares only that total before and after an input; changes to
+  margin reservation, unrealized PnL, `free`, `used`, or `equity` cannot create
+  ledger money.
+- When the required market mark exists, the engine completes the exact
+  `total`, `used`, `free`, and `equity` projection after applying the state
+  transition and before hashing or persistence. Order-only and market-only
+  inputs therefore bind their final derived balances.
+- A missing mark is represented by SQL `NULL` in `market.books.mark_price`.
+  The engine preserves the last durable projection instead of inventing a
+  price or zeroing an economic value. Restoring the mark recomputes the exact
+  projection and emits no ledger entries unless the funded total changed.
+- Decision-hash version 3 includes complete derived balance projections.
+  Recovery replays each immutable business and duplicate-delivery receipt at
+  its recorded decision-hash version, so valid v2 history remains verifiable
+  while every new receipt uses v3.
+- `trading.currency_scales` is the append-only durable authority for the one
+  scale assigned to each currency code. Recovery seeds the deterministic state
+  from the registry before replay, then independently verifies historical
+  instrument decisions, decision hashes, state hashes, and the final
+  bidirectional registry match. Runtime roles cannot mutate the registry;
+  instrument writes register or verify a scale inside the engine transaction.
+
 ## 7. Locking and isolation
 
 - One engine writer per shard removes most write contention but does not replace database constraints.
@@ -167,6 +192,25 @@ CI must test:
 5. downgrade rejection rather than destructive down migration;
 6. checksum mismatch refusal;
 7. query plans for hot outbox, inbox, command and account paths.
+
+### Phase 3 balance-projection migration boundary
+
+Migration `20260726000800_phase3_balance_projection_hash_v3.up.sql` is a
+halted, forward-only cutover. It takes bounded locks in writer-compatible
+instrument, book, business-receipt, duplicate-receipt order before reading
+legacy history. Before any DDL it rejects a non-object decision, malformed
+instrument or order collections, invalid currency identities, conflicting
+scales, and nonempty pre-v3 order history whose balance projection cannot be
+proven complete. Every refusal is atomic and leaves the prior immutable schema
+and receipts authoritative.
+
+The migration backfills the monotonic currency registry from both the current
+instrument catalog and accepted historical instrument changes, permits
+markless books, and fences every new business or duplicate receipt to
+decision-hash v3. A prior binary is therefore not compatible after the
+migration commits. Applied migration history is never edited: recover with a
+reviewed forward fix, or restore the complete pre-migration database while all
+writers remain stopped.
 
 ## 11. Retention and partitioning
 
