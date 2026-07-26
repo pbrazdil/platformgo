@@ -137,14 +137,14 @@ func Serve(ctx context.Context, config Config) error {
 			policy.IdempotencyTTLSecs,
 		)
 	}
-	if err := verifyAPIKeyPolicy(ctx); err != nil {
-		return fmt.Errorf("serve: %w", err)
+	if verifyErr := verifyAPIKeyPolicy(ctx); verifyErr != nil {
+		return fmt.Errorf("serve: %w", verifyErr)
 	}
-	if _, err := compatibilityStore.PurgeExpiredAPIKeyReplays(
+	if _, purgeErr := compatibilityStore.PurgeExpiredAPIKeyReplays(
 		ctx,
 		apiKeyReplayCleanupBatch,
-	); err != nil {
-		return fmt.Errorf("serve: %w", err)
+	); purgeErr != nil {
+		return fmt.Errorf("serve: %w", purgeErr)
 	}
 	postgresReady := func(checkContext context.Context) error {
 		if pingErr := pool.Ping(checkContext); pingErr != nil {
