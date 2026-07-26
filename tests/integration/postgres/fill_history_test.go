@@ -10,7 +10,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
-	"github.com/upcomers-org/platformgo/internal/edge"
 )
 
 // Ported from:
@@ -128,21 +127,17 @@ func TestFillFilledAtIsEngineExecutionTimeNotInsertNow(t *testing.T) {
 		"platformgo_fill_history_api_login",
 		"platformgo_api",
 	)
-	page, err := platformpostgres.NewCompatibilityStore(apiPool).Fills(
+	latest, err := platformpostgres.NewCompatibilityStore(apiPool).LatestFillExecution(
 		ctx,
 		accountID,
-		edge.PageParams{Limit: 1},
 	)
 	if err != nil {
-		t.Fatalf("read fill history: %v", err)
+		t.Fatalf("read latest fill execution: %v", err)
 	}
-	if len(page.Items) != 1 {
-		t.Fatalf("fill page = %#v", page)
-	}
-	if page.Items[0].FilledAt != engineTime.Format(time.RFC3339Nano) {
+	if latest.FilledAt != engineTime.Format(time.RFC3339Nano) {
 		t.Fatalf(
 			"filledAt = %q, want engine time %q",
-			page.Items[0].FilledAt,
+			latest.FilledAt,
 			engineTime.Format(time.RFC3339Nano),
 		)
 	}

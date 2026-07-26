@@ -276,40 +276,11 @@ type PageParams struct {
 	Direction string
 }
 
-// FillView is one exact, append-only client execution projection.
-type FillView struct {
-	FillID        string  `json:"fillId"`
-	OrderID       string  `json:"orderId"`
-	PositionID    *string `json:"positionId,omitempty"`
-	AccountID     string  `json:"accountId"`
-	UserID        string  `json:"userId"`
-	Exchange      string  `json:"exchange"`
-	Symbol        string  `json:"symbol"`
-	Base          *string `json:"base,omitempty"`
-	Quote         *string `json:"quote,omitempty"`
-	ProductType   *string `json:"productType,omitempty"`
-	Side          string  `json:"side"`
-	OrderType     *string `json:"orderType,omitempty"`
-	TradeType     *string `json:"type,omitempty"`
-	Quantity      string  `json:"quantity"`
-	Price         string  `json:"price"`
-	QuoteQuantity string  `json:"quoteQuantity"`
-	Commission    string  `json:"commission"`
-	FeeRate       *string `json:"feeRate,omitempty"`
-	FeeAsset      *string `json:"feeAsset,omitempty"`
-	RealizedPnL   *string `json:"realizedPnl,omitempty"`
-	Liquidity     *string `json:"liquidity,omitempty"`
-	Reason        string  `json:"reason"`
-	Leverage      *string `json:"leverage,omitempty"`
-	FilledAt      string  `json:"filledAt"`
-}
-
-// FillPage is the frozen list envelope used by fill history reads.
-type FillPage struct {
-	Items      []FillView `json:"items"`
-	NextCursor *string    `json:"nextCursor,omitempty"`
-	PrevCursor *string    `json:"prevCursor,omitempty"`
-	Total      *int64     `json:"total,omitempty"`
+// FillExecutionView is the narrow immutable execution-time projection proven
+// by the first native fill-history source port.
+type FillExecutionView struct {
+	FillID   string `json:"fillId"`
+	FilledAt string `json:"filledAt"`
 }
 
 // FundingView is one exact, append-only client funding projection.

@@ -681,244 +681,30 @@ func (store *CompatibilityStore) Balances(
 	return values, rows.Err()
 }
 
-type fillHistoryCursor struct {
-	logicalTime int64
-	fillID      string
-}
-
-type fillHistoryRow struct {
-	view        edge.FillView
-	logicalTime int64
-	bracketLeg  *string
-	intentID    *string
-}
-
-// Fills returns one exact, newest-first account execution page.
-func (store *CompatibilityStore) Fills(
+// LatestFillExecution returns the newest immutable execution-time projection
+// proven by the first native fill-history source port.
+func (store *CompatibilityStore) LatestFillExecution(
 	ctx context.Context,
 	accountID string,
-	params edge.PageParams,
-) (edge.FillPage, error) {
-	limit := params.Limit
-	if limit == 0 {
-		limit = 50
-	}
-	if limit < 1 {
-		limit = 1
-	}
-	if limit > 200 {
-		limit = 200
-	}
-	cursor, err := decodeFillHistoryCursor(params.Cursor)
-	if err != nil {
-		return edge.FillPage{}, err
-	}
-	forward := params.Direction != "prev" && params.Direction != "backward"
-	order := "DESC"
-	comparison := "<"
-	if !forward {
-		order = "ASC"
-		comparison = ">"
-	}
-	query := `
+) (edge.FillExecutionView, error) {
+	var (
+		view        edge.FillExecutionView
+		logicalTime int64
+	)
+	if err := store.pool.QueryRow(ctx, `
 		SELECT
 			fill.fill_id::text,
-			fill.order_id::text,
-			fill.position_id::text,
-			ownership.user_id,
-			profile.market_venue,
-			fill.instrument_id,
-			fill.side,
-			orders.order_type,
-			lower(fill.position_effect),
-			trim_scale(fill.quantity)::text,
-			trim_scale(fill.price)::text,
-			trim_scale(fill.quantity * fill.price)::text,
-			COALESCE(trim_scale(fill.fee)::text, '0'),
-			CASE fill.liquidity_side
-				WHEN 'MAKER' THEN trim_scale(instrument.maker_fee_rate)::text
-				WHEN 'TAKER' THEN trim_scale(instrument.taker_fee_rate)::text
-			END,
-			fill.fee_currency,
-			trim_scale(fill.realized_pnl)::text,
-			lower(fill.liquidity_side),
-			orders.bracket_leg,
-			intent.intent_id,
 			fill.logical_time
 		  FROM trading.fills AS fill
-		  JOIN trading.orders AS orders
-		    ON orders.order_id = fill.order_id
-		  JOIN trading.instruments AS instrument
-		    ON instrument.instrument_id = fill.instrument_id
-		  LEFT JOIN identity.user_accounts AS ownership
-		    ON ownership.account_id = fill.account_id
-		  LEFT JOIN identity.account_profiles AS profile
-		    ON profile.account_id = fill.account_id
-		  LEFT JOIN trading.order_intents AS intent
-		    ON intent.order_id = fill.order_id
-		 WHERE fill.account_id = $1`
-	arguments := []any{accountID, limit + 1}
-	if cursor != nil {
-		query += fmt.Sprintf(
-			"\n   AND (fill.logical_time, fill.fill_id) %s ($3, $4::uuid)",
-			comparison,
-		)
-		arguments = append(arguments, cursor.logicalTime, cursor.fillID)
+		 WHERE fill.account_id = $1
+		 ORDER BY fill.logical_time DESC, fill.fill_id DESC
+		 LIMIT 1`,
+		accountID,
+	).Scan(&view.FillID, &logicalTime); err != nil {
+		return edge.FillExecutionView{}, fmt.Errorf("read latest fill execution: %w", err)
 	}
-	query += fmt.Sprintf(
-		"\n ORDER BY fill.logical_time %s, fill.fill_id %s LIMIT $2",
-		order,
-		order,
-	)
-	rows, queryErr := store.pool.Query(ctx, query, arguments...)
-	if queryErr != nil {
-		return edge.FillPage{}, fmt.Errorf("list fills: %w", queryErr)
-	}
-	defer rows.Close()
-	history := make([]fillHistoryRow, 0, limit+1)
-	for rows.Next() {
-		var (
-			row           fillHistoryRow
-			rawPositionID *string
-			userID        *string
-			exchange      *string
-		)
-		if err := rows.Scan(
-			&row.view.FillID,
-			&row.view.OrderID,
-			&rawPositionID,
-			&userID,
-			&exchange,
-			&row.view.Symbol,
-			&row.view.Side,
-			&row.view.OrderType,
-			&row.view.TradeType,
-			&row.view.Quantity,
-			&row.view.Price,
-			&row.view.QuoteQuantity,
-			&row.view.Commission,
-			&row.view.FeeRate,
-			&row.view.FeeAsset,
-			&row.view.RealizedPnL,
-			&row.view.Liquidity,
-			&row.bracketLeg,
-			&row.intentID,
-			&row.logicalTime,
-		); err != nil {
-			return edge.FillPage{}, fmt.Errorf("scan fill: %w", err)
-		}
-		if userID == nil || exchange == nil {
-			return edge.FillPage{}, fmt.Errorf(
-				"scan fill %s: account identity projection is missing",
-				row.view.FillID,
-			)
-		}
-		row.view.OrderID = "urn:xb:order:" + row.view.OrderID
-		if rawPositionID != nil {
-			publicPositionID := hex.EncodeToString([]byte(*rawPositionID))
-			row.view.PositionID = &publicPositionID
-		}
-		row.view.AccountID = accountID
-		row.view.UserID = *userID
-		row.view.Exchange = *exchange
-		row.view.Reason = fillCloseReason(row.bracketLeg, row.intentID)
-		row.view.FilledAt = time.Unix(0, row.logicalTime).
-			UTC().
-			Format(time.RFC3339Nano)
-		history = append(history, row)
-	}
-	if err := rows.Err(); err != nil {
-		return edge.FillPage{}, fmt.Errorf("list fills: %w", err)
-	}
-	hasMore := len(history) > limit
-	if hasMore {
-		history = history[:limit]
-	}
-	if !forward && cursor != nil {
-		for left, right := 0, len(history)-1; left < right; left, right = left+1, right-1 {
-			history[left], history[right] = history[right], history[left]
-		}
-	}
-	page := edge.FillPage{Items: make([]edge.FillView, len(history))}
-	for index := range history {
-		page.Items[index] = history[index].view
-	}
-	if len(history) != 0 {
-		newest := encodeFillHistoryCursor(history[0])
-		oldest := encodeFillHistoryCursor(history[len(history)-1])
-		if forward {
-			if hasMore {
-				page.NextCursor = &oldest
-			}
-			if cursor != nil {
-				page.PrevCursor = &newest
-			}
-		} else {
-			page.NextCursor = &oldest
-			if hasMore {
-				page.PrevCursor = &newest
-			}
-		}
-	}
-	if cursor == nil {
-		var total int64
-		if err := store.pool.QueryRow(
-			ctx,
-			`SELECT count(*) FROM trading.fills WHERE account_id = $1`,
-			accountID,
-		).Scan(&total); err != nil {
-			return edge.FillPage{}, fmt.Errorf("count fills: %w", err)
-		}
-		page.Total = &total
-	}
-	return page, nil
-}
-
-func encodeFillHistoryCursor(row fillHistoryRow) string {
-	raw := strconv.FormatInt(row.logicalTime, 10) + ":" + row.view.FillID
-	return base64.RawURLEncoding.EncodeToString([]byte(raw))
-}
-
-func decodeFillHistoryCursor(encoded string) (*fillHistoryCursor, error) {
-	if encoded == "" {
-		return nil, nil
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, edge.ErrInvalidRequest
-	}
-	parts := strings.SplitN(string(raw), ":", 2)
-	if len(parts) != 2 {
-		return nil, edge.ErrInvalidRequest
-	}
-	logicalTime, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return nil, edge.ErrInvalidRequest
-	}
-	if _, err := engine.ParseID(parts[1]); err != nil {
-		return nil, edge.ErrInvalidRequest
-	}
-	return &fillHistoryCursor{logicalTime: logicalTime, fillID: parts[1]}, nil
-}
-
-func fillCloseReason(bracketLeg *string, intentID *string) string {
-	if bracketLeg != nil {
-		switch strings.ToLower(*bracketLeg) {
-		case "stop_loss":
-			return "stop_loss"
-		case "take_profit":
-			return "take_profit"
-		}
-	}
-	if intentID != nil {
-		switch {
-		case strings.HasPrefix(*intentID, "stopout:"):
-			return "liquidation"
-		case strings.HasPrefix(*intentID, "flatten:"):
-			return "flatten"
-		}
-	}
-	return "manual"
+	view.FilledAt = time.Unix(0, logicalTime).UTC().Format(time.RFC3339Nano)
+	return view, nil
 }
 
 // Funding returns one exact, newest-first account funding page.

@@ -955,10 +955,9 @@ func TestFillHistoryMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 		t.Fatalf("verify retried fill-history upgrade: %v", err)
 	}
 	assertFinalMigrationHistory(t, pool)
-	page, err := platformpostgres.NewCompatibilityStore(pool).Fills(
+	latest, err := platformpostgres.NewCompatibilityStore(pool).LatestFillExecution(
 		ctx,
 		"urn:xb:account:fill-upgrade",
-		edge.PageParams{Limit: 1},
 	)
 	if err != nil {
 		t.Fatalf("read preserved fill history after upgrade: %v", err)
@@ -966,12 +965,9 @@ func TestFillHistoryMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 	wantTime := time.Unix(0, 1600000000000000100).
 		UTC().
 		Format(time.RFC3339Nano)
-	if len(page.Items) != 1 ||
-		page.Total == nil ||
-		*page.Total != 100 ||
-		page.Items[0].FillID != "10000000-0000-0000-0000-000000000064" ||
-		page.Items[0].FilledAt != wantTime {
-		t.Fatalf("preserved fill history = %#v, want newest time %q", page, wantTime)
+	if latest.FillID != "10000000-0000-0000-0000-000000000064" ||
+		latest.FilledAt != wantTime {
+		t.Fatalf("preserved latest fill = %#v, want newest time %q", latest, wantTime)
 	}
 }
 

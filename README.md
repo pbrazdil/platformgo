@@ -61,7 +61,7 @@ This repository is not yet a production-capable replacement.
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
 | 2 — Durable execution | Complete | PostgreSQL 17 authority, immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
-| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, and exact client funding history with PostgreSQL 17 query-plan and migration evidence. Funding implementation and separate port-ledger acceptance are landed. A locally green candidate now starts exact fill history with engine-execution-time fidelity and indexed keyset reads; the remaining frozen surface still needs vertical implementation and review. |
+| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, and exact client funding history with PostgreSQL 17 query-plan and migration evidence. Funding implementation and separate port-ledger acceptance are landed. A locally green candidate now starts the fill-history foundation with an indexed newest-execution read and exact engine-time fidelity; the external fills route remains inventory until its complete source contract is implemented and reviewed. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
@@ -75,11 +75,12 @@ commit/order/retry evidence, a simulated Centrifugo outage proof, a real
 Centrifugo history proof, independent determinism and money review, an indexed
 representative-backlog claim plan, and migration 011 bounded-lock
 rollback/retry proof. Exact funding history and its source-port evidence are
-green and landed through hosted CI. The current fill-history candidate has
+green and landed through hosted CI. The current fill-history foundation has
 live PostgreSQL 17 proof that `filledAt` comes from the persisted engine
-execution time and that forward and backward keyset reads use the intended
-account-history index. These results do not complete the remaining Phase 3
-scope.
+execution time, its newest-execution read uses the intended account-history
+index, and a contended populated-schema upgrade rolls back and retries cleanly.
+These results do not activate the external fills route or complete the
+remaining Phase 3 scope.
 
 ## Next milestone
 
