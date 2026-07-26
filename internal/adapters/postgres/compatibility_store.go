@@ -1086,8 +1086,8 @@ func (store *CompatibilityStore) FilterFillExecutions(
 	if err != nil {
 		return edge.FillExecutionPage{}, err
 	}
-	forward := filter.Direction != "prev" &&
-		filter.Direction != "backward"
+	forward := cursor == nil ||
+		(filter.Direction != "prev" && filter.Direction != "backward")
 	var requestedSide any
 	if side != "" {
 		requestedSide = side
@@ -1103,7 +1103,13 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			fill.side,
 			fill.position_effect,
 			fill.logical_time,
-			count(*) OVER ()
+			(
+				SELECT count(*)
+				  FROM trading.fills AS counted
+				 WHERE counted.account_id = $1
+				   AND ($2::text IS NULL OR counted.side = $2)
+				   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+			)
 		  FROM trading.fills AS fill
 		 WHERE fill.account_id = $1
 		   AND ($2::text IS NULL OR fill.side = $2)
@@ -1124,7 +1130,13 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				fill.side,
 				fill.position_effect,
 				fill.logical_time,
-				count(*) OVER ()
+				(
+					SELECT count(*)
+					  FROM trading.fills AS counted
+					 WHERE counted.account_id = $1
+					   AND ($2::text IS NULL OR counted.side = $2)
+					   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+				)
 			  FROM trading.fills AS fill
 			 WHERE fill.account_id = $1
 			   AND ($2::text IS NULL OR fill.side = $2)
@@ -1140,7 +1152,13 @@ func (store *CompatibilityStore) FilterFillExecutions(
 					fill.side,
 					fill.position_effect,
 					fill.logical_time,
-					count(*) OVER ()
+					(
+						SELECT count(*)
+						  FROM trading.fills AS counted
+						 WHERE counted.account_id = $1
+						   AND ($2::text IS NULL OR counted.side = $2)
+						   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+					)
 				  FROM trading.fills AS fill
 				 WHERE fill.account_id = $1
 				   AND ($2::text IS NULL OR fill.side = $2)

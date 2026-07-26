@@ -254,7 +254,7 @@ func TestFillsHistoryReadsAndPaginates(t *testing.T) {
 	pageOne, err := store.FilterFillExecutions(
 		ctx,
 		accountID,
-		platformpostgres.FillExecutionFilter{Limit: 2},
+		platformpostgres.FillExecutionFilter{Side: "buy", Limit: 2},
 	)
 	if err != nil {
 		t.Fatalf("read first fill page: %v", err)
@@ -268,11 +268,32 @@ func TestFillsHistoryReadsAndPaginates(t *testing.T) {
 		pageOne.Items[1].FillID != fillIDs[1] {
 		t.Fatalf("first fill page order = %#v", pageOne.Items)
 	}
+	canonicalFirst, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{
+			Side:      "buy",
+			Limit:     2,
+			Direction: "prev",
+		},
+	)
+	if err != nil {
+		t.Fatalf("read cursorless previous fill page: %v", err)
+	}
+	if len(canonicalFirst.Items) != 2 ||
+		canonicalFirst.Items[0].FillID != fillIDs[2] ||
+		canonicalFirst.Items[1].FillID != fillIDs[1] ||
+		canonicalFirst.Total != 3 ||
+		canonicalFirst.NextCursor == nil ||
+		canonicalFirst.PrevCursor != nil {
+		t.Fatalf("cursorless previous fill page = %#v", canonicalFirst)
+	}
 
 	pageTwo, err := store.FilterFillExecutions(
 		ctx,
 		accountID,
 		platformpostgres.FillExecutionFilter{
+			Side:   "buy",
 			Limit:  2,
 			Cursor: *pageOne.NextCursor,
 		},
@@ -282,7 +303,8 @@ func TestFillsHistoryReadsAndPaginates(t *testing.T) {
 	}
 	if len(pageTwo.Items) != 1 ||
 		pageTwo.Items[0].FillID != fillIDs[0] ||
-		pageTwo.PrevCursor == nil {
+		pageTwo.PrevCursor == nil ||
+		pageTwo.Total != 3 {
 		t.Fatalf("second fill page = %#v", pageTwo)
 	}
 	seen := make(map[string]int, len(fillIDs))
@@ -299,6 +321,7 @@ func TestFillsHistoryReadsAndPaginates(t *testing.T) {
 		ctx,
 		accountID,
 		platformpostgres.FillExecutionFilter{
+			Side:      "buy",
 			Limit:     2,
 			Cursor:    *pageTwo.PrevCursor,
 			Direction: "prev",
@@ -309,7 +332,8 @@ func TestFillsHistoryReadsAndPaginates(t *testing.T) {
 	}
 	if len(backward.Items) != 2 ||
 		backward.Items[0].FillID != fillIDs[2] ||
-		backward.Items[1].FillID != fillIDs[1] {
+		backward.Items[1].FillID != fillIDs[1] ||
+		backward.Total != 3 {
 		t.Fatalf("previous fill page = %#v", backward)
 	}
 
@@ -975,7 +999,13 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 			fill.side,
 			fill.position_effect,
 			fill.logical_time,
-			count(*) OVER ()
+			(
+				SELECT count(*)
+				  FROM trading.fills AS counted
+				 WHERE counted.account_id = $1
+				   AND ($2::text IS NULL OR counted.side = $2)
+				   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+			)
 		   FROM trading.fills AS fill
 		  WHERE fill.account_id = $1
 		    AND ($2::text IS NULL OR fill.side = $2)
@@ -1000,7 +1030,13 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 			fill.side,
 			fill.position_effect,
 			fill.logical_time,
-			count(*) OVER ()
+			(
+				SELECT count(*)
+				  FROM trading.fills AS counted
+				 WHERE counted.account_id = $1
+				   AND ($2::text IS NULL OR counted.side = $2)
+				   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+			)
 		   FROM trading.fills AS fill
 		  WHERE fill.account_id = $1
 		    AND ($2::text IS NULL OR fill.side = $2)
@@ -1037,7 +1073,13 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 			fill.side,
 			fill.position_effect,
 			fill.logical_time,
-			count(*) OVER ()
+			(
+				SELECT count(*)
+				  FROM trading.fills AS counted
+				 WHERE counted.account_id = $1
+				   AND ($2::text IS NULL OR counted.side = $2)
+				   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+			)
 		   FROM trading.fills AS fill
 		  WHERE fill.account_id = $1
 		    AND ($2::text IS NULL OR fill.side = $2)
