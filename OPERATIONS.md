@@ -200,21 +200,22 @@ not ignore the new objects.
 Before applying the migration:
 
 1. halt API-key mutation traffic;
-2. take and restore-verify a backup containing application schemas,
-   `schema_migrations`, identity state, and audit state;
+2. take and restore-verify a complete database backup containing all
+   then-existing application state and `schema_migrations`; migration 007
+   introduces its API-key audit state;
 3. record the backup/PITR boundary and candidate artifact digest;
-4. verify the forward-fix candidate can apply from the previous released
-   schema.
+4. verify the release candidate can apply from the previous released schema.
 
 After the migration is applied, never edit, remove, or down-migrate it. For an
 incident, keep writers halted and deploy a reviewed forward code or forward
-migration fix. If an owner-authorized full rollback is unavoidable, stop every
-writer, restore the complete database to the recorded pre-migration boundary,
-deploy the prior binary, and run reconciliation before reopening traffic. A
-selective schema or identity-table restore is forbidden because it can split
-credential, audit, command, and monetary history. Once post-migration traffic
-has been accepted, prefer forward repair; restoring the old boundary discards
-all later durable facts and requires the normal disaster-recovery decision.
+migration fix verified from a database with migration 007 already applied. If
+an owner-authorized full rollback is unavoidable, stop every writer, restore
+the complete database to the recorded pre-migration boundary, deploy the prior
+binary, and run reconciliation before reopening traffic. A selective schema or
+identity-table restore is forbidden because it can split credential, audit,
+command, and monetary history. Once post-migration traffic has been accepted,
+prefer forward repair; restoring the old boundary discards all later durable
+facts and requires the normal disaster-recovery decision.
 
 ## 8. Release gates
 
