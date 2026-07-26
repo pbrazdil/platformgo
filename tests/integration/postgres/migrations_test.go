@@ -3310,7 +3310,7 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 	}
 	if _, err := pool.Exec(ctx, `
 		UPDATE identity.api_keys
-		   SET revoked_at = '2026-07-26T07:02:00Z'
+		   SET revoked_at = created_at + interval '1 microsecond'
 		 WHERE api_key_id = '00000000-0000-4000-8000-000000000701'`,
 	); err != nil {
 		t.Fatalf("first API-key revocation: %v", err)
