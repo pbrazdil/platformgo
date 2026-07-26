@@ -123,26 +123,196 @@ func TestClientCreatesOwnAPIKey(t *testing.T) {
 	if strings.Contains(string(storedHash), created.Token) {
 		t.Fatal("stored API-key hash contains the returned token")
 	}
-	invalid := createMyAPIKey(
+	sourceCompatible := createMyAPIKey(
 		t,
 		serverURL,
 		accessToken,
 		`{"name":" bad ","scopes":["orders:write","orders:write"]}`,
-		"request-invalid-key",
+		"request-source-compatible-key",
 	)
-	if invalid.status != http.StatusBadRequest {
-		t.Fatalf("invalid status = %d, body = %s", invalid.status, invalid.body)
+	if sourceCompatible.status != http.StatusCreated {
+		t.Fatalf(
+			"source-compatible status = %d, body = %s",
+			sourceCompatible.status,
+			sourceCompatible.body,
+		)
 	}
-	var unchangedCount int
+	var compatibleCount int
 	if err := admin.QueryRow(ctx, `
 		SELECT count(*)
 		  FROM identity.api_keys
 		 WHERE owner_user_id = 'urn:xb:user:bot-owner'`,
-	).Scan(&unchangedCount); err != nil {
+	).Scan(&compatibleCount); err != nil {
 		t.Fatal(err)
 	}
-	if unchangedCount != 1 {
-		t.Fatalf("key count after invalid request = %d, want 1", unchangedCount)
+	if compatibleCount != 2 {
+		t.Fatalf(
+			"key count after source-compatible request = %d, want 2",
+			compatibleCount,
+		)
+	}
+}
+
+// The pinned client router applies its idempotency middleware to every
+// authenticated mutating route. This implementation-only recovery test closes
+// the source test's commit-before-response-loss gap under the stronger project
+// idempotency invariant.
+func TestUserAPIKeyCreationReplaysOneDurableCredential(t *testing.T) {
+	ctx, admin, apiPool, serverURL := newMyAPIKeyFixture(t, 25)
+	defer admin.Close()
+	defer apiPool.Close()
+	accessToken := loginMyAPIKeyOwner(t, serverURL)
+
+	first := createMyAPIKeyWithIdempotency(
+		t,
+		serverURL,
+		accessToken,
+		`{"name":"replay-bot","scopes":["orders:write"]}`,
+		"request-replay-first",
+		"create-replay-bot",
+	)
+	replay := createMyAPIKeyWithIdempotency(
+		t,
+		serverURL,
+		accessToken,
+		`{"name":"replay-bot","scopes":["orders:write"]}`,
+		"request-replay-second",
+		"create-replay-bot",
+	)
+	if first.status != http.StatusCreated ||
+		replay.status != http.StatusCreated ||
+		first.body != replay.body {
+		t.Fatalf(
+			"idempotent responses = first %d %q replay %d %q",
+			first.status,
+			first.body,
+			replay.status,
+			replay.body,
+		)
+	}
+
+	conflict := createMyAPIKeyWithIdempotency(
+		t,
+		serverURL,
+		accessToken,
+		`{"name":"changed-bot","scopes":["orders:write"]}`,
+		"request-replay-conflict",
+		"create-replay-bot",
+	)
+	if conflict.status != http.StatusConflict {
+		t.Fatalf(
+			"idempotency conflict status = %d, body = %s",
+			conflict.status,
+			conflict.body,
+		)
+	}
+
+	var (
+		keyCount    int
+		auditCount  int
+		replayCount int
+	)
+	if err := admin.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM identity.api_keys),
+			(SELECT count(*) FROM audit.events
+			  WHERE action = 'user-key.create'),
+			(SELECT count(*) FROM identity.api_key_replays)`,
+	).Scan(&keyCount, &auditCount, &replayCount); err != nil {
+		t.Fatal(err)
+	}
+	if keyCount != 1 || auditCount != 1 || replayCount != 1 {
+		t.Fatalf(
+			"durable replay state = keys %d audits %d replays %d",
+			keyCount,
+			auditCount,
+			replayCount,
+		)
+	}
+
+	var plaintextLeaks int
+	if err := admin.QueryRow(ctx, `
+		SELECT
+			(count(*) FILTER (
+				WHERE convert_from(response_ciphertext, 'UTF8')
+				      LIKE '%xbk_%'
+			))
+		  FROM identity.api_key_replays`,
+	).Scan(&plaintextLeaks); err != nil {
+		t.Fatal(err)
+	}
+	if plaintextLeaks != 0 {
+		t.Fatalf("encrypted replay rows containing plaintext token = %d", plaintextLeaks)
+	}
+}
+
+// The pinned protected-client router applies a shared per-principal limiter
+// before executing this mutation. This implementation-only test proves that
+// the replacement uses shared PostgreSQL authority rather than process-local
+// counters.
+func TestUserAPIKeyCreationIsRateLimitedPerPrincipal(t *testing.T) {
+	ctx, admin, apiPool, serverURL := newMyAPIKeyFixture(t, 25)
+	defer admin.Close()
+	defer apiPool.Close()
+	if _, err := admin.Exec(ctx, `
+		UPDATE identity.api_key_policy
+		   SET client_rate_limit_max_requests = 2,
+		       client_rate_limit_window_seconds = 60,
+		       version = version + 1
+		 WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+	accessToken := loginMyAPIKeyOwner(t, serverURL)
+
+	for index := range 2 {
+		result := createMyAPIKey(
+			t,
+			serverURL,
+			accessToken,
+			`{"name":"rate-bot-`+string(rune('a'+index))+`"}`,
+			"request-rate-"+string(rune('a'+index)),
+		)
+		if result.status != http.StatusCreated {
+			t.Fatalf(
+				"admitted rate request %d status = %d, body = %s",
+				index,
+				result.status,
+				result.body,
+			)
+		}
+	}
+	limited := createMyAPIKey(
+		t,
+		serverURL,
+		accessToken,
+		`{"name":"rate-bot-c"}`,
+		"request-rate-c",
+	)
+	if limited.status != http.StatusTooManyRequests {
+		t.Fatalf(
+			"rate-limited status = %d, body = %s",
+			limited.status,
+			limited.body,
+		)
+	}
+	var (
+		keyCount   int
+		auditCount int
+	)
+	if err := admin.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM identity.api_keys),
+			(SELECT count(*) FROM audit.events
+			  WHERE action = 'user-key.create')`,
+	).Scan(&keyCount, &auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if keyCount != 2 || auditCount != 2 {
+		t.Fatalf(
+			"rate-limited durable state = keys %d audits %d",
+			keyCount,
+			auditCount,
+		)
 	}
 }
 
@@ -401,16 +571,38 @@ func createMyAPIKey(
 	body string,
 	requestID string,
 ) myAPIKeyHTTPResult {
+	return createMyAPIKeyWithIdempotency(
+		t,
+		serverURL,
+		accessToken,
+		body,
+		requestID,
+		"",
+	)
+}
+
+func createMyAPIKeyWithIdempotency(
+	t *testing.T,
+	serverURL string,
+	accessToken string,
+	body string,
+	requestID string,
+	idempotencyKey string,
+) myAPIKeyHTTPResult {
 	t.Helper()
+	headers := map[string]string{
+		"authorization": "Bearer " + accessToken,
+		"x-request-id":  requestID,
+	}
+	if idempotencyKey != "" {
+		headers["idempotency-key"] = idempotencyKey
+	}
 	response := requestJSON(
 		t,
 		http.MethodPost,
 		serverURL+"/v1/me/api-keys",
 		body,
-		map[string]string{
-			"authorization": "Bearer " + accessToken,
-			"x-request-id":  requestID,
-		},
+		headers,
 	)
 	var result myAPIKeyHTTPResult
 	result.status = response.StatusCode
