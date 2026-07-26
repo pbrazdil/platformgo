@@ -286,6 +286,9 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 		);
 		INSERT INTO trading.accounts (account_id, oms_mode)
 		VALUES ('account-fill-plan', 'NETTING');
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		SELECT format('account-fill-plan-other-%s', account_number), 'NETTING'
+		  FROM generate_series(1, 9) AS accounts(account_number);
 		INSERT INTO trading.orders (
 			order_id, account_id, instrument_id, side, order_type,
 			time_in_force, status, quantity, filled_quantity,
@@ -312,16 +315,25 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 				'20000000-0000-0000-0000-%s',
 				lpad(to_hex(sequence_number), 12, '0')
 			)::uuid,
-			'account-fill-plan',
+			CASE
+				WHEN sequence_number <= 10000 THEN 'account-fill-plan'
+				ELSE format(
+					'account-fill-plan-other-%s',
+					1 + ((sequence_number - 10001) / 10000)
+				)
+			END,
 			'BTC-PERP',
-			'BUY',
+			CASE
+				WHEN sequence_number % 2 = 0 THEN 'BUY'
+				ELSE 'SELL'
+			END,
 			100,
 			0.01,
 			'30000000-0000-0000-0000-000000000001'::uuid,
 			'OPEN',
 			'TAKER',
 			1784901600000000000 + sequence_number
-		  FROM generate_series(1, 10000) AS sequence(sequence_number);
+		  FROM generate_series(1, 100000) AS sequence(sequence_number);
 		ANALYZE trading.fills`); err != nil {
 		t.Fatalf("seed representative fill history: %v", err)
 	}
@@ -329,6 +341,7 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 	assertFillPlanUsesIndex(
 		t,
 		pool,
+		"fills_account_history_idx",
 		`SELECT fill_id
 		   FROM trading.fills
 		  WHERE account_id = 'account-fill-plan'
@@ -340,6 +353,7 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 	assertFillPlanUsesIndex(
 		t,
 		pool,
+		"fills_account_history_idx",
 		`SELECT fill_id
 		   FROM trading.fills
 		  WHERE account_id = 'account-fill-plan'
@@ -348,14 +362,40 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 		  ORDER BY logical_time ASC, fill_id ASC
 		  LIMIT 51`,
 	)
+	assertFillPlanUsesIndex(
+		t,
+		pool,
+		"fills_account_side_history_idx",
+		`SELECT
+			fill.fill_id::text,
+			fill.logical_time,
+			count(*) OVER ()
+		   FROM trading.fills AS fill
+		  WHERE fill.account_id = $1
+		    AND ($2::text IS NULL OR fill.side = $2)
+		    AND ($3::uuid IS NULL OR fill.fill_id = $3)
+		  ORDER BY fill.logical_time DESC, fill.fill_id DESC
+		  LIMIT $4`,
+		"account-fill-plan",
+		"BUY",
+		nil,
+		10,
+	)
 }
 
-func assertFillPlanUsesIndex(t *testing.T, pool *pgxpool.Pool, query string) {
+func assertFillPlanUsesIndex(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	indexName string,
+	query string,
+	args ...any,
+) {
 	t.Helper()
 	var rawPlan []byte
 	if err := pool.QueryRow(
 		context.Background(),
 		"EXPLAIN (FORMAT JSON, COSTS OFF) "+query,
+		args...,
 	).Scan(&rawPlan); err != nil {
 		t.Fatalf("explain fill query: %v", err)
 	}
@@ -373,7 +413,7 @@ func assertFillPlanUsesIndex(t *testing.T, pool *pgxpool.Pool, query string) {
 		fillSeqScan bool
 	)
 	walkPostgresPlan(explained[0].Plan, func(plan postgresExplainPlan) {
-		indexFound = indexFound || plan.IndexName == "fills_account_history_idx"
+		indexFound = indexFound || plan.IndexName == indexName
 		fillSeqScan = fillSeqScan ||
 			(plan.NodeType == "Seq Scan" && plan.RelationName == "fills")
 	})

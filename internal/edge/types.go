@@ -283,6 +283,13 @@ type FillExecutionView struct {
 	FilledAt string `json:"filledAt"`
 }
 
+// FillExecutionPage is the narrow filtered execution projection proven by
+// pinned fill-history source tests. It is not an accepted HTTP contract.
+type FillExecutionPage struct {
+	Items []FillExecutionView
+	Total int64
+}
+
 // FundingView is one exact, append-only client funding projection.
 type FundingView struct {
 	FundingID              string `json:"fundingId"`
