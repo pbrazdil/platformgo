@@ -376,8 +376,10 @@ type FillExecutionView struct {
 // FillExecutionPage is the narrow filtered execution projection proven by
 // pinned fill-history source tests. It is not an accepted HTTP contract.
 type FillExecutionPage struct {
-	Items []FillExecutionView
-	Total int64
+	Items      []FillExecutionView
+	NextCursor *string
+	PrevCursor *string
+	Total      int64
 }
 
 // FundingView is one exact, append-only client funding projection.
