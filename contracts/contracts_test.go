@@ -77,16 +77,21 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 			t.Fatalf("%s missing from compatibility manifest", key)
 		}
 	}
-	deviationFound := false
+	requiredDeviations := []string{
+		"client-api-key-creation-requires-idempotency-key",
+		"fill-trade-type-is-always-classified",
+	}
+	foundDeviations := make(map[string]bool, len(requiredDeviations))
 	for _, raw := range manifest.IntentionalDeviations {
 		var name string
-		if json.Unmarshal(raw, &name) == nil &&
-			name == "client-api-key-creation-requires-idempotency-key" {
-			deviationFound = true
+		if json.Unmarshal(raw, &name) == nil {
+			foundDeviations[name] = true
 		}
 	}
-	if !deviationFound {
-		t.Fatal("required API-key idempotency deviation missing from manifest")
+	for _, name := range requiredDeviations {
+		if !foundDeviations[name] {
+			t.Fatalf("required intentional deviation %q missing from manifest", name)
+		}
 	}
 	if !reflect.DeepEqual(manifest.ImplementedWorkers, []string{
 		"outbox-publisher", "realtime-publisher",

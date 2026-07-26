@@ -28,7 +28,8 @@
   ],
   "intentionalDeviations": [
     "api-key-idempotent-resolution-precedes-rate-rejection",
-    "client-api-key-creation-requires-idempotency-key"
+    "client-api-key-creation-requires-idempotency-key",
+    "fill-trade-type-is-always-classified"
   ],
   "implementedHTTPRoutes": [
     "GET /healthz",
