@@ -50,9 +50,10 @@ The client account-summary slice now implements authenticated
 graph through the least-privilege API role, exposes the frozen camel-case
 `MyAccountView`, preserves source enum spellings at the wire boundary, and
 fails closed rather than omitting an incomplete account. Its additive
-PostgreSQL 17 migration records account status and default margin mode without
-rewriting existing rows and has bounded-lock rollback/retry coverage. Source
-port-ledger acceptance remains a separate follow-up change.
+PostgreSQL 17 migration sequence records account status and default margin mode
+without rewriting existing rows, commits metadata locks before constraint
+validation, and has bounded-lock rollback/retry plus concurrent read/write
+coverage. Source port-ledger acceptance remains a separate follow-up change.
 
 Phase 3 is not complete. The runtime must still:
 
