@@ -146,6 +146,189 @@ func TestFillFilledAtIsEngineExecutionTimeNotInsertNow(t *testing.T) {
 // Ported from:
 //
 //	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/trading/e2e_fills.rs:63
+//	test: fills_history_reads_and_paginates
+//
+// Adaptations:
+//   - Deterministic UUID fill IDs and immutable engine fills replace the
+//     legacy mirror's free-form fill IDs.
+//   - The current narrow Go fill projection remains internal; this slice
+//     proves its pagination boundary without activating the inventory-only
+//     external fills route or inventing unavailable catalog metadata.
+//   - An opaque keyset cursor replaces the source query dispatcher's cursor.
+//
+// Assertions preserved:
+//   - The requested limit is honored.
+//   - The first page reports the complete account-scoped total and a cursor
+//     when older rows remain.
+//   - Following that cursor returns the final row.
+//   - Every fill is returned exactly once across the two pages.
+//
+// Strengthening:
+//   - All three fills share one logical time, proving the immutable fill ID is
+//     a deterministic tie-break rather than relying on insertion order.
+func TestFillsHistoryReadsAndPaginates(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("migrate fill pagination database: %v", err)
+	}
+
+	const (
+		accountID = "urn:xb:account:fill-pagination"
+	)
+	fillIDs := []string{
+		"019fa844-26c0-7000-8000-000000000101",
+		"019fa844-26c0-7000-8000-000000000102",
+		"019fa844-26c0-7000-8000-000000000103",
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2,
+			0.1, 0.05, 10, -0.0001, 0.0005
+		);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:fill-pagination', 'NETTING');
+		INSERT INTO trading.orders (
+			order_id, account_id, instrument_id, side, order_type,
+			time_in_force, status, quantity, filled_quantity,
+			average_fill_price, triggered, reduce_only, has_rested,
+			version
+		) VALUES (
+			'019fa844-26c0-7000-8000-000000000111',
+			'urn:xb:account:fill-pagination', 'BTC-PERP', 'BUY', 'MARKET',
+			'IOC', 'FILLED', 0.03, 0.03, 60000,
+			false, false, false, 1
+		);
+		INSERT INTO trading.fills (
+			fill_id, order_id, input_id, account_id, instrument_id,
+			side, price, quantity, position_id, position_effect,
+			liquidity_side, logical_time
+		) VALUES
+			(
+				'019fa844-26c0-7000-8000-000000000101',
+				'019fa844-26c0-7000-8000-000000000111',
+				'019fa844-26c0-7000-8000-000000000121',
+				'urn:xb:account:fill-pagination', 'BTC-PERP',
+				'BUY', 60000, 0.01,
+				'019fa844-26c0-7000-8000-000000000131',
+				'open', 'TAKER', 1784901600000000000
+			),
+			(
+				'019fa844-26c0-7000-8000-000000000102',
+				'019fa844-26c0-7000-8000-000000000111',
+				'019fa844-26c0-7000-8000-000000000122',
+				'urn:xb:account:fill-pagination', 'BTC-PERP',
+				'BUY', 60000, 0.01,
+				'019fa844-26c0-7000-8000-000000000131',
+				'increase', 'TAKER', 1784901600000000000
+			),
+			(
+				'019fa844-26c0-7000-8000-000000000103',
+				'019fa844-26c0-7000-8000-000000000111',
+				'019fa844-26c0-7000-8000-000000000123',
+				'urn:xb:account:fill-pagination', 'BTC-PERP',
+				'BUY', 60000, 0.01,
+				'019fa844-26c0-7000-8000-000000000131',
+				'increase', 'TAKER', 1784901600000000000
+			)`); err != nil {
+		t.Fatalf("seed durable fill pagination: %v", err)
+	}
+
+	apiPool := runtimeRoleLoginPool(
+		t,
+		pool,
+		"platformgo_fill_pagination_api_login",
+		"platformgo_api",
+	)
+	store := platformpostgres.NewCompatibilityStore(apiPool)
+	pageOne, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{Limit: 2},
+	)
+	if err != nil {
+		t.Fatalf("read first fill page: %v", err)
+	}
+	if len(pageOne.Items) != 2 ||
+		pageOne.Total != 3 ||
+		pageOne.NextCursor == nil {
+		t.Fatalf("first fill page = %#v", pageOne)
+	}
+	if pageOne.Items[0].FillID != fillIDs[2] ||
+		pageOne.Items[1].FillID != fillIDs[1] {
+		t.Fatalf("first fill page order = %#v", pageOne.Items)
+	}
+
+	pageTwo, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{
+			Limit:  2,
+			Cursor: *pageOne.NextCursor,
+		},
+	)
+	if err != nil {
+		t.Fatalf("read second fill page: %v", err)
+	}
+	if len(pageTwo.Items) != 1 ||
+		pageTwo.Items[0].FillID != fillIDs[0] ||
+		pageTwo.PrevCursor == nil {
+		t.Fatalf("second fill page = %#v", pageTwo)
+	}
+	seen := make(map[string]int, len(fillIDs))
+	for _, fill := range append(pageOne.Items, pageTwo.Items...) {
+		seen[fill.FillID]++
+	}
+	for _, fillID := range fillIDs {
+		if seen[fillID] != 1 {
+			t.Fatalf("fill %s returned %d times across pages", fillID, seen[fillID])
+		}
+	}
+
+	backward, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{
+			Limit:     2,
+			Cursor:    *pageTwo.PrevCursor,
+			Direction: "prev",
+		},
+	)
+	if err != nil {
+		t.Fatalf("read previous fill page: %v", err)
+	}
+	if len(backward.Items) != 2 ||
+		backward.Items[0].FillID != fillIDs[2] ||
+		backward.Items[1].FillID != fillIDs[1] {
+		t.Fatalf("previous fill page = %#v", backward)
+	}
+
+	invalid, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{
+			Limit:  2,
+			Cursor: "not-a-fill-cursor",
+		},
+	)
+	if err == nil || len(invalid.Items) != 0 || invalid.Total != 0 {
+		t.Fatalf("invalid fill cursor page = %#v, error %v", invalid, err)
+	}
+}
+
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/trading/e2e_fills.rs:328
 //	test: fills_history_filters_by_side_and_trade_id
 //
@@ -781,6 +964,56 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 		        (1784901600000010001, 'ffffffff-ffff-ffff-ffff-ffffffffffff')
 		  ORDER BY logical_time DESC, fill_id DESC
 		  LIMIT 51`,
+	)
+	assertFillPlanUsesIndex(
+		t,
+		pool,
+		"fills_account_history_idx",
+		`SELECT
+			fill.fill_id::text,
+			fill.order_id::text,
+			fill.side,
+			fill.position_effect,
+			fill.logical_time,
+			count(*) OVER ()
+		   FROM trading.fills AS fill
+		  WHERE fill.account_id = $1
+		    AND ($2::text IS NULL OR fill.side = $2)
+		    AND ($3::uuid IS NULL OR fill.fill_id = $3)
+		    AND (fill.logical_time, fill.fill_id) < ($4, $5)
+		  ORDER BY fill.logical_time DESC, fill.fill_id DESC
+		  LIMIT $6`,
+		"account-fill-plan",
+		nil,
+		nil,
+		int64(1784901600000010001),
+		"ffffffff-ffff-ffff-ffff-ffffffffffff",
+		51,
+	)
+	assertFillPlanUsesIndex(
+		t,
+		pool,
+		"fills_account_history_idx",
+		`SELECT
+			fill.fill_id::text,
+			fill.order_id::text,
+			fill.side,
+			fill.position_effect,
+			fill.logical_time,
+			count(*) OVER ()
+		   FROM trading.fills AS fill
+		  WHERE fill.account_id = $1
+		    AND ($2::text IS NULL OR fill.side = $2)
+		    AND ($3::uuid IS NULL OR fill.fill_id = $3)
+		    AND (fill.logical_time, fill.fill_id) > ($4, $5)
+		  ORDER BY fill.logical_time ASC, fill.fill_id ASC
+		  LIMIT $6`,
+		"account-fill-plan",
+		nil,
+		nil,
+		int64(1784901600000009950),
+		"00000000-0000-0000-0000-000000000000",
+		51,
 	)
 	assertFillPlanUsesIndex(
 		t,
