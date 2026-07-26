@@ -60,6 +60,12 @@ The owner-approved client API-key decision requires a stable
 planned compatibility deviation prevents a committed credential from becoming
 active when its only plaintext response cannot be recovered; implementation
 and source-port acceptance remain separate follow-up changes.
+The owner-approved replay-order decision also requires exact committed replay
+and deterministic conflict resolution before new-work rate rejection, while
+invalid new requests remain rate-accounted exactly once. This second planned
+compatibility deviation resolves a conflict between pinned middleware order
+and the higher-authority unknown-outcome invariant; implementation and
+source-port acceptance remain separate follow-up changes.
 
 Phase 3 is not complete. The runtime must still:
 
