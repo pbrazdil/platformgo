@@ -135,6 +135,19 @@ type LoginResponse struct {
 	RefreshToken string `json:"refreshToken"`
 }
 
+// CreateAPIKeyRequest is the client self-service credential request.
+type CreateAPIKeyRequest struct {
+	Name   string   `json:"name"`
+	Scopes []string `json:"scopes"`
+}
+
+// APIKeyCreated returns metadata plus the credential shown exactly once.
+type APIKeyCreated struct {
+	ID     string `json:"id"`
+	Prefix string `json:"prefix"`
+	Token  string `json:"token"`
+}
+
 // UserProfile is the client-visible identity projection.
 type UserProfile struct {
 	UserID string `json:"userId"`

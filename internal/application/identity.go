@@ -26,6 +26,7 @@ const (
 	maxBrokerTokenTTL     = time.Hour
 	defaultBrokerTokenTTL = 15 * time.Minute
 	brokerIdempotencyTTL  = 24 * time.Hour
+	defaultMaxAPIKeys     = 25
 )
 
 // ErrIdentityNotFound is returned by durable identity lookup ports.
@@ -114,6 +115,7 @@ type IdentityConfig struct {
 	Entropy                    io.Reader
 	CommandReadiness           func(context.Context) error
 	AccountProvisioningTimeout time.Duration
+	MaxAPIKeysPerOwner         int
 }
 
 // Identity implements password login and broker identity delegation.
@@ -124,6 +126,7 @@ type Identity struct {
 	entropy          io.Reader
 	commandReadiness func(context.Context) error
 	accountTimeout   time.Duration
+	maxAPIKeys       int
 }
 
 // NewIdentity constructs the production identity application service.
@@ -144,10 +147,17 @@ func NewIdentity(
 	if config.AccountProvisioningTimeout <= 0 {
 		config.AccountProvisioningTimeout = 5 * time.Second
 	}
+	if config.MaxAPIKeysPerOwner == 0 {
+		config.MaxAPIKeysPerOwner = defaultMaxAPIKeys
+	}
+	if config.MaxAPIKeysPerOwner < 0 {
+		return nil, errors.New("identity: API-key owner limit must be positive")
+	}
 	return &Identity{
 		store: store, signer: signer, clock: config.Clock, entropy: config.Entropy,
 		commandReadiness: config.CommandReadiness,
 		accountTimeout:   config.AccountProvisioningTimeout,
+		maxAPIKeys:       config.MaxAPIKeysPerOwner,
 	}, nil
 }
 
