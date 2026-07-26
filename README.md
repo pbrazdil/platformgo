@@ -56,7 +56,12 @@ execution times, forward and backward traversal cannot repeat a boundary row,
 and the filter-wide total remains stable even for an empty cursor window. This
 acceptance intentionally preserves the current narrow internal Go projection;
 it does not import the legacy mirror shape or activate the external fills
-route.
+route. Per-fill position identity and realized PnL are now also landed and
+separately accepted. Real engine decisions prove that hedged legs remain
+distinct and expose only their own exact close realization, paired with its
+settlement currency. Opening fills preserve the current Go absence of a
+realization instead of manufacturing zero-valued money, and durable position
+UUIDs remain authoritative.
 
 The client account-summary slice now implements authenticated
 `GET /v1/me/accounts`. It reads only the caller's complete durable account
@@ -116,8 +121,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 60
-independently reviewed green source tests; 2,591 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 61
+independently reviewed green source tests; 2,590 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
@@ -131,7 +136,7 @@ This repository is not yet a production-capable replacement.
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
 | 2 — Durable execution | Complete | PostgreSQL 17 authority, immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
-| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, authenticated caller-scoped account summaries, and hash-only self-service API-key creation with encrypted durable replay, a PostgreSQL-authoritative owner cap, protected-client rate limiting, and an atomic audit fact. Funding, account-summary, and API-key implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first five separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, same-statement filtered totals, a correlatable fill-to-order identity using the current Go `urn:xb:order:<UUID>` representation, exact classified side/trade-type projection, and strict deterministic tuple pagination with stable filter-wide totals. Rejected-order durability is also landed and separately accepted using the deterministic current-Go transition: exact terminal reason, reservation release, duplicate/restart/reconciliation stability, decision-hash v3 balance authority, markless recovery, and monotonic currency scales. The current narrow internal Go fill projection remains authoritative, and the external fills route remains inventory until its complete source contract is implemented and reviewed. |
+| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, authenticated caller-scoped account summaries, and hash-only self-service API-key creation with encrypted durable replay, a PostgreSQL-authoritative owner cap, protected-client rate limiting, and an atomic audit fact. Funding, account-summary, and API-key implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first six separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, same-statement filtered totals, a correlatable fill-to-order identity using the current Go `urn:xb:order:<UUID>` representation, exact classified side/trade-type projection, strict deterministic tuple pagination with stable filter-wide totals, and per-position exact realized PnL/currency that keeps hedged legs isolated. Rejected-order durability is also landed and separately accepted using the deterministic current-Go transition: exact terminal reason, reservation release, duplicate/restart/reconciliation stability, decision-hash v3 balance authority, markless recovery, and monotonic currency scales. Current Go fill semantics and durable identities remain authoritative, and the external fills route remains inventory until its complete source contract is implemented and reviewed. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
@@ -169,6 +174,14 @@ empty cursor windows. Exact production forward, backward, and side-filtered
 plans over 100,000 fills use the existing account-history indexes and reject a
 sequential scan. Its separate source acceptance preserves the current narrow
 internal Go projection and does not activate an external route.
+The landed hedged-realization slice additionally drives real deterministic
+engine decisions through PostgreSQL 17. A long leg realizes exactly `50 USDC`
+and a separate short leg realizes exactly `30 USDC`; each close retains its
+own durable position UUID, while opening fills retain absent realized amount
+and currency. PostgreSQL and both readers enforce the amount/currency pair,
+and the exact 100,000-fill production plans remain indexed. Its separate
+source acceptance records the owner-approved current-Go semantics and does not
+activate an external route.
 The client account-summary slice additionally has live PostgreSQL 17 HTTP
 proof through the least-privilege API role, cross-user isolation, exact full
 wire-shape assertions, and a contended additive-schema upgrade that rolls back
