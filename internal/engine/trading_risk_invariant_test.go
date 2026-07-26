@@ -259,6 +259,53 @@ func TestDerivedBalanceProjectionCoversMarketOnlyTransitions(
 	}
 }
 
+func TestRestoredMarkRepairsProjectionWithoutCreatingLedgerMoney(
+	t *testing.T,
+) {
+	fixture := newTradingFixture(t)
+	fixture.submit(
+		t,
+		marketOrder(fixture.id(8_705), "account-1", SideBuy, "1", nil),
+	)
+
+	markless := fixture.apply(t, TradingAction{
+		Kind: TradingActionUpdateBook,
+		UpdateBook: &UpdateBook{
+			InstrumentID: "BTC-PERP",
+			Bids:         []BookLevel{{Price: "99", Quantity: "10"}},
+			Asks:         []BookLevel{{Price: "100", Quantity: "10"}},
+		},
+	})
+	if len(markless.BalanceChanges) != 0 ||
+		len(markless.LedgerChanges) != 0 {
+		t.Fatalf(
+			"markless effects = balances %#v ledger %#v",
+			markless.BalanceChanges,
+			markless.LedgerChanges,
+		)
+	}
+
+	restored := fixture.apply(t, TradingAction{
+		Kind: TradingActionUpdateBook,
+		UpdateBook: &UpdateBook{
+			InstrumentID: "BTC-PERP",
+			MarkPrice:    "110",
+			Bids:         []BookLevel{{Price: "109", Quantity: "10"}},
+			Asks:         []BookLevel{{Price: "110", Quantity: "10"}},
+		},
+	})
+	if len(restored.BalanceChanges) != 1 ||
+		restored.BalanceChanges[0].Total != "1000000" ||
+		restored.BalanceChanges[0].Used != "10" ||
+		restored.BalanceChanges[0].Equity != "1000010" ||
+		restored.BalanceChanges[0].Free != "1000000" {
+		t.Fatalf("restored balance projection = %#v", restored.BalanceChanges)
+	}
+	if len(restored.LedgerChanges) != 0 {
+		t.Fatalf("restored mark minted ledger money = %#v", restored.LedgerChanges)
+	}
+}
+
 func TestOrderLifecycleEmitsExactReservationAndPositionProjections(
 	t *testing.T,
 ) {

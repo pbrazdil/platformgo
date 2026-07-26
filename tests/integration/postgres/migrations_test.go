@@ -3921,15 +3921,30 @@ func TestBalanceProjectionHashV3MigrationUsesBoundedLockAndRetries(
 	if elapsed < time.Second || elapsed > 4*time.Second {
 		t.Fatalf("bounded v3 lock wait = %s, want approximately 2s", elapsed)
 	}
-	var lastMigration string
+	var (
+		lastMigration    string
+		markStillNotNull bool
+	)
 	if err := pool.QueryRow(ctx, `
-		SELECT max(filename)
-		  FROM engine.schema_migrations`,
-	).Scan(&lastMigration); err != nil {
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			(
+				SELECT attnotnull
+				  FROM pg_attribute
+				 WHERE attrelid = 'market.books'::regclass
+				   AND attname = 'mark_price'
+				   AND NOT attisdropped
+			)`,
+	).Scan(&lastMigration, &markStillNotNull); err != nil {
 		t.Fatalf("read rolled-back migration history: %v", err)
 	}
-	if lastMigration != "20260726000700_phase3_user_api_keys.up.sql" {
-		t.Fatalf("last migration after contention = %q", lastMigration)
+	if lastMigration != "20260726000700_phase3_user_api_keys.up.sql" ||
+		!markStillNotNull {
+		t.Fatalf(
+			"contended migration state = last %q mark not-null %t",
+			lastMigration,
+			markStillNotNull,
+		)
 	}
 	if err := lockingTx.Rollback(ctx); err != nil {
 		t.Fatal(err)
@@ -3939,6 +3954,20 @@ func TestBalanceProjectionHashV3MigrationUsesBoundedLockAndRetries(
 	}
 	if err := current.VerifyCurrent(ctx); err != nil {
 		t.Fatalf("verify retried v3 migration: %v", err)
+	}
+	var markAllowsNull bool
+	if err := pool.QueryRow(ctx, `
+		SELECT NOT attnotnull
+		  FROM pg_attribute
+		 WHERE attrelid = 'market.books'::regclass
+		   AND attname = 'mark_price'
+		   AND NOT attisdropped`,
+	).Scan(&markAllowsNull); err != nil || !markAllowsNull {
+		t.Fatalf(
+			"retried mark nullability = %t, error %v",
+			markAllowsNull,
+			err,
+		)
 	}
 	assertFinalMigrationHistory(t, pool)
 }

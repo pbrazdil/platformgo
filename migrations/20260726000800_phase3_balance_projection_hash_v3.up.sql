@@ -1,7 +1,8 @@
 -- Decision-hash v3 durable balance-projection authority.
 --
--- Lock: both receipt tables take SHARE ROW EXCLUSIVE before the historical
--- guard, closing overlap with an in-flight old writer. The lock is bounded by
+-- Lock: market.books takes ACCESS EXCLUSIVE before both receipt tables take
+-- SHARE ROW EXCLUSIVE, matching the writer's book-before-receipt order and
+-- closing overlap with an in-flight old writer. Locks are bounded by
 -- lock_timeout.
 -- Rewrite: none. The guard is read-only and bounded by statement_timeout.
 -- Transaction: the migrator applies this file atomically; guard refusal or
@@ -15,10 +16,15 @@
 SET LOCAL lock_timeout = '2s';
 SET LOCAL statement_timeout = '30s';
 
+LOCK TABLE market.books IN ACCESS EXCLUSIVE MODE;
+
 LOCK TABLE
     engine.input_receipts,
     engine.duplicate_delivery_receipts
 IN SHARE ROW EXCLUSIVE MODE;
+
+ALTER TABLE market.books
+    ALTER COLUMN mark_price DROP NOT NULL;
 
 DO $$
 BEGIN

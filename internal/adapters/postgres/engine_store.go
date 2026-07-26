@@ -1503,7 +1503,7 @@ func persistBooks(
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO market.books (
 				instrument_id, mark_price, bids, asks, stream_sequence
-			) VALUES ($1,$2,$3,$4,$5)
+			) VALUES ($1,NULLIF($2, '')::numeric,$3,$4,$5)
 			ON CONFLICT (instrument_id) DO UPDATE SET
 				mark_price = EXCLUDED.mark_price,
 				bids = EXCLUDED.bids,

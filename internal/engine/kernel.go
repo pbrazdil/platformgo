@@ -592,11 +592,8 @@ func deriveLedgerChanges(
 			return nil, invalidLedgerEffect(input, "next balance total", err)
 		}
 		previousTotal := decimal.Decimal{}
-		if snapshot, ok := previous.Balance(key.accountID, key.currency); ok {
-			previousTotal, err = decimal.Parse(snapshot.Total)
-			if err != nil {
-				return nil, invalidLedgerEffect(input, "previous balance total", err)
-			}
+		if total, ok := rawBalanceTotal(previous, key.accountID, key.currency); ok {
+			previousTotal = total
 		}
 		delta, err := nextTotal.Sub(previousTotal)
 		if err != nil {
@@ -637,6 +634,22 @@ func deriveLedgerChanges(
 		})
 	}
 	return transactions, nil
+}
+
+// rawBalanceTotal reads the authoritative funded amount without depending on
+// marks needed only for derived used, free, and equity projections.
+func rawBalanceTotal(
+	state State,
+	accountID string,
+	currency string,
+) (decimal.Decimal, bool) {
+	for _, balance := range state.trading.balances {
+		if balance.accountID == accountID &&
+			balance.total.Currency().Code() == currency {
+			return balance.total.Decimal(), true
+		}
+	}
+	return decimal.Decimal{}, false
 }
 
 func invalidLedgerEffect(

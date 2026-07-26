@@ -3111,6 +3111,283 @@ func TestEngineStoreRecoversDecisionHashV2AndExtendsTheChainWithV3(
 	}
 }
 
+func TestEngineStoreRestoredMarkRepairsProjectionWithoutLedgerDelta(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("migrate restored-mark database: %v", err)
+	}
+
+	store := platformpostgres.NewEngineStore(pool)
+	state := engine.NewState(8)
+	ids := testkit.NewShardIDSequence(8)
+	clock := testkit.NewManualClock(
+		engine.NewLogicalTime(time.Date(2026, time.July, 26, 16, 0, 0, 0, time.UTC)),
+	)
+	apply := func(action engine.TradingAction) engine.Decision {
+		var decision engine.Decision
+		state, decision, _, _ = applyStoredTrading(
+			t,
+			pool,
+			store,
+			state,
+			ids,
+			clock,
+			action,
+			platformpostgres.ApplyOptions{},
+		)
+		return decision
+	}
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionConfigureInstrument,
+		ConfigureInstrument: &engine.ConfigureInstrument{
+			InstrumentID:            "BTC-PERP",
+			Revision:                1,
+			PriceScale:              2,
+			QuantityScale:           3,
+			SettlementCurrency:      "USDC",
+			SettlementCurrencyScale: 2,
+			InitialMarginRate:       "0.1",
+			MaintenanceMarginRate:   "0.05",
+			MaxLeverage:             "10",
+			MakerFeeRate:            "0",
+			TakerFeeRate:            "0",
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "account-restored-mark",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionAdjustBalance,
+		AdjustBalance: &engine.AdjustBalance{
+			AccountID:     "account-restored-mark",
+			Currency:      "USDC",
+			CurrencyScale: 2,
+			Operation:     engine.BalanceOperationDeposit,
+			Amount:        "1000",
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionUpdateBook,
+		UpdateBook: &engine.UpdateBook{
+			InstrumentID: "BTC-PERP",
+			MarkPrice:    "100",
+			Bids:         []engine.BookLevel{{Price: "99", Quantity: "10"}},
+			Asks:         []engine.BookLevel{{Price: "100", Quantity: "10"}},
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionSubmitOrder,
+		SubmitOrder: &engine.SubmitOrder{
+			OrderID:      ids.Next(),
+			AccountID:    "account-restored-mark",
+			InstrumentID: "BTC-PERP",
+			Side:         engine.SideBuy,
+			Type:         engine.OrderTypeMarket,
+			TimeInForce:  engine.TimeInForceGTC,
+			Quantity:     "1",
+		},
+	})
+
+	var (
+		ledgerTransactionsBefore int
+		ledgerEntriesBefore      int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM ledger.transactions),
+			(SELECT count(*) FROM ledger.entries)`,
+	).Scan(&ledgerTransactionsBefore, &ledgerEntriesBefore); err != nil {
+		t.Fatalf("count baseline ledger rows: %v", err)
+	}
+
+	markless := apply(engine.TradingAction{
+		Kind: engine.TradingActionUpdateBook,
+		UpdateBook: &engine.UpdateBook{
+			InstrumentID: "BTC-PERP",
+			Bids:         []engine.BookLevel{{Price: "99", Quantity: "10"}},
+			Asks:         []engine.BookLevel{{Price: "100", Quantity: "10"}},
+		},
+	})
+	if len(markless.BalanceChanges) != 0 || len(markless.LedgerChanges) != 0 {
+		t.Fatalf(
+			"markless decision = balances %#v ledger %#v",
+			markless.BalanceChanges,
+			markless.LedgerChanges,
+		)
+	}
+
+	restoredAction := engine.TradingAction{
+		Kind: engine.TradingActionUpdateBook,
+		UpdateBook: &engine.UpdateBook{
+			InstrumentID: "BTC-PERP",
+			MarkPrice:    "110",
+			Bids:         []engine.BookLevel{{Price: "109", Quantity: "10"}},
+			Asks:         []engine.BookLevel{{Price: "110", Quantity: "10"}},
+		},
+	}
+	var restoredInput engine.InputEnvelope
+	var restored engine.Decision
+	state, restored, restoredInput, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		restoredAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if len(restored.BalanceChanges) != 1 ||
+		restored.BalanceChanges[0].Total != "1000" ||
+		restored.BalanceChanges[0].Used != "1" ||
+		restored.BalanceChanges[0].Equity != "1010" ||
+		restored.BalanceChanges[0].Free != "1009" {
+		t.Fatalf("restored projection = %#v", restored.BalanceChanges)
+	}
+	if len(restored.LedgerChanges) != 0 {
+		t.Fatalf("restored mark minted ledger money = %#v", restored.LedgerChanges)
+	}
+	var (
+		persistedTotal  string
+		persistedUsed   string
+		persistedFree   string
+		persistedEquity string
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			trim_scale(total)::text,
+			trim_scale(used)::text,
+			trim_scale(free)::text,
+			trim_scale(equity)::text
+		  FROM ledger.balances
+		 WHERE account_id = 'account-restored-mark'
+		   AND currency = 'USDC'`,
+	).Scan(
+		&persistedTotal,
+		&persistedUsed,
+		&persistedFree,
+		&persistedEquity,
+	); err != nil {
+		t.Fatalf("read persisted restored projection: %v", err)
+	}
+	if persistedTotal != "1000" ||
+		persistedUsed != "1" ||
+		persistedFree != "1009" ||
+		persistedEquity != "1010" {
+		t.Fatalf(
+			"persisted restored projection = %s/%s/%s/%s",
+			persistedTotal,
+			persistedUsed,
+			persistedFree,
+			persistedEquity,
+		)
+	}
+	assertLedgerRowCounts(
+		t,
+		pool,
+		ledgerTransactionsBefore,
+		ledgerEntriesBefore,
+	)
+
+	recovered, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover restored projection: %v", err)
+	}
+	if recovered.Hash() != state.Hash() || !recovered.Ready() {
+		t.Fatalf(
+			"recovered restored state ready=%t hash=%s, want %s",
+			recovered.Ready(),
+			recovered.Hash(),
+			state.Hash(),
+		)
+	}
+	if report, err := store.ReconcileShard(ctx, 8); err != nil || !report.Ready {
+		t.Fatalf("restored projection reconciliation = %+v, error %v", report, err)
+	}
+
+	duplicateInput := restoredInput
+	duplicateInput.StreamSequence = state.NextStreamSequence()
+	duplicateState, duplicateDecision, duplicate, err := store.ApplyTrading(
+		ctx,
+		state,
+		duplicateInput,
+		restoredAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if err != nil || !duplicate {
+		t.Fatalf(
+			"restored-mark duplicate = duplicate %t error %v",
+			duplicate,
+			err,
+		)
+	}
+	if len(duplicateDecision.LedgerChanges) != 0 {
+		t.Fatalf("restored-mark duplicate ledger = %#v", duplicateDecision.LedgerChanges)
+	}
+	assertLedgerRowCounts(
+		t,
+		pool,
+		ledgerTransactionsBefore,
+		ledgerEntriesBefore,
+	)
+	recoveredDuplicate, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover restored-mark duplicate: %v", err)
+	}
+	if recoveredDuplicate.Hash() != duplicateState.Hash() ||
+		!recoveredDuplicate.Ready() {
+		t.Fatalf(
+			"recovered duplicate ready=%t hash=%s, want %s",
+			recoveredDuplicate.Ready(),
+			recoveredDuplicate.Hash(),
+			duplicateState.Hash(),
+		)
+	}
+	if report, err := store.ReconcileShard(ctx, 8); err != nil || !report.Ready {
+		t.Fatalf("duplicate reconciliation = %+v, error %v", report, err)
+	}
+}
+
+func assertLedgerRowCounts(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	transactions int,
+	entries int,
+) {
+	t.Helper()
+	var (
+		actualTransactions int
+		actualEntries      int
+	)
+	if err := pool.QueryRow(context.Background(), `
+		SELECT
+			(SELECT count(*) FROM ledger.transactions),
+			(SELECT count(*) FROM ledger.entries)`,
+	).Scan(&actualTransactions, &actualEntries); err != nil {
+		t.Fatalf("count ledger rows: %v", err)
+	}
+	if actualTransactions != transactions || actualEntries != entries {
+		t.Fatalf(
+			"ledger rows = transactions %d entries %d, want %d/%d",
+			actualTransactions,
+			actualEntries,
+			transactions,
+			entries,
+		)
+	}
+}
+
 func applyStoredTrading(
 	t *testing.T,
 	pool *pgxpool.Pool,
