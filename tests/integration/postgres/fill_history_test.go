@@ -264,6 +264,112 @@ func TestFillsHistoryFiltersBySideAndTradeID(t *testing.T) {
 	}
 }
 
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/trading/e2e_fills.rs:410
+//	test: fill_order_id_is_the_correlatable_order_urn
+//
+// Adaptations:
+//   - The immutable durable fill replaces the legacy mirror row.
+//   - The PostgreSQL compatibility reader replaces the Rust query dispatcher.
+//   - The accepted Go order surface retains the UUID body inside the stable
+//     urn:xb:order: namespace.
+//
+// Assertions preserved:
+//   - Fill orderId is the same typed order URN exposed by the order surface.
+func TestFillOrderIDIsTheCorrelatableOrderURN(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("migrate fill order-correlation database: %v", err)
+	}
+
+	const (
+		accountID = "urn:xb:account:fill-order-correlation"
+		fillID    = "019fa844-26c0-7000-8000-000000000062"
+	)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2,
+			0.1, 0.05, 10, -0.0001, 0.0005
+		);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:fill-order-correlation', 'NETTING');
+		INSERT INTO trading.orders (
+			order_id, account_id, instrument_id, side, order_type,
+			time_in_force, status, quantity, filled_quantity,
+			average_fill_price, triggered, reduce_only, has_rested,
+			version
+		) VALUES (
+			'019fa844-26c0-7000-8000-000000000061',
+			'urn:xb:account:fill-order-correlation',
+			'BTC-PERP', 'BUY', 'MARKET', 'IOC', 'FILLED',
+			0.01, 0.01, 60000, false, false, false, 1
+		);
+		INSERT INTO trading.fills (
+			fill_id, order_id, input_id, account_id, instrument_id,
+			side, price, quantity, position_id, position_effect,
+			liquidity_side, logical_time
+		) VALUES (
+			'019fa844-26c0-7000-8000-000000000062',
+			'019fa844-26c0-7000-8000-000000000061',
+			'019fa844-26c0-7000-8000-000000000063',
+			'urn:xb:account:fill-order-correlation',
+			'BTC-PERP', 'BUY', 60000, 0.01,
+			'019fa844-26c0-7000-8000-000000000064',
+			'OPEN', 'TAKER', 1784901600000000062
+		)`); err != nil {
+		t.Fatalf("seed correlatable fill order: %v", err)
+	}
+
+	apiPool := runtimeRoleLoginPool(
+		t,
+		pool,
+		"platformgo_fill_order_correlation_api_login",
+		"platformgo_api",
+	)
+	store := platformpostgres.NewCompatibilityStore(apiPool)
+	page, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{
+			TradeID: fillID,
+			Limit:   10,
+		},
+	)
+	if err != nil {
+		t.Fatalf("read correlatable fill order: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("fill page = %#v, want one item", page)
+	}
+	orders, err := store.Orders(ctx, accountID)
+	if err != nil {
+		t.Fatalf("read correlatable order surface: %v", err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("orders = %#v, want one item", orders)
+	}
+	wantOrderID := orders[0].OrderID
+	if page.Items[0].OrderID != wantOrderID {
+		t.Fatalf(
+			"fill orderId = %q, want correlatable %q",
+			page.Items[0].OrderID,
+			wantOrderID,
+		)
+	}
+}
+
 func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)

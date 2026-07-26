@@ -1005,15 +1005,17 @@ func (store *CompatibilityStore) LatestFillExecution(
 	if err := store.pool.QueryRow(ctx, `
 		SELECT
 			fill.fill_id::text,
+			fill.order_id::text,
 			fill.logical_time
 		  FROM trading.fills AS fill
 		 WHERE fill.account_id = $1
 		 ORDER BY fill.logical_time DESC, fill.fill_id DESC
 		 LIMIT 1`,
 		accountID,
-	).Scan(&view.FillID, &logicalTime); err != nil {
+	).Scan(&view.FillID, &view.OrderID, &logicalTime); err != nil {
 		return edge.FillExecutionView{}, fmt.Errorf("read latest fill execution: %w", err)
 	}
+	view.OrderID = "urn:xb:order:" + view.OrderID
 	view.FilledAt = time.Unix(0, logicalTime).UTC().Format(time.RFC3339Nano)
 	return view, nil
 }
@@ -1065,6 +1067,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 	rows, err := store.pool.Query(ctx, `
 		SELECT
 			fill.fill_id::text,
+			fill.order_id::text,
 			fill.logical_time,
 			count(*) OVER ()
 		  FROM trading.fills AS fill
@@ -1091,12 +1094,18 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			logicalTime int64
 			total       int64
 		)
-		if err := rows.Scan(&view.FillID, &logicalTime, &total); err != nil {
+		if err := rows.Scan(
+			&view.FillID,
+			&view.OrderID,
+			&logicalTime,
+			&total,
+		); err != nil {
 			return edge.FillExecutionPage{}, fmt.Errorf(
 				"scan filtered fill execution: %w",
 				err,
 			)
 		}
+		view.OrderID = "urn:xb:order:" + view.OrderID
 		view.FilledAt = time.Unix(0, logicalTime).UTC().Format(time.RFC3339Nano)
 		page.Items = append(page.Items, view)
 		page.Total = total

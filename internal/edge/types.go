@@ -367,6 +367,7 @@ type PageParams struct {
 // by the first native fill-history source port.
 type FillExecutionView struct {
 	FillID   string `json:"fillId"`
+	OrderID  string `json:"orderId"`
 	FilledAt string `json:"filledAt"`
 }
 
