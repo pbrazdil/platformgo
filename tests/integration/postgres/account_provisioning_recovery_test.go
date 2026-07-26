@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -76,7 +77,7 @@ func TestBrokerAccountProvisioningRecoversAfterPreCommitFaultAndTimeout(
 		authenticator,
 		application.IdentityConfig{
 			Clock:                      compatibilityClock{value: now},
-			AccountProvisioningTimeout: 100 * time.Millisecond,
+			AccountProvisioningTimeout: 5 * time.Second,
 		},
 	)
 	if err != nil {
@@ -88,27 +89,48 @@ func TestBrokerAccountProvisioningRecoversAfterPreCommitFaultAndTimeout(
 		Audience: edge.AudienceBroker,
 	}
 	request := edge.BrokerAccountRequest{UserID: userID}
-	if _, err := timedIdentity.CreateBrokerAccount(
-		ctx,
-		principal,
-		"recovery-key",
-		request,
-	); !errors.Is(err, context.DeadlineExceeded) {
+	deadlineContext := newControlledDeadlineContext(ctx)
+	defer deadlineContext.Expire()
+	accountResult := make(chan error, 1)
+	go func() {
+		_, createErr := timedIdentity.CreateBrokerAccount(
+			deadlineContext,
+			principal,
+			"recovery-key",
+			request,
+		)
+		accountResult <- createErr
+	}()
+
+	waitContext, stopWaiting := context.WithTimeout(ctx, 3*time.Second)
+	defer stopWaiting()
+	var outboxPayload []byte
+	for {
+		err := rootPool.QueryRow(waitContext, `
+			SELECT outbox.payload
+			  FROM trading.commands AS command
+			  JOIN messaging.outbox AS outbox
+			    ON outbox.message_id = command.command_id
+			 WHERE command.command_type = 'configure_account'`,
+		).Scan(&outboxPayload)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatal(err)
+		}
+		select {
+		case <-waitContext.Done():
+			t.Fatal("broker account admission did not commit before test deadline")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	deadlineContext.Expire()
+	if err := <-accountResult; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf(
 			"pre-engine account result error=%v, want deadline exceeded",
 			err,
 		)
-	}
-
-	var outboxPayload []byte
-	if err := rootPool.QueryRow(ctx, `
-		SELECT outbox.payload
-		  FROM trading.commands AS command
-		  JOIN messaging.outbox AS outbox
-		    ON outbox.message_id = command.command_id
-		 WHERE command.command_type = 'configure_account'`,
-	).Scan(&outboxPayload); err != nil {
-		t.Fatal(err)
 	}
 	input, action, err := engine.DecodeInputMessage(outboxPayload)
 	if err != nil {
@@ -273,6 +295,38 @@ func TestBrokerAccountProvisioningRecoversAfterPreCommitFaultAndTimeout(
 			retry.admission,
 		)
 	}
+}
+
+type controlledDeadlineContext struct {
+	context.Context
+	done chan struct{}
+	once sync.Once
+}
+
+func newControlledDeadlineContext(parent context.Context) *controlledDeadlineContext {
+	return &controlledDeadlineContext{
+		Context: parent,
+		done:    make(chan struct{}),
+	}
+}
+
+func (ctx *controlledDeadlineContext) Done() <-chan struct{} {
+	return ctx.done
+}
+
+func (ctx *controlledDeadlineContext) Err() error {
+	select {
+	case <-ctx.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (ctx *controlledDeadlineContext) Expire() {
+	ctx.once.Do(func() {
+		close(ctx.done)
+	})
 }
 
 func compactJSON(t *testing.T, value []byte) []byte {

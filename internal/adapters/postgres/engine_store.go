@@ -1503,7 +1503,7 @@ func persistBooks(
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO market.books (
 				instrument_id, mark_price, bids, asks, stream_sequence
-			) VALUES ($1,$2,$3,$4,$5)
+			) VALUES ($1,NULLIF($2, '')::numeric,$3,$4,$5)
 			ON CONFLICT (instrument_id) DO UPDATE SET
 				mark_price = EXCLUDED.mark_price,
 				bids = EXCLUDED.bids,
@@ -1936,7 +1936,7 @@ func (store *EngineStore) RecoverTradingState(
 			"recover trading state: PostgreSQL pool is required",
 		)
 	}
-	return recoverTradingState(ctx, store.pool, shardID)
+	return recoverTradingState(ctx, store.pool, shardID, true)
 }
 
 type postgresQuerier interface {
@@ -1944,13 +1944,69 @@ type postgresQuerier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
+func loadDurableCurrencyScales(
+	ctx context.Context,
+	querier postgresQuerier,
+) ([]engine.CurrencyScaleSnapshot, error) {
+	rows, err := querier.Query(ctx, `
+		SELECT currency, scale
+		  FROM trading.currency_scales
+		 ORDER BY currency`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	scales := make([]engine.CurrencyScaleSnapshot, 0)
+	for rows.Next() {
+		var snapshot engine.CurrencyScaleSnapshot
+		var scale int16
+		if err := rows.Scan(&snapshot.Currency, &scale); err != nil {
+			return nil, err
+		}
+		if scale < 0 || scale > 255 {
+			return nil, fmt.Errorf(
+				"catalog currency %s scale %d is out of range",
+				snapshot.Currency,
+				scale,
+			)
+		}
+		snapshot.Scale = uint8(scale)
+		scales = append(scales, snapshot)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return scales, nil
+}
+
 func recoverTradingState(
 	ctx context.Context,
 	querier postgresQuerier,
 	shardID engine.ShardID,
+	verifyCurrencyScaleAuthority bool,
 ) (engine.State, error) {
+	durableScales, err := loadDurableCurrencyScales(ctx, querier)
+	if err != nil {
+		return engine.State{}, fmt.Errorf(
+			"load shard %d durable currency scales: %w",
+			shardID,
+			err,
+		)
+	}
+	state, err := engine.SeedCurrencyScales(
+		engine.NewState(shardID),
+		durableScales,
+	)
+	if err != nil {
+		return engine.State{}, fmt.Errorf(
+			"seed shard %d durable currency scales: %w",
+			shardID,
+			err,
+		)
+	}
 	rows, err := querier.Query(ctx, `
 		SELECT receipt_kind, envelope, decision_hash, resulting_state_hash,
+		       decision_hash_version,
 		       business_input_hash_version, business_input_hash
 		  FROM (
 			SELECT
@@ -1958,6 +2014,7 @@ func recoverTradingState(
 				envelope,
 				decision_hash,
 				resulting_state_hash,
+				decision_hash_version,
 				business_input_hash_version,
 				business_input_hash,
 				stream_sequence
@@ -1969,6 +2026,10 @@ func recoverTradingState(
 				envelope,
 				decision_hash,
 				resulting_state_hash,
+				COALESCE(
+					(decision ->> 'DecisionHashVersion')::integer,
+					2
+				) AS decision_hash_version,
 				NULL::integer AS business_input_hash_version,
 				NULL::bytea AS business_input_hash,
 				stream_sequence
@@ -1983,13 +2044,13 @@ func recoverTradingState(
 	}
 	defer rows.Close()
 
-	state := engine.NewState(shardID)
 	receipts := engine.NewMemoryReceiptIndex()
 	for rows.Next() {
 		var receiptKind string
 		var envelopeJSON []byte
 		var storedDecisionHash []byte
 		var storedStateHash []byte
+		var storedDecisionHashVersion uint32
 		var storedBusinessHashVersion *uint32
 		var storedBusinessHash []byte
 		if scanErr := rows.Scan(
@@ -1997,6 +2058,7 @@ func recoverTradingState(
 			&envelopeJSON,
 			&storedDecisionHash,
 			&storedStateHash,
+			&storedDecisionHashVersion,
 			&storedBusinessHashVersion,
 			&storedBusinessHash,
 		); scanErr != nil {
@@ -2011,12 +2073,14 @@ func recoverTradingState(
 		var applyErr error
 		switch receiptKind {
 		case "business":
-			next, decision, applyErr = engine.ApplyTradingWithReceipts(
-				state,
-				input,
-				action,
-				receipts,
-			)
+			next, decision, applyErr =
+				engine.ApplyTradingWithReceiptsAtDecisionHashVersion(
+					state,
+					input,
+					action,
+					receipts,
+					storedDecisionHashVersion,
+				)
 		case "duplicate":
 			original, found := receipts.LookupByInputID(input.InputID)
 			if !found {
@@ -2027,11 +2091,13 @@ func recoverTradingState(
 					input.StreamSequence,
 				)
 			}
-			next, decision, applyErr = engine.ApplyDuplicateDelivery(
-				state,
-				input,
-				original,
-			)
+			next, decision, applyErr =
+				engine.ApplyDuplicateDeliveryAtDecisionHashVersion(
+					state,
+					input,
+					original,
+					storedDecisionHashVersion,
+				)
 		default:
 			return engine.State{}, fmt.Errorf(
 				"unknown durable receipt kind %q",
@@ -2097,6 +2163,27 @@ func recoverTradingState(
 	}
 	if err := verifyRecoveredCheckpoint(ctx, querier, state); err != nil {
 		return engine.State{}, err
+	}
+	if verifyCurrencyScaleAuthority {
+		mismatches, compareErr := compareRecoveredCurrencyScales(
+			ctx,
+			querier,
+			state,
+		)
+		if compareErr != nil {
+			return engine.State{}, fmt.Errorf(
+				"verify recovered shard %d currency-scale authority: %w",
+				shardID,
+				compareErr,
+			)
+		}
+		if mismatches != 0 {
+			return engine.State{}, fmt.Errorf(
+				"%w: recovered shard %d currency-scale authority differs",
+				ErrCheckpointMismatch,
+				shardID,
+			)
+		}
 	}
 	return state, nil
 }

@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -2832,6 +2833,964 @@ func TestEngineStoreDurablyHaltsNonCommandReuseOfCommandID(t *testing.T) {
 	}
 }
 
+func TestEngineStoreRecoversDecisionHashV2AndExtendsTheChainWithV3(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("migrate mixed decision history database: %v", err)
+	}
+
+	store := platformpostgres.NewEngineStore(pool)
+	initial := engine.NewState(8)
+	ids := testkit.NewShardIDSequence(8)
+	clock := testkit.NewManualClock(
+		engine.NewLogicalTime(time.Date(2026, time.July, 26, 15, 0, 0, 0, time.UTC)),
+	)
+	legacyAction := engine.TradingAction{
+		Kind: engine.TradingActionConfigureInstrument,
+		ConfigureInstrument: &engine.ConfigureInstrument{
+			InstrumentID:            "BTC-PERP",
+			Revision:                1,
+			PriceScale:              2,
+			QuantityScale:           3,
+			SettlementCurrency:      "USDC",
+			SettlementCurrencyScale: 2,
+			InitialMarginRate:       "0.1",
+			MaintenanceMarginRate:   "0.05",
+			MaxLeverage:             "10",
+			MakerFeeRate:            "0",
+			TakerFeeRate:            "0",
+		},
+	}
+	legacyInput := nextStoredInput(t, initial, ids, clock, legacyAction)
+	_, currentDecision, _, _ := applyStoredInput(
+		t,
+		pool,
+		store,
+		initial,
+		legacyInput,
+		legacyAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if currentDecision.DecisionHashVersion != 3 {
+		t.Fatalf(
+			"initial persisted decision version = %d, want 3",
+			currentDecision.DecisionHashVersion,
+		)
+	}
+	legacyState, legacyDecision, err :=
+		engine.ApplyTradingWithReceiptsAtDecisionHashVersion(
+			initial,
+			legacyInput,
+			legacyAction,
+			nil,
+			2,
+		)
+	if err != nil {
+		t.Fatalf("derive legacy decision: %v", err)
+	}
+	legacyDecisionJSON, err := json.Marshal(legacyDecision)
+	if err != nil {
+		t.Fatalf("encode legacy decision: %v", err)
+	}
+	legacyDecisionHash := legacyDecision.DecisionHash
+	legacyStateHash := legacyState.Hash()
+
+	connection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire legacy-history connection: %v", err)
+	}
+	if _, err := connection.Exec(
+		ctx,
+		"ALTER TABLE engine.input_receipts DISABLE TRIGGER USER",
+	); err != nil {
+		connection.Release()
+		t.Fatalf("disable immutable receipt triggers: %v", err)
+	}
+	defer func() {
+		_, _ = pool.Exec(
+			context.Background(),
+			"ALTER TABLE engine.input_receipts ENABLE TRIGGER USER",
+		)
+	}()
+	if _, err := connection.Exec(ctx, `
+		UPDATE engine.input_receipts
+		   SET decision_hash_version = 2,
+		       decision_hash = $1,
+		       resulting_state_hash = $2,
+		       decision = $3
+		 WHERE shard_id = 8
+		   AND input_id = $4`,
+		legacyDecisionHash[:],
+		legacyStateHash[:],
+		legacyDecisionJSON,
+		legacyInput.InputID.String(),
+	); err != nil {
+		connection.Release()
+		t.Fatalf("install immutable legacy receipt fixture: %v", err)
+	}
+	if _, err := connection.Exec(ctx, `
+		UPDATE engine.shard_checkpoints
+		   SET state_hash = $1
+		 WHERE shard_id = 8`,
+		legacyStateHash[:],
+	); err != nil {
+		connection.Release()
+		t.Fatalf("install legacy checkpoint fixture: %v", err)
+	}
+	if _, err := connection.Exec(
+		ctx,
+		"ALTER TABLE engine.input_receipts ENABLE TRIGGER USER",
+	); err != nil {
+		connection.Release()
+		t.Fatalf("reenable immutable receipt triggers: %v", err)
+	}
+	connection.Release()
+
+	recovered, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover v2 history: %v", err)
+	}
+	if recovered.Hash() != legacyState.Hash() || !recovered.Ready() {
+		t.Fatalf(
+			"recovered v2 history ready=%t hash=%s, want %s",
+			recovered.Ready(),
+			recovered.Hash(),
+			legacyState.Hash(),
+		)
+	}
+
+	duplicateInput := legacyInput
+	duplicateInput.StreamSequence = recovered.NextStreamSequence()
+	_, currentDuplicateDecision, duplicate, err :=
+		store.ApplyTrading(
+			ctx,
+			recovered,
+			duplicateInput,
+			legacyAction,
+			platformpostgres.ApplyOptions{},
+		)
+	if err != nil || !duplicate {
+		t.Fatalf(
+			"persist current duplicate = duplicate %t error %v",
+			duplicate,
+			err,
+		)
+	}
+	if currentDuplicateDecision.DecisionHashVersion != 3 {
+		t.Fatalf(
+			"persisted duplicate version = %d, want 3",
+			currentDuplicateDecision.DecisionHashVersion,
+		)
+	}
+	legacyDuplicateState, legacyDuplicateDecision, err :=
+		engine.ApplyDuplicateDeliveryAtDecisionHashVersion(
+			legacyState,
+			duplicateInput,
+			engine.NewReceipt(legacyInput, legacyDecision),
+			2,
+		)
+	if err != nil {
+		t.Fatalf("derive legacy duplicate decision: %v", err)
+	}
+	legacyDuplicateStateHash := legacyDuplicateState.Hash()
+	legacyDuplicateJSON, err := json.Marshal(legacyDuplicateDecision)
+	if err != nil {
+		t.Fatalf("encode legacy duplicate decision: %v", err)
+	}
+	duplicateConnection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire legacy duplicate connection: %v", err)
+	}
+	if _, err := duplicateConnection.Exec(
+		ctx,
+		"ALTER TABLE engine.duplicate_delivery_receipts DISABLE TRIGGER USER",
+	); err != nil {
+		duplicateConnection.Release()
+		t.Fatalf("disable immutable duplicate triggers: %v", err)
+	}
+	defer func() {
+		_, _ = pool.Exec(
+			context.Background(),
+			"ALTER TABLE engine.duplicate_delivery_receipts ENABLE TRIGGER USER",
+		)
+	}()
+	if _, err := duplicateConnection.Exec(ctx, `
+		UPDATE engine.duplicate_delivery_receipts
+		   SET decision_hash = $1,
+		       resulting_state_hash = $2,
+		       decision = $3
+		 WHERE shard_id = 8
+		   AND stream_sequence = $4`,
+		legacyDuplicateDecision.DecisionHash[:],
+		legacyDuplicateStateHash[:],
+		legacyDuplicateJSON,
+		duplicateInput.StreamSequence,
+	); err != nil {
+		duplicateConnection.Release()
+		t.Fatalf("install immutable legacy duplicate fixture: %v", err)
+	}
+	if _, err := duplicateConnection.Exec(ctx, `
+		UPDATE engine.shard_checkpoints
+		   SET state_hash = $1,
+		       next_stream_sequence = $2
+		 WHERE shard_id = 8`,
+		legacyDuplicateStateHash[:],
+		legacyDuplicateState.NextStreamSequence(),
+	); err != nil {
+		duplicateConnection.Release()
+		t.Fatalf("install legacy duplicate checkpoint fixture: %v", err)
+	}
+	if _, err := duplicateConnection.Exec(
+		ctx,
+		"ALTER TABLE engine.duplicate_delivery_receipts ENABLE TRIGGER USER",
+	); err != nil {
+		duplicateConnection.Release()
+		t.Fatalf("reenable immutable duplicate triggers: %v", err)
+	}
+	duplicateConnection.Release()
+
+	recoveredDuplicate, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover v2 business and duplicate history: %v", err)
+	}
+	if recoveredDuplicate.Hash() != legacyDuplicateState.Hash() ||
+		recoveredDuplicate.NextStreamSequence() !=
+			legacyDuplicateState.NextStreamSequence() ||
+		!recoveredDuplicate.Ready() {
+		t.Fatalf(
+			"recovered v2 duplicate ready=%t hash=%s next=%d, want %s/%d",
+			recoveredDuplicate.Ready(),
+			recoveredDuplicate.Hash(),
+			recoveredDuplicate.NextStreamSequence(),
+			legacyDuplicateState.Hash(),
+			legacyDuplicateState.NextStreamSequence(),
+		)
+	}
+	recovered = recoveredDuplicate
+
+	next, v3Decision, _, _ := applyStoredTrading(
+		t,
+		pool,
+		store,
+		recovered,
+		ids,
+		clock,
+		engine.TradingAction{
+			Kind: engine.TradingActionConfigureAccount,
+			ConfigureAccount: &engine.ConfigureAccount{
+				AccountID: "mixed-version-account",
+				OmsMode:   engine.OmsModeNetting,
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	if v3Decision.DecisionHashVersion != 3 {
+		t.Fatalf(
+			"new decision version = %d, want 3",
+			v3Decision.DecisionHashVersion,
+		)
+	}
+	recoveredMixed, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover mixed v2/v3 history: %v", err)
+	}
+	if recoveredMixed.Hash() != next.Hash() || !recoveredMixed.Ready() {
+		t.Fatalf(
+			"mixed recovery ready=%t hash=%s, want %s",
+			recoveredMixed.Ready(),
+			recoveredMixed.Hash(),
+			next.Hash(),
+		)
+	}
+}
+
+func TestEngineStoreRestoredMarkRepairsProjectionWithoutLedgerDelta(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("migrate restored-mark database: %v", err)
+	}
+
+	store := platformpostgres.NewEngineStore(pool)
+	state := engine.NewState(8)
+	ids := testkit.NewShardIDSequence(8)
+	clock := testkit.NewManualClock(
+		engine.NewLogicalTime(time.Date(2026, time.July, 26, 16, 0, 0, 0, time.UTC)),
+	)
+	apply := func(action engine.TradingAction) engine.Decision {
+		var decision engine.Decision
+		state, decision, _, _ = applyStoredTrading(
+			t,
+			pool,
+			store,
+			state,
+			ids,
+			clock,
+			action,
+			platformpostgres.ApplyOptions{},
+		)
+		return decision
+	}
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionConfigureInstrument,
+		ConfigureInstrument: &engine.ConfigureInstrument{
+			InstrumentID:            "BTC-PERP",
+			Revision:                1,
+			PriceScale:              2,
+			QuantityScale:           3,
+			SettlementCurrency:      "USDC",
+			SettlementCurrencyScale: 2,
+			InitialMarginRate:       "0.1",
+			MaintenanceMarginRate:   "0.05",
+			MaxLeverage:             "10",
+			MakerFeeRate:            "0",
+			TakerFeeRate:            "0",
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "account-restored-mark",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionAdjustBalance,
+		AdjustBalance: &engine.AdjustBalance{
+			AccountID:     "account-restored-mark",
+			Currency:      "USDC",
+			CurrencyScale: 2,
+			Operation:     engine.BalanceOperationDeposit,
+			Amount:        "1000",
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionUpdateBook,
+		UpdateBook: &engine.UpdateBook{
+			InstrumentID: "BTC-PERP",
+			MarkPrice:    "100",
+			Bids:         []engine.BookLevel{{Price: "99", Quantity: "10"}},
+			Asks:         []engine.BookLevel{{Price: "100", Quantity: "10"}},
+		},
+	})
+	apply(engine.TradingAction{
+		Kind: engine.TradingActionSubmitOrder,
+		SubmitOrder: &engine.SubmitOrder{
+			OrderID:      ids.Next(),
+			AccountID:    "account-restored-mark",
+			InstrumentID: "BTC-PERP",
+			Side:         engine.SideBuy,
+			Type:         engine.OrderTypeMarket,
+			TimeInForce:  engine.TimeInForceGTC,
+			Quantity:     "1",
+		},
+	})
+
+	var (
+		ledgerTransactionsBefore int
+		ledgerEntriesBefore      int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM ledger.transactions),
+			(SELECT count(*) FROM ledger.entries)`,
+	).Scan(&ledgerTransactionsBefore, &ledgerEntriesBefore); err != nil {
+		t.Fatalf("count baseline ledger rows: %v", err)
+	}
+
+	markless := apply(engine.TradingAction{
+		Kind: engine.TradingActionUpdateBook,
+		UpdateBook: &engine.UpdateBook{
+			InstrumentID: "BTC-PERP",
+			Bids:         []engine.BookLevel{{Price: "99", Quantity: "10"}},
+			Asks:         []engine.BookLevel{{Price: "100", Quantity: "10"}},
+		},
+	})
+	if len(markless.BalanceChanges) != 0 || len(markless.LedgerChanges) != 0 {
+		t.Fatalf(
+			"markless decision = balances %#v ledger %#v",
+			markless.BalanceChanges,
+			markless.LedgerChanges,
+		)
+	}
+	var markIsNull bool
+	if err := pool.QueryRow(ctx, `
+		SELECT mark_price IS NULL
+		  FROM market.books
+		 WHERE instrument_id = 'BTC-PERP'`,
+	).Scan(&markIsNull); err != nil || !markIsNull {
+		t.Fatalf("persisted markless book null=%t, error %v", markIsNull, err)
+	}
+	recoveredMarkless, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover markless state: %v", err)
+	}
+	if recoveredMarkless.Hash() != state.Hash() || !recoveredMarkless.Ready() {
+		t.Fatalf(
+			"recovered markless ready=%t hash=%s, want %s",
+			recoveredMarkless.Ready(),
+			recoveredMarkless.Hash(),
+			state.Hash(),
+		)
+	}
+	if report, err := store.ReconcileShard(ctx, 8); err != nil || !report.Ready {
+		t.Fatalf("markless reconciliation = %+v, error %v", report, err)
+	}
+	assertLedgerRowCounts(
+		t,
+		pool,
+		ledgerTransactionsBefore,
+		ledgerEntriesBefore,
+	)
+
+	restoredAction := engine.TradingAction{
+		Kind: engine.TradingActionUpdateBook,
+		UpdateBook: &engine.UpdateBook{
+			InstrumentID: "BTC-PERP",
+			MarkPrice:    "110",
+			Bids:         []engine.BookLevel{{Price: "109", Quantity: "10"}},
+			Asks:         []engine.BookLevel{{Price: "110", Quantity: "10"}},
+		},
+	}
+	var restoredInput engine.InputEnvelope
+	var restored engine.Decision
+	state, restored, restoredInput, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		restoredAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if len(restored.BalanceChanges) != 1 ||
+		restored.BalanceChanges[0].Total != "1000" ||
+		restored.BalanceChanges[0].Used != "1" ||
+		restored.BalanceChanges[0].Equity != "1010" ||
+		restored.BalanceChanges[0].Free != "1009" {
+		t.Fatalf("restored projection = %#v", restored.BalanceChanges)
+	}
+	if len(restored.LedgerChanges) != 0 {
+		t.Fatalf("restored mark minted ledger money = %#v", restored.LedgerChanges)
+	}
+	var (
+		persistedTotal  string
+		persistedUsed   string
+		persistedFree   string
+		persistedEquity string
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			trim_scale(total)::text,
+			trim_scale(used)::text,
+			trim_scale(free)::text,
+			trim_scale(equity)::text
+		  FROM ledger.balances
+		 WHERE account_id = 'account-restored-mark'
+		   AND currency = 'USDC'`,
+	).Scan(
+		&persistedTotal,
+		&persistedUsed,
+		&persistedFree,
+		&persistedEquity,
+	); err != nil {
+		t.Fatalf("read persisted restored projection: %v", err)
+	}
+	if persistedTotal != "1000" ||
+		persistedUsed != "1" ||
+		persistedFree != "1009" ||
+		persistedEquity != "1010" {
+		t.Fatalf(
+			"persisted restored projection = %s/%s/%s/%s",
+			persistedTotal,
+			persistedUsed,
+			persistedFree,
+			persistedEquity,
+		)
+	}
+	assertLedgerRowCounts(
+		t,
+		pool,
+		ledgerTransactionsBefore,
+		ledgerEntriesBefore,
+	)
+
+	recovered, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover restored projection: %v", err)
+	}
+	if recovered.Hash() != state.Hash() || !recovered.Ready() {
+		t.Fatalf(
+			"recovered restored state ready=%t hash=%s, want %s",
+			recovered.Ready(),
+			recovered.Hash(),
+			state.Hash(),
+		)
+	}
+	if report, err := store.ReconcileShard(ctx, 8); err != nil || !report.Ready {
+		t.Fatalf("restored projection reconciliation = %+v, error %v", report, err)
+	}
+
+	duplicateInput := restoredInput
+	duplicateInput.StreamSequence = state.NextStreamSequence()
+	duplicateState, duplicateDecision, duplicate, err := store.ApplyTrading(
+		ctx,
+		state,
+		duplicateInput,
+		restoredAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if err != nil || !duplicate {
+		t.Fatalf(
+			"restored-mark duplicate = duplicate %t error %v",
+			duplicate,
+			err,
+		)
+	}
+	if len(duplicateDecision.LedgerChanges) != 0 {
+		t.Fatalf("restored-mark duplicate ledger = %#v", duplicateDecision.LedgerChanges)
+	}
+	assertLedgerRowCounts(
+		t,
+		pool,
+		ledgerTransactionsBefore,
+		ledgerEntriesBefore,
+	)
+	recoveredDuplicate, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover restored-mark duplicate: %v", err)
+	}
+	if recoveredDuplicate.Hash() != duplicateState.Hash() ||
+		!recoveredDuplicate.Ready() {
+		t.Fatalf(
+			"recovered duplicate ready=%t hash=%s, want %s",
+			recoveredDuplicate.Ready(),
+			recoveredDuplicate.Hash(),
+			duplicateState.Hash(),
+		)
+	}
+	if report, err := store.ReconcileShard(ctx, 8); err != nil || !report.Ready {
+		t.Fatalf("duplicate reconciliation = %+v, error %v", report, err)
+	}
+}
+
+func TestEngineStoreRejectsCurrencyScaleAliasesAndRecoversExactly(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("migrate currency-scale database: %v", err)
+	}
+
+	store := platformpostgres.NewEngineStore(pool)
+	state := engine.NewState(8)
+	ids := testkit.NewShardIDSequence(8)
+	clock := testkit.NewManualClock(
+		engine.NewLogicalTime(time.Date(2026, time.July, 26, 17, 0, 0, 0, time.UTC)),
+	)
+	instrument := func(
+		instrumentID string,
+		revision uint64,
+		currency string,
+		scale uint8,
+	) engine.TradingAction {
+		return engine.TradingAction{
+			Kind: engine.TradingActionConfigureInstrument,
+			ConfigureInstrument: &engine.ConfigureInstrument{
+				InstrumentID:            instrumentID,
+				Revision:                revision,
+				PriceScale:              2,
+				QuantityScale:           3,
+				SettlementCurrency:      currency,
+				SettlementCurrencyScale: scale,
+				InitialMarginRate:       "0.1",
+				MaintenanceMarginRate:   "0.05",
+				MaxLeverage:             "10",
+				MakerFeeRate:            "0",
+				TakerFeeRate:            "0",
+			},
+		}
+	}
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		instrument("BTC-PERP", 1, "USDC", 2),
+		platformpostgres.ApplyOptions{},
+	)
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		engine.TradingAction{
+			Kind: engine.TradingActionAdjustBalance,
+			AdjustBalance: &engine.AdjustBalance{
+				AccountID:     "account-1",
+				Currency:      "USDC",
+				CurrencyScale: 2,
+				Operation:     engine.BalanceOperationSet,
+				Amount:        "10",
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		instrument("BTC-PERP", 2, "EUR", 2),
+		platformpostgres.ApplyOptions{},
+	)
+	conflictingAction := instrument("ETH-PERP", 1, "USDC", 8)
+	var (
+		conflictingDecision engine.Decision
+		conflictingInput    engine.InputEnvelope
+	)
+	state, conflictingDecision, conflictingInput, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		conflictingAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if conflictingDecision.CommandResult.Status != engine.CommandStatusRejected ||
+		conflictingDecision.CommandResult.Reason != engine.RejectionInvalidInstrument ||
+		len(conflictingDecision.InstrumentChanges) != 0 ||
+		len(conflictingDecision.BalanceChanges) != 0 ||
+		len(conflictingDecision.LedgerChanges) != 0 {
+		t.Fatalf("conflicting currency-scale decision = %+v", conflictingDecision)
+	}
+	assertRowCount(t, pool, "trading.instruments", 1)
+
+	duplicateInput := conflictingInput
+	duplicateInput.StreamSequence = state.NextStreamSequence()
+	duplicateState, duplicateDecision, duplicate, err := store.ApplyTrading(
+		ctx,
+		state,
+		duplicateInput,
+		conflictingAction,
+		platformpostgres.ApplyOptions{},
+	)
+	if err != nil || !duplicate {
+		t.Fatalf(
+			"conflicting scale duplicate = duplicate %t error %v",
+			duplicate,
+			err,
+		)
+	}
+	if len(duplicateDecision.InstrumentChanges) != 0 ||
+		len(duplicateDecision.BalanceChanges) != 0 ||
+		len(duplicateDecision.LedgerChanges) != 0 {
+		t.Fatalf("conflicting scale duplicate effects = %+v", duplicateDecision)
+	}
+	assertRowCount(t, pool, "trading.instruments", 1)
+
+	recovered, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover currency-scale rejection: %v", err)
+	}
+	if recovered.Hash() != duplicateState.Hash() || !recovered.Ready() {
+		t.Fatalf(
+			"recovered scale rejection ready=%t hash=%s, want %s",
+			recovered.Ready(),
+			recovered.Hash(),
+			duplicateState.Hash(),
+		)
+	}
+	if report, err := store.ReconcileShard(ctx, 8); err != nil || !report.Ready {
+		t.Fatalf("currency-scale rejection reconciliation = %+v, error %v", report, err)
+	}
+
+	restartConflictAction := instrument("SOL-PERP", 1, "USDC", 8)
+	restartConflictInput := nextStoredInput(
+		t,
+		duplicateState,
+		ids,
+		clock,
+		restartConflictAction,
+	)
+	liveConflictState, liveConflict, err := engine.ApplyTrading(
+		duplicateState,
+		restartConflictInput,
+		restartConflictAction,
+	)
+	if err != nil {
+		t.Fatalf("live post-reconfiguration conflict: %v", err)
+	}
+	restartedConflictState, restartedConflict, err := engine.ApplyTrading(
+		recovered,
+		restartConflictInput,
+		restartConflictAction,
+	)
+	if err != nil {
+		t.Fatalf("restarted post-reconfiguration conflict: %v", err)
+	}
+	if liveConflict.CommandResult.Status != engine.CommandStatusRejected ||
+		liveConflict.CommandResult.Reason != engine.RejectionInvalidInstrument ||
+		restartedConflict.CommandResult != liveConflict.CommandResult ||
+		restartedConflict.DecisionHash != liveConflict.DecisionHash ||
+		restartedConflictState.Hash() != liveConflictState.Hash() ||
+		len(liveConflict.InstrumentChanges) != 0 ||
+		len(liveConflict.BalanceChanges) != 0 ||
+		len(liveConflict.LedgerChanges) != 0 ||
+		len(liveConflict.Events) != 0 ||
+		len(restartedConflict.InstrumentChanges) != 0 ||
+		len(restartedConflict.BalanceChanges) != 0 ||
+		len(restartedConflict.LedgerChanges) != 0 ||
+		len(restartedConflict.Events) != 0 {
+		t.Fatalf(
+			"post-restart currency conflict live=%+v restarted=%+v",
+			liveConflict,
+			restartedConflict,
+		)
+	}
+
+	finalState, sameScale, _, _ := applyStoredTrading(
+		t,
+		pool,
+		store,
+		duplicateState,
+		ids,
+		clock,
+		instrument("ETH-PERP", 1, "USDC", 2),
+		platformpostgres.ApplyOptions{},
+	)
+	if sameScale.CommandResult.Status != engine.CommandStatusAccepted ||
+		len(sameScale.InstrumentChanges) != 1 {
+		t.Fatalf("same currency-scale decision = %+v", sameScale)
+	}
+	assertRowCount(t, pool, "trading.instruments", 2)
+	recoveredFinal, err := store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover same-scale instruments: %v", err)
+	}
+	if recoveredFinal.Hash() != finalState.Hash() || !recoveredFinal.Ready() {
+		t.Fatalf(
+			"recovered same-scale ready=%t hash=%s, want %s",
+			recoveredFinal.Ready(),
+			recoveredFinal.Hash(),
+			finalState.Hash(),
+		)
+	}
+	if report, err := store.ReconcileShard(ctx, 8); err != nil || !report.Ready {
+		t.Fatalf("same-scale reconciliation = %+v, error %v", report, err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE trading.currency_scales
+		   SET scale = 8
+		 WHERE currency = 'USDC'`); !isPostgresCode(err, "55000") {
+		t.Fatalf("currency registry update error = %v, want 55000", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM trading.currency_scales
+		 WHERE currency = 'USDC'`); !isPostgresCode(err, "55000") {
+		t.Fatalf("currency registry delete error = %v, want 55000", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		TRUNCATE trading.currency_scales`); !isPostgresCode(err, "55000") {
+		t.Fatalf("currency registry truncate error = %v, want 55000", err)
+	}
+	recoveredImmutable, err := store.RecoverTradingState(ctx, 8)
+	if err != nil ||
+		recoveredImmutable.Hash() != finalState.Hash() ||
+		!recoveredImmutable.Ready() {
+		t.Fatalf(
+			"immutable registry recovery ready=%t hash=%s error=%v",
+			recoveredImmutable.Ready(),
+			recoveredImmutable.Hash(),
+			err,
+		)
+	}
+	if report, err := store.ReconcileShard(ctx, 8); err != nil || !report.Ready {
+		t.Fatalf("immutable registry reconciliation = %+v, error %v", report, err)
+	}
+}
+
+func TestEngineStoreRetainsMigratedCatalogCurrencyAfterReconfiguration(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("apply pre-registry schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2, 0.1, 0.05, 10, 0, 0
+		)`); err != nil {
+		t.Fatalf("seed catalog-only currency identity: %v", err)
+	}
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("migrate catalog-only currency identity: %v", err)
+	}
+
+	store := platformpostgres.NewEngineStore(pool)
+	state, err := store.RecoverTradingState(ctx, 8)
+	if err != nil || !state.Ready() {
+		t.Fatalf("recover catalog-only currency ready=%t error=%v", state.Ready(), err)
+	}
+	ids := testkit.NewShardIDSequence(8)
+	clock := testkit.NewManualClock(
+		engine.NewLogicalTime(time.Date(2026, time.July, 26, 18, 0, 0, 0, time.UTC)),
+	)
+	instrument := func(
+		instrumentID string,
+		revision uint64,
+		currency string,
+		scale uint8,
+	) engine.TradingAction {
+		return engine.TradingAction{
+			Kind: engine.TradingActionConfigureInstrument,
+			ConfigureInstrument: &engine.ConfigureInstrument{
+				InstrumentID:            instrumentID,
+				Revision:                revision,
+				PriceScale:              2,
+				QuantityScale:           3,
+				SettlementCurrency:      currency,
+				SettlementCurrencyScale: scale,
+				InitialMarginRate:       "0.1",
+				MaintenanceMarginRate:   "0.05",
+				MaxLeverage:             "10",
+				MakerFeeRate:            "0",
+				TakerFeeRate:            "0",
+			},
+		}
+	}
+	liveState, reconfigured, _, _ := applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		instrument("BTC-PERP", 2, "EUR", 2),
+		platformpostgres.ApplyOptions{},
+	)
+	if reconfigured.CommandResult.Status != engine.CommandStatusAccepted {
+		t.Fatalf("catalog currency reconfiguration = %+v", reconfigured)
+	}
+	restarted, err := store.RecoverTradingState(ctx, 8)
+	if err != nil ||
+		!restarted.Ready() ||
+		restarted.Hash() != liveState.Hash() {
+		t.Fatalf(
+			"restart after catalog reconfiguration ready=%t hash=%s error=%v",
+			restarted.Ready(),
+			restarted.Hash(),
+			err,
+		)
+	}
+
+	conflictAction := instrument("ETH-PERP", 1, "USDC", 8)
+	conflictInput := nextStoredInput(t, liveState, ids, clock, conflictAction)
+	liveNext, liveDecision, err := engine.ApplyTrading(
+		liveState,
+		conflictInput,
+		conflictAction,
+	)
+	if err != nil {
+		t.Fatalf("live catalog-history conflict: %v", err)
+	}
+	restartedNext, restartedDecision, err := engine.ApplyTrading(
+		restarted,
+		conflictInput,
+		conflictAction,
+	)
+	if err != nil {
+		t.Fatalf("restarted catalog-history conflict: %v", err)
+	}
+	if liveDecision.CommandResult.Status != engine.CommandStatusRejected ||
+		liveDecision.CommandResult.Reason != engine.RejectionInvalidInstrument ||
+		restartedDecision.CommandResult != liveDecision.CommandResult ||
+		restartedDecision.DecisionHash != liveDecision.DecisionHash ||
+		restartedNext.Hash() != liveNext.Hash() ||
+		len(liveDecision.InstrumentChanges) != 0 ||
+		len(liveDecision.BalanceChanges) != 0 ||
+		len(liveDecision.LedgerChanges) != 0 ||
+		len(liveDecision.Events) != 0 {
+		t.Fatalf(
+			"catalog-history conflict live=%+v restarted=%+v",
+			liveDecision,
+			restartedDecision,
+		)
+	}
+}
+
+func assertLedgerRowCounts(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	transactions int,
+	entries int,
+) {
+	t.Helper()
+	var (
+		actualTransactions int
+		actualEntries      int
+	)
+	if err := pool.QueryRow(context.Background(), `
+		SELECT
+			(SELECT count(*) FROM ledger.transactions),
+			(SELECT count(*) FROM ledger.entries)`,
+	).Scan(&actualTransactions, &actualEntries); err != nil {
+		t.Fatalf("count ledger rows: %v", err)
+	}
+	if actualTransactions != transactions || actualEntries != entries {
+		t.Fatalf(
+			"ledger rows = transactions %d entries %d, want %d/%d",
+			actualTransactions,
+			actualEntries,
+			transactions,
+			entries,
+		)
+	}
+}
+
 func applyStoredTrading(
 	t *testing.T,
 	pool *pgxpool.Pool,
@@ -3040,6 +3999,8 @@ func assertRowCount(t *testing.T, pool queryRower, relation string, want int) {
 		query = "SELECT count(*) FROM trading.positions"
 	case "trading.accounts":
 		query = "SELECT count(*) FROM trading.accounts"
+	case "trading.instruments":
+		query = "SELECT count(*) FROM trading.instruments"
 	case "messaging.domain_outbox":
 		query = "SELECT count(*) FROM messaging.outbox WHERE subject LIKE 'domain.v1.%'"
 	default:

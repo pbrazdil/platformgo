@@ -1,10 +1,12 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 
 	decimal "github.com/upcomers-org/platformgo/internal/decimal/economic"
+	"github.com/upcomers-org/platformgo/internal/domain"
 )
 
 type State struct {
@@ -47,6 +49,57 @@ func (state State) Hash() Hash {
 	return state.hash
 }
 
+// CurrencyScales returns the monotonic currency identities reconstructed by
+// deterministic receipt replay.
+func (state State) CurrencyScales() []CurrencyScaleSnapshot {
+	scales := make([]CurrencyScaleSnapshot, len(state.trading.currencyScales))
+	for index, currency := range state.trading.currencyScales {
+		scales[index] = CurrencyScaleSnapshot{
+			Currency: currency.Code(),
+			Scale:    currency.Scale(),
+		}
+	}
+	return scales
+}
+
+// SeedCurrencyScales installs the append-only durable registry before receipt
+// replay. Replayed configuration decisions then independently verify every
+// historical code-to-scale binding before the shard becomes ready.
+func SeedCurrencyScales(
+	state State,
+	scales []CurrencyScaleSnapshot,
+) (State, error) {
+	if state.nextStreamSequence != 1 ||
+		state.hasLastReceipt ||
+		len(state.trading.currencyScales) != 0 {
+		return state, errors.New(
+			"currency scales may only seed an unreplayed shard",
+		)
+	}
+	state.trading = state.trading.clone()
+	for _, snapshot := range scales {
+		currency, err := domain.NewCurrency(snapshot.Currency, snapshot.Scale)
+		if err != nil {
+			return State{}, fmt.Errorf(
+				"seed currency scale %s/%d: %w",
+				snapshot.Currency,
+				snapshot.Scale,
+				err,
+			)
+		}
+		if existing, found := state.trading.currencyScale(
+			currency.Code(),
+		); found && !existing.Equal(currency) {
+			return State{}, fmt.Errorf(
+				"seed currency scale %s conflicts",
+				currency.Code(),
+			)
+		}
+		state.trading.rememberCurrencyScale(currency)
+	}
+	return state, nil
+}
+
 // Apply deterministically returns a new state and recorded decision.
 // The input state is never mutated. Fatal envelope or ordering errors return a
 // halted state which the caller must durably record before acknowledging input.
@@ -76,6 +129,22 @@ func ApplyDuplicateDelivery(
 	state State,
 	input InputEnvelope,
 	original Receipt,
+) (State, Decision, error) {
+	return ApplyDuplicateDeliveryAtDecisionHashVersion(
+		state,
+		input,
+		original,
+		CurrentDecisionHashVersion,
+	)
+}
+
+// ApplyDuplicateDeliveryAtDecisionHashVersion replays one historical decision
+// hash generation while preserving its original state-chain semantics.
+func ApplyDuplicateDeliveryAtDecisionHashVersion(
+	state State,
+	input InputEnvelope,
+	original Receipt,
+	decisionHashVersion uint32,
 ) (State, Decision, error) {
 	inputHash := hashInput(input)
 	if !state.ready {
@@ -129,18 +198,24 @@ func ApplyDuplicateDelivery(
 		ConfigurationVersion:    input.ConfigurationVersion,
 		InstrumentVersion:       input.InstrumentVersion,
 		InputHashVersion:        CurrentInputHashVersion,
-		DecisionHashVersion:     CurrentDecisionHashVersion,
+		DecisionHashVersion:     decisionHashVersion,
 		PreviousStateHash:       previousStateHash,
 		InputHash:               inputHash,
 		DuplicateOfDecisionHash: original.Decision.DecisionHash,
 		CommandResult:           original.Decision.CommandResult,
 	}
 	decision.EffectsHash = hashEffects(decision)
-	decision.DecisionHash = hashDecision(
+	decisionHash, decisionHashErr := hashDecisionAtVersion(
 		previousStateHash,
 		inputHash,
 		decision.EffectsHash,
+		decisionHashVersion,
 	)
+	if decisionHashErr != nil {
+		decisionHashErr.Sequence = input.StreamSequence
+		return halt(state, inputHash, decisionHashErr)
+	}
+	decision.DecisionHash = decisionHash
 	nextSequence := state.nextStreamSequence + 1
 	decision.NextStateHash = hashAcceptedState(
 		previousStateHash,
@@ -166,12 +241,29 @@ func applyWithReceipts(
 	receipts ReceiptLookup,
 	transition transition,
 ) (State, Decision, error) {
-	return applyWithSchemaVersion(
+	return applyWithReceiptsAtDecisionHashVersion(
+		state,
+		input,
+		receipts,
+		transition,
+		CurrentDecisionHashVersion,
+	)
+}
+
+func applyWithReceiptsAtDecisionHashVersion(
+	state State,
+	input InputEnvelope,
+	receipts ReceiptLookup,
+	transition transition,
+	decisionHashVersion uint32,
+) (State, Decision, error) {
+	return applyWithSchemaAndDecisionHashVersion(
 		state,
 		input,
 		receipts,
 		CurrentSchemaVersion,
 		transition,
+		decisionHashVersion,
 	)
 }
 
@@ -181,6 +273,24 @@ func applyWithSchemaVersion(
 	receipts ReceiptLookup,
 	currentSchemaVersion uint32,
 	transition transition,
+) (State, Decision, error) {
+	return applyWithSchemaAndDecisionHashVersion(
+		state,
+		input,
+		receipts,
+		currentSchemaVersion,
+		transition,
+		CurrentDecisionHashVersion,
+	)
+}
+
+func applyWithSchemaAndDecisionHashVersion(
+	state State,
+	input InputEnvelope,
+	receipts ReceiptLookup,
+	currentSchemaVersion uint32,
+	transition transition,
+	decisionHashVersion uint32,
 ) (State, Decision, error) {
 	recorded, found, conflict := lookupReceipt(state, receipts, input)
 	if conflict != nil {
@@ -258,6 +368,13 @@ func applyWithSchemaVersion(
 	previousState := state
 	previousStateHash := state.hash
 	state, decision := transition(state)
+	if decisionHashVersion >= 3 {
+		decision.BalanceChanges = completeBalanceProjectionChanges(
+			previousState,
+			state,
+			decision.BalanceChanges,
+		)
+	}
 	ledgerChanges, ledgerError := deriveLedgerChanges(
 		previousState,
 		input,
@@ -275,11 +392,20 @@ func applyWithSchemaVersion(
 	decision.ConfigurationVersion = input.ConfigurationVersion
 	decision.InstrumentVersion = input.InstrumentVersion
 	decision.InputHashVersion = CurrentInputHashVersion
-	decision.DecisionHashVersion = CurrentDecisionHashVersion
+	decision.DecisionHashVersion = decisionHashVersion
 	decision.PreviousStateHash = previousStateHash
 	decision.InputHash = inputHash
 	decision.EffectsHash = hashEffects(decision)
-	decisionHash := hashDecision(previousStateHash, inputHash, decision.EffectsHash)
+	decisionHash, decisionHashErr := hashDecisionAtVersion(
+		previousStateHash,
+		inputHash,
+		decision.EffectsHash,
+		decisionHashVersion,
+	)
+	if decisionHashErr != nil {
+		decisionHashErr.Sequence = input.StreamSequence
+		return halt(previousState, inputHash, decisionHashErr)
+	}
 	nextSequence := state.nextStreamSequence + 1
 	nextStateHash := hashAcceptedState(previousStateHash, inputHash, decisionHash, nextSequence)
 	decision.DecisionHash = decisionHash
@@ -433,6 +559,58 @@ func cloneDecision(decision Decision) Decision {
 	return decision
 }
 
+// completeBalanceProjectionChanges ensures every accepted input durably
+// projects every computable change to exact used, free, and equity state, even
+// when account total is unchanged. A missing mark leaves the last projection
+// intact while the risk boundary remains fail closed. Transition-specific
+// balance effects are preserved in their original order; a final snapshot is
+// appended only when none records the resulting projection.
+func completeBalanceProjectionChanges(
+	previous State,
+	next State,
+	changes []BalanceSnapshot,
+) []BalanceSnapshot {
+	for _, balance := range next.trading.balances {
+		accountID := balance.accountID
+		currency := balance.total.Currency().Code()
+		nextSnapshot, ok := next.Balance(accountID, currency)
+		if !ok {
+			continue
+		}
+		existed := false
+		for _, balance := range previous.trading.balances {
+			if balance.accountID == accountID &&
+				balance.total.Currency().Code() == currency {
+				existed = true
+				break
+			}
+		}
+		previousSnapshot, projected := previous.Balance(accountID, currency)
+		if existed && projected && previousSnapshot == nextSnapshot {
+			continue
+		}
+		if lastBalanceChange(changes, accountID, currency) == nextSnapshot {
+			continue
+		}
+		changes = append(changes, nextSnapshot)
+	}
+	return changes
+}
+
+func lastBalanceChange(
+	changes []BalanceSnapshot,
+	accountID string,
+	currency string,
+) BalanceSnapshot {
+	for index := len(changes) - 1; index >= 0; index-- {
+		if changes[index].AccountID == accountID &&
+			changes[index].Currency == currency {
+			return changes[index]
+		}
+	}
+	return BalanceSnapshot{}
+}
+
 func deriveLedgerChanges(
 	previous State,
 	input InputEnvelope,
@@ -467,11 +645,8 @@ func deriveLedgerChanges(
 			return nil, invalidLedgerEffect(input, "next balance total", err)
 		}
 		previousTotal := decimal.Decimal{}
-		if snapshot, ok := previous.Balance(key.accountID, key.currency); ok {
-			previousTotal, err = decimal.Parse(snapshot.Total)
-			if err != nil {
-				return nil, invalidLedgerEffect(input, "previous balance total", err)
-			}
+		if total, ok := rawBalanceTotal(previous, key.accountID, key.currency); ok {
+			previousTotal = total
 		}
 		delta, err := nextTotal.Sub(previousTotal)
 		if err != nil {
@@ -512,6 +687,22 @@ func deriveLedgerChanges(
 		})
 	}
 	return transactions, nil
+}
+
+// rawBalanceTotal reads the authoritative funded amount without depending on
+// marks needed only for derived used, free, and equity projections.
+func rawBalanceTotal(
+	state State,
+	accountID string,
+	currency string,
+) (decimal.Decimal, bool) {
+	for _, balance := range state.trading.balances {
+		if balance.accountID == accountID &&
+			balance.total.Currency().Code() == currency {
+			return balance.total.Decimal(), true
+		}
+	}
+	return decimal.Decimal{}, false
 }
 
 func invalidLedgerEffect(

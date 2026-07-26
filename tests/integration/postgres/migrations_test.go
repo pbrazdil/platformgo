@@ -1295,7 +1295,7 @@ const testInputReceiptInsertSQL = `
 		1,
 		1,
 		decode(repeat('00', 32), 'hex'),
-		1,
+		3,
 		decode(repeat('01', 32), 'hex'),
 		decode(repeat('02', 32), 'hex'),
 		'{}',
@@ -1827,17 +1827,17 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 			resulting_state_hash, envelope, decision
 		) VALUES
 			(7, '019f9460-4b36-4e9b-8f44-682611f70021', 1, 1,
-			 1, decode(repeat('21', 32), 'hex'), 1,
+			 1, decode(repeat('21', 32), 'hex'), 3,
 			 decode(repeat('31', 32), 'hex'), 1,
 			 decode(repeat('41', 32), 'hex'),
 			 decode(repeat('51', 32), 'hex'), '{}', '{}'),
 			(7, '019f9460-4b36-4e9b-8f44-682611f70022', 2, 1,
-			 1, decode(repeat('22', 32), 'hex'), 1,
+			 1, decode(repeat('22', 32), 'hex'), 3,
 			 decode(repeat('32', 32), 'hex'), 1,
 			 decode(repeat('42', 32), 'hex'),
 			 decode(repeat('52', 32), 'hex'), '{}', '{}'),
 			(7, '019f9460-4b36-4e9b-8f44-682611f70023', 3, 1,
-			 1, decode(repeat('23', 32), 'hex'), 1,
+			 1, decode(repeat('23', 32), 'hex'), 3,
 			 decode(repeat('33', 32), 'hex'), 1,
 			 decode(repeat('43', 32), 'hex'),
 			 decode(repeat('53', 32), 'hex'), '{}', '{}');
@@ -1858,7 +1858,8 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 			decode(repeat('21', 32), 'hex'),
 			decode(repeat('31', 32), 'hex'),
 			decode(repeat('71', 32), 'hex'),
-			decode(repeat('51', 32), 'hex'), '{}', '{}'
+			decode(repeat('51', 32), 'hex'), '{}',
+			'{"DecisionHashVersion":3}'
 		);
 		INSERT INTO trading.idempotency_records (
 			scope, idempotency_key, request_hash, command_id, state, expires_at
@@ -2023,7 +2024,7 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 				business_input_hash, resulting_state_hash, envelope, decision
 			) VALUES (
 				9, '019f9460-4b36-4e9b-8f44-682611f70101', 1, 1,
-				1, decode(repeat('93', 32), 'hex'), 1,
+				1, decode(repeat('93', 32), 'hex'), 3,
 				decode(repeat('94', 32), 'hex'), 1,
 				decode(repeat('95', 32), 'hex'),
 				decode(repeat('92', 32), 'hex'), '{}', '{}'
@@ -3528,6 +3529,1354 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 	}
 }
 
+func TestBalanceProjectionHashV3MigrationGuardsHistoricalOrderReceipts(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	execReceipt := func(query string) error {
+		connection, err := pool.Acquire(ctx)
+		if err != nil {
+			return err
+		}
+		defer connection.Release()
+		if _, err := connection.Exec(ctx, `
+			SELECT set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				false
+			)`); err != nil {
+			return err
+		}
+		_, err = connection.Exec(ctx, query)
+		return err
+	}
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("apply pre-v3 schema: %v", err)
+	}
+	if err := execReceipt(`
+		INSERT INTO engine.input_receipts (
+			shard_id, input_id, stream_sequence, schema_version,
+			input_hash_version, input_hash, decision_hash_version,
+			decision_hash, resulting_state_hash, envelope, decision,
+			business_input_hash, business_input_hash_version
+		) VALUES (
+			8,
+			'00000000-0000-4000-8000-000000000801',
+			1,
+			1,
+			1,
+			decode(repeat('01', 32), 'hex'),
+			2,
+			decode(repeat('02', 32), 'hex'),
+			decode(repeat('03', 32), 'hex'),
+			'{}',
+			'{"OrderChanges":[{"OrderID":"legacy-order"}]}',
+			decode(repeat('04', 32), 'hex'),
+			1
+		)`); err != nil {
+		t.Fatalf("seed pre-v3 order receipt: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	err := current.Migrate(ctx)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("pre-v3 order receipt migration error = %v, want 55000", err)
+	}
+	var (
+		lastMigration string
+		receiptCount  int
+		triggerExists bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			(SELECT count(*) FROM engine.input_receipts),
+			EXISTS (
+				SELECT 1
+				  FROM pg_trigger
+				 WHERE tgname =
+				       'input_receipts_require_balance_projection_hash_v3'
+				   AND NOT tgisinternal
+			)`,
+	).Scan(&lastMigration, &receiptCount, &triggerExists); err != nil {
+		t.Fatalf("inspect guarded migration rollback: %v", err)
+	}
+	if lastMigration != "20260726000700_phase3_user_api_keys.up.sql" ||
+		receiptCount != 1 ||
+		triggerExists {
+		t.Fatalf(
+			"guarded migration state = last %q receipts %d trigger %t",
+			lastMigration,
+			receiptCount,
+			triggerExists,
+		)
+	}
+
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("reapply pre-v3 schema: %v", err)
+	}
+	if err := execReceipt(`
+		INSERT INTO engine.input_receipts (
+			shard_id, input_id, stream_sequence, schema_version,
+			input_hash_version, input_hash, decision_hash_version,
+			decision_hash, resulting_state_hash, envelope, decision,
+			business_input_hash, business_input_hash_version
+		) VALUES (
+			8,
+			'00000000-0000-4000-8000-000000000802',
+			1,
+			1,
+			1,
+			decode(repeat('11', 32), 'hex'),
+			2,
+			decode(repeat('12', 32), 'hex'),
+			decode(repeat('13', 32), 'hex'),
+			'{}',
+			'{"OrderChanges":[]}',
+			decode(repeat('14', 32), 'hex'),
+			1
+		)`); err != nil {
+		t.Fatalf("seed safe pre-v3 receipt: %v", err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("migrate safe pre-v3 history: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify v3 authority migration: %v", err)
+	}
+	err = execReceipt(`
+		INSERT INTO engine.input_receipts (
+			shard_id, input_id, stream_sequence, schema_version,
+			input_hash_version, input_hash, decision_hash_version,
+			decision_hash, resulting_state_hash, envelope, decision,
+			business_input_hash, business_input_hash_version
+		) VALUES (
+			8,
+			'00000000-0000-4000-8000-000000000803',
+			2,
+			1,
+			1,
+			decode(repeat('21', 32), 'hex'),
+			2,
+			decode(repeat('22', 32), 'hex'),
+			decode(repeat('23', 32), 'hex'),
+			'{}',
+			'{"OrderChanges":[]}',
+			decode(repeat('24', 32), 'hex'),
+			1
+		)`)
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("old writer error = %v, want 55000", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
+func TestBalanceProjectionHashV3MigrationGuardsCurrencyScaleConflicts(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("apply pre-v3 schema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES
+			('BTC-PERP', 1, 2, 3, 'USDC', 2, 0.1, 0.05, 10, 0, 0),
+			('ETH-PERP', 1, 2, 3, 'USDC', 8, 0.1, 0.05, 10, 0, 0)`); err != nil {
+		t.Fatalf("seed conflicting currency scales: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	err := current.Migrate(ctx)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("currency-scale migration error = %v, want 55000", err)
+	}
+	var (
+		lastMigration   string
+		instrumentCount int
+		markNotNull     bool
+		triggerExists   bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			(SELECT count(*) FROM trading.instruments),
+			(
+				SELECT attnotnull
+				  FROM pg_attribute
+				 WHERE attrelid = 'market.books'::regclass
+				   AND attname = 'mark_price'
+				   AND NOT attisdropped
+			),
+			EXISTS (
+				SELECT 1
+				  FROM pg_trigger
+				 WHERE tgname =
+				       'instruments_require_currency_scale_consistency'
+				   AND NOT tgisinternal
+			)`,
+	).Scan(
+		&lastMigration,
+		&instrumentCount,
+		&markNotNull,
+		&triggerExists,
+	); err != nil {
+		t.Fatalf("inspect currency-scale guard rollback: %v", err)
+	}
+	if lastMigration != "20260726000700_phase3_user_api_keys.up.sql" ||
+		instrumentCount != 2 ||
+		!markNotNull ||
+		triggerExists {
+		t.Fatalf(
+			"currency guard state = last %q instruments %d mark not-null %t trigger %t",
+			lastMigration,
+			instrumentCount,
+			markNotNull,
+			triggerExists,
+		)
+	}
+
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("reapply pre-v3 schema for receipt history: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 8, 0.1, 0.05, 10, 0, 0
+		)`); err != nil {
+		t.Fatalf("seed current currency scale: %v", err)
+	}
+	historyConnection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire historical scale connection: %v", err)
+	}
+	if _, err := historyConnection.Exec(ctx, `
+		SELECT set_config(
+			'platformgo.runtime_schema_revision',
+			'20260725001100_phase3_committed_realtime_outbox',
+			false
+		);
+		INSERT INTO engine.input_receipts (
+			shard_id, input_id, stream_sequence, schema_version,
+			input_hash_version, input_hash, decision_hash_version,
+			decision_hash, resulting_state_hash, envelope, decision,
+			business_input_hash, business_input_hash_version
+		) VALUES (
+			8,
+			'00000000-0000-4000-8000-000000000831',
+			1,
+			1,
+			1,
+			decode(repeat('61', 32), 'hex'),
+			2,
+			decode(repeat('62', 32), 'hex'),
+			decode(repeat('63', 32), 'hex'),
+			'{}',
+			'{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":2
+			}]}',
+			decode(repeat('64', 32), 'hex'),
+			1
+		)`); err != nil {
+		historyConnection.Release()
+		t.Fatalf("seed historical currency scale: %v", err)
+	}
+	historyConnection.Release()
+	err = current.Migrate(ctx)
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("historical scale migration error = %v, want 55000", err)
+	}
+	var historyPreserved bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM engine.input_receipts
+			 WHERE input_id =
+			       '00000000-0000-4000-8000-000000000831'
+		)`).Scan(&historyPreserved); err != nil || !historyPreserved {
+		t.Fatalf(
+			"historical scale receipt preserved=%t, error %v",
+			historyPreserved,
+			err,
+		)
+	}
+
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("reapply pre-v3 schema for malformed history: %v", err)
+	}
+	malformedConnection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire malformed history connection: %v", err)
+	}
+	if _, err := malformedConnection.Exec(ctx, `
+		SELECT set_config(
+			'platformgo.runtime_schema_revision',
+			'20260725001100_phase3_committed_realtime_outbox',
+			false
+		);
+		INSERT INTO engine.input_receipts (
+			shard_id, input_id, stream_sequence, schema_version,
+			input_hash_version, input_hash, decision_hash_version,
+			decision_hash, resulting_state_hash, envelope, decision,
+			business_input_hash, business_input_hash_version
+		) VALUES (
+			8,
+			'00000000-0000-4000-8000-000000000832',
+			1,
+			1,
+			1,
+			decode(repeat('71', 32), 'hex'),
+			2,
+			decode(repeat('72', 32), 'hex'),
+			decode(repeat('73', 32), 'hex'),
+			'{}',
+			'{"InstrumentChanges":{"SettlementCurrency":"USDC"}}',
+			decode(repeat('74', 32), 'hex'),
+			1
+		)`); err != nil {
+		malformedConnection.Release()
+		t.Fatalf("seed malformed instrument history: %v", err)
+	}
+	malformedConnection.Release()
+	err = current.Migrate(ctx)
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("malformed history migration error = %v, want 55000", err)
+	}
+	var registryExists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT to_regclass('trading.currency_scales') IS NOT NULL`,
+	).Scan(&registryExists); err != nil || registryExists {
+		t.Fatalf(
+			"registry after malformed rollback exists=%t, error %v",
+			registryExists,
+			err,
+		)
+	}
+
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("reapply pre-v3 schema: %v", err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("migrate consistent currency catalog: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2, 0.1, 0.05, 10, 0, 0
+		)`); err != nil {
+		t.Fatalf("seed consistent currency scale: %v", err)
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'ETH-PERP', 1, 2, 3, 'USDC', 8, 0.1, 0.05, 10, 0, 0
+		)`)
+	if !errors.As(err, &postgresError) || postgresError.Code != "23514" {
+		t.Fatalf("post-cutover conflicting insert = %v, want 23514", err)
+	}
+	_, err = pool.Exec(ctx, `
+		UPDATE trading.instruments
+		   SET settlement_currency_scale = 8
+		 WHERE instrument_id = 'BTC-PERP'`)
+	if !errors.As(err, &postgresError) || postgresError.Code != "23514" {
+		t.Fatalf("post-cutover conflicting update = %v, want 23514", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE trading.instruments
+		   SET settlement_currency = 'EUR',
+		       settlement_currency_scale = 2
+		 WHERE instrument_id = 'BTC-PERP'`); err != nil {
+		t.Fatalf("post-cutover currency reconfiguration: %v", err)
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'SOL-PERP', 1, 2, 3, 'USDC', 8, 0.1, 0.05, 10, 0, 0
+		)`)
+	if !errors.As(err, &postgresError) || postgresError.Code != "23514" {
+		t.Fatalf("post-reconfiguration scale conflict = %v, want 23514", err)
+	}
+	var registeredScale int
+	if err := pool.QueryRow(ctx, `
+		SELECT scale
+		  FROM trading.currency_scales
+		 WHERE currency = 'USDC'`).Scan(&registeredScale); err != nil ||
+		registeredScale != 2 {
+		t.Fatalf(
+			"durable USDC scale = %d, error %v, want 2",
+			registeredScale,
+			err,
+		)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
+func TestBalanceProjectionHashV3MigrationRejectsMalformedCurrencyHistory(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	seedReceipt := func(testingT *testing.T, decision string) {
+		testingT.Helper()
+		connection, err := pool.Acquire(ctx)
+		if err != nil {
+			testingT.Fatalf("acquire malformed receipt connection: %v", err)
+		}
+		defer connection.Release()
+		if _, err := connection.Exec(ctx, `
+			SELECT set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				false
+			)`); err != nil {
+			testingT.Fatalf("bind malformed receipt schema revision: %v", err)
+		}
+		if _, err := connection.Exec(ctx, `
+			INSERT INTO engine.input_receipts (
+				shard_id, input_id, stream_sequence, schema_version,
+				input_hash_version, input_hash, decision_hash_version,
+				decision_hash, resulting_state_hash, envelope, decision,
+				business_input_hash, business_input_hash_version
+			) VALUES (
+				8,
+				'00000000-0000-4000-8000-000000000833',
+				1,
+				1,
+				1,
+				decode(repeat('81', 32), 'hex'),
+				2,
+				decode(repeat('82', 32), 'hex'),
+				decode(repeat('83', 32), 'hex'),
+				'{}',
+				$1::jsonb,
+				decode(repeat('84', 32), 'hex'),
+				1
+			)`,
+			decision,
+		); err != nil {
+			testingT.Fatalf("seed malformed currency receipt: %v", err)
+		}
+	}
+
+	cases := []struct {
+		name     string
+		decision string
+	}{
+		{
+			name: "numeric currency",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":123,
+				"SettlementCurrencyScale":2
+			}]}`,
+		},
+		{
+			name: "null currency",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":null,
+				"SettlementCurrencyScale":2
+			}]}`,
+		},
+		{
+			name: "object currency",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":{},
+				"SettlementCurrencyScale":2
+			}]}`,
+		},
+		{
+			name: "array currency",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":[],
+				"SettlementCurrencyScale":2
+			}]}`,
+		},
+		{
+			name: "noncanonical currency",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"usdc",
+				"SettlementCurrencyScale":2
+			}]}`,
+		},
+		{
+			name: "missing currency",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrencyScale":2
+			}]}`,
+		},
+		{
+			name: "string scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":"2"
+			}]}`,
+		},
+		{
+			name: "boolean scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":true
+			}]}`,
+		},
+		{
+			name: "null scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":null
+			}]}`,
+		},
+		{
+			name: "object scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":{}
+			}]}`,
+		},
+		{
+			name: "array scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":[]
+			}]}`,
+		},
+		{
+			name: "fractional scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":2.5
+			}]}`,
+		},
+		{
+			name: "out of range scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":19
+			}]}`,
+		},
+		{
+			name: "missing scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC"
+			}]}`,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			resetDurableSchemas(t, pool)
+			if err := platformpostgres.NewMigrator(pool, previous).
+				MigrateAndProvision(ctx, 8); err != nil {
+				t.Fatalf("apply pre-v3 schema: %v", err)
+			}
+			seedReceipt(t, test.decision)
+			err := current.Migrate(ctx)
+			var postgresError *pgconn.PgError
+			if !errors.As(err, &postgresError) ||
+				postgresError.Code != "55000" {
+				t.Fatalf("malformed history error = %v, want 55000", err)
+			}
+			var (
+				lastMigration  string
+				receiptCount   int
+				markNotNull    bool
+				registryExists bool
+				triggerExists  bool
+			)
+			if err := pool.QueryRow(ctx, `
+				SELECT
+					(SELECT max(filename) FROM engine.schema_migrations),
+					(SELECT count(*) FROM engine.input_receipts),
+					(
+						SELECT attnotnull
+						  FROM pg_attribute
+						 WHERE attrelid = 'market.books'::regclass
+						   AND attname = 'mark_price'
+						   AND NOT attisdropped
+					),
+					to_regclass('trading.currency_scales') IS NOT NULL,
+					EXISTS (
+						SELECT 1
+						  FROM pg_trigger
+						 WHERE tgname =
+						       'instruments_require_currency_scale_consistency'
+						   AND NOT tgisinternal
+					)`,
+			).Scan(
+				&lastMigration,
+				&receiptCount,
+				&markNotNull,
+				&registryExists,
+				&triggerExists,
+			); err != nil {
+				t.Fatalf("inspect malformed-history rollback: %v", err)
+			}
+			if lastMigration !=
+				"20260726000700_phase3_user_api_keys.up.sql" ||
+				receiptCount != 1 ||
+				!markNotNull ||
+				registryExists ||
+				triggerExists {
+				t.Fatalf(
+					"rollback last=%q receipts=%d mark-not-null=%t registry=%t trigger=%t",
+					lastMigration,
+					receiptCount,
+					markNotNull,
+					registryExists,
+					triggerExists,
+				)
+			}
+		})
+	}
+
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("reapply pre-v3 schema for legacy null: %v", err)
+	}
+	seedReceipt(t, `{"InstrumentChanges":null}`)
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("migrate legacy null instrument changes: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
+func TestBalanceProjectionHashV3MigrationValidatesOrderHistoryShape(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	cases := []struct {
+		name     string
+		decision string
+		reject   bool
+	}{
+		{name: "null decision", decision: `null`, reject: true},
+		{name: "string decision", decision: `"bad"`, reject: true},
+		{name: "number decision", decision: `1`, reject: true},
+		{name: "boolean decision", decision: `true`, reject: true},
+		{name: "array decision", decision: `[]`, reject: true},
+		{name: "string", decision: `{"OrderChanges":"bad"}`, reject: true},
+		{name: "object", decision: `{"OrderChanges":{}}`, reject: true},
+		{name: "number", decision: `{"OrderChanges":1}`, reject: true},
+		{name: "boolean", decision: `{"OrderChanges":true}`, reject: true},
+		{name: "missing", decision: `{}`},
+		{name: "null", decision: `{"OrderChanges":null}`},
+		{name: "empty array", decision: `{"OrderChanges":[]}`},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			resetDurableSchemas(t, pool)
+			if err := platformpostgres.NewMigrator(pool, previous).
+				MigrateAndProvision(ctx, 8); err != nil {
+				t.Fatalf("apply pre-v3 schema: %v", err)
+			}
+			connection, err := pool.Acquire(ctx)
+			if err != nil {
+				t.Fatalf("acquire order-history connection: %v", err)
+			}
+			if _, err := connection.Exec(ctx, `
+				SELECT set_config(
+					'platformgo.runtime_schema_revision',
+					'20260725001100_phase3_committed_realtime_outbox',
+					false
+				)`); err != nil {
+				connection.Release()
+				t.Fatalf("bind order-history schema revision: %v", err)
+			}
+			if _, err := connection.Exec(ctx, `
+				INSERT INTO engine.input_receipts (
+					shard_id, input_id, stream_sequence, schema_version,
+					input_hash_version, input_hash, decision_hash_version,
+					decision_hash, resulting_state_hash, envelope, decision,
+					business_input_hash, business_input_hash_version
+				) VALUES (
+					8,
+					'00000000-0000-4000-8000-000000000834',
+					1,
+					1,
+					1,
+					decode(repeat('91', 32), 'hex'),
+					2,
+					decode(repeat('92', 32), 'hex'),
+					decode(repeat('93', 32), 'hex'),
+					'{}',
+					$1::jsonb,
+					decode(repeat('94', 32), 'hex'),
+					1
+				)`,
+				test.decision,
+			); err != nil {
+				connection.Release()
+				t.Fatalf("seed order history: %v", err)
+			}
+			connection.Release()
+
+			err = current.Migrate(ctx)
+			if !test.reject {
+				if err != nil {
+					t.Fatalf("migrate compatible order history: %v", err)
+				}
+				assertFinalMigrationHistory(t, pool)
+				return
+			}
+			var postgresError *pgconn.PgError
+			if !errors.As(err, &postgresError) ||
+				postgresError.Code != "55000" {
+				t.Fatalf("malformed order history error = %v, want 55000", err)
+			}
+			var (
+				lastMigration  string
+				receiptCount   int
+				markNotNull    bool
+				registryExists bool
+				triggerCount   int
+			)
+			if err := pool.QueryRow(ctx, `
+				SELECT
+					(SELECT max(filename) FROM engine.schema_migrations),
+					(SELECT count(*) FROM engine.input_receipts),
+					(
+						SELECT attnotnull
+						  FROM pg_attribute
+						 WHERE attrelid = 'market.books'::regclass
+						   AND attname = 'mark_price'
+						   AND NOT attisdropped
+					),
+					to_regclass('trading.currency_scales') IS NOT NULL,
+					(
+						SELECT count(*)
+						  FROM pg_trigger
+						 WHERE tgname IN (
+							'input_receipts_require_balance_projection_hash_v3',
+							'duplicate_receipts_require_decision_hash_v3',
+							'instruments_require_currency_scale_consistency'
+						 )
+						   AND NOT tgisinternal
+					)`,
+			).Scan(
+				&lastMigration,
+				&receiptCount,
+				&markNotNull,
+				&registryExists,
+				&triggerCount,
+			); err != nil {
+				t.Fatalf("inspect malformed order rollback: %v", err)
+			}
+			if lastMigration !=
+				"20260726000700_phase3_user_api_keys.up.sql" ||
+				receiptCount != 1 ||
+				!markNotNull ||
+				registryExists ||
+				triggerCount != 0 {
+				t.Fatalf(
+					"rollback last=%q receipts=%d mark-not-null=%t registry=%t triggers=%d",
+					lastMigration,
+					receiptCount,
+					markNotNull,
+					registryExists,
+					triggerCount,
+				)
+			}
+		})
+	}
+}
+
+func TestCurrencyScaleRegistrySerializesConcurrentFirstUse(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("migrate concurrent currency registry database: %v", err)
+	}
+	var (
+		apiCanExecute    bool
+		engineCanExecute bool
+		outboxCanExecute bool
+		runtimeCanMutate bool
+		engineCanRead    bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			has_function_privilege(
+				'platformgo_api',
+				'trading.require_currency_scale_consistency()',
+				'EXECUTE'
+			),
+			has_function_privilege(
+				'platformgo_engine',
+				'trading.require_currency_scale_consistency()',
+				'EXECUTE'
+			),
+			has_function_privilege(
+				'platformgo_outbox',
+				'trading.require_currency_scale_consistency()',
+				'EXECUTE'
+			),
+			EXISTS (
+				SELECT 1
+				  FROM unnest(ARRAY[
+					'platformgo_api',
+					'platformgo_engine',
+					'platformgo_outbox'
+				  ]) AS runtime_role
+				  CROSS JOIN unnest(ARRAY[
+					'INSERT',
+					'UPDATE',
+					'DELETE',
+					'TRUNCATE'
+				  ]) AS mutation
+				 WHERE has_table_privilege(
+					runtime_role,
+					'trading.currency_scales',
+					mutation
+				 )
+			),
+			has_table_privilege(
+				'platformgo_engine',
+				'trading.currency_scales',
+				'SELECT'
+			)`,
+	).Scan(
+		&apiCanExecute,
+		&engineCanExecute,
+		&outboxCanExecute,
+		&runtimeCanMutate,
+		&engineCanRead,
+	); err != nil ||
+		apiCanExecute ||
+		engineCanExecute ||
+		outboxCanExecute ||
+		runtimeCanMutate ||
+		!engineCanRead {
+		t.Fatalf(
+			"currency registry privileges execute(api=%t engine=%t outbox=%t) mutate=%t engine-read=%t error=%v",
+			apiCanExecute,
+			engineCanExecute,
+			outboxCanExecute,
+			runtimeCanMutate,
+			engineCanRead,
+			err,
+		)
+	}
+	assertRoleStatementDenied(t, pool, "platformgo_api", `
+		INSERT INTO trading.currency_scales (currency, scale)
+		VALUES ('USDC', 8)`)
+	assertRoleStatementDenied(t, pool, "platformgo_api", `
+		UPDATE trading.currency_scales SET scale = 8`)
+	assertRoleStatementDenied(t, pool, "platformgo_api", `
+		DELETE FROM trading.currency_scales`)
+	assertRoleStatementDenied(t, pool, "platformgo_api", `
+		TRUNCATE trading.currency_scales`)
+
+	poisoning, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin API registry poisoning probe: %v", err)
+	}
+	if _, err := poisoning.Exec(ctx, "SET LOCAL ROLE platformgo_api"); err != nil {
+		_ = poisoning.Rollback(context.Background())
+		t.Fatalf("assume API role for registry poisoning probe: %v", err)
+	}
+	_, err = poisoning.Exec(ctx, `
+		CREATE TEMP TABLE currency_scale_poison (
+			settlement_currency text NOT NULL,
+			settlement_currency_scale smallint NOT NULL
+		);
+		CREATE TRIGGER currency_scale_poison
+		BEFORE INSERT ON currency_scale_poison
+		FOR EACH ROW EXECUTE FUNCTION
+			trading.require_currency_scale_consistency()`)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "42501" {
+		_ = poisoning.Rollback(context.Background())
+		t.Fatalf("API trigger-function poisoning error = %v, want 42501", err)
+	}
+	_ = poisoning.Rollback(context.Background())
+	var registryCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM trading.currency_scales`,
+	).Scan(&registryCount); err != nil || registryCount != 0 {
+		t.Fatalf(
+			"registry after API poisoning probe count=%d error=%v",
+			registryCount,
+			err,
+		)
+	}
+
+	first, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin first currency registration: %v", err)
+	}
+	defer func() { _ = first.Rollback(context.Background()) }()
+	if _, err := first.Exec(ctx, "SET LOCAL ROLE platformgo_engine"); err != nil {
+		t.Fatalf("assume engine role for currency registration: %v", err)
+	}
+	const insertInstrument = `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES ($1, 1, 2, 3, 'USDC', $2, 0.1, 0.05, 10, 0, 0)`
+	if _, err := first.Exec(ctx, insertInstrument, "BTC-PERP", 2); err != nil {
+		t.Fatalf("stage first currency scale: %v", err)
+	}
+
+	second, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire conflicting currency connection: %v", err)
+	}
+	defer second.Release()
+	var secondPID int32
+	if err := second.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&secondPID); err != nil {
+		t.Fatalf("load conflicting currency backend PID: %v", err)
+	}
+	secondResult := make(chan error, 1)
+	go func() {
+		_, execErr := second.Exec(ctx, insertInstrument, "ETH-PERP", 8)
+		secondResult <- execErr
+	}()
+	for {
+		var blocked bool
+		if err := pool.QueryRow(ctx, `
+			SELECT cardinality(pg_blocking_pids($1)) > 0`,
+			secondPID,
+		).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("conflicting currency registration did not serialize")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err := first.Commit(ctx); err != nil {
+		t.Fatalf("commit first currency scale: %v", err)
+	}
+	err = <-secondResult
+	if !errors.As(err, &postgresError) || postgresError.Code != "23514" {
+		t.Fatalf("concurrent conflicting currency scale = %v, want 23514", err)
+	}
+	if _, err := pool.Exec(ctx, insertInstrument, "SOL-PERP", 2); err != nil {
+		t.Fatalf("same-scale registration after serialization: %v", err)
+	}
+	var (
+		instrumentCount int
+		registeredScale int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM trading.instruments),
+			(
+				SELECT scale
+				  FROM trading.currency_scales
+				 WHERE currency = 'USDC'
+			)`,
+	).Scan(&instrumentCount, &registeredScale); err != nil ||
+		instrumentCount != 2 ||
+		registeredScale != 2 {
+		t.Fatalf(
+			"serialized registry instruments=%d scale=%d error=%v",
+			instrumentCount,
+			registeredScale,
+			err,
+		)
+	}
+}
+
+func TestBalanceProjectionHashV3MigrationLocksBeforeHistoricalGuard(
+	t *testing.T,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("apply pre-v3 schema: %v", err)
+	}
+
+	oldWriter, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin old writer: %v", err)
+	}
+	defer func() { _ = oldWriter.Rollback(context.Background()) }()
+	if _, err := oldWriter.Exec(ctx, `
+		SELECT set_config(
+			'platformgo.runtime_schema_revision',
+			'20260725001100_phase3_committed_realtime_outbox',
+			true
+		);
+		INSERT INTO engine.input_receipts (
+			shard_id, input_id, stream_sequence, schema_version,
+			input_hash_version, input_hash, decision_hash_version,
+			decision_hash, resulting_state_hash, envelope, decision,
+			business_input_hash, business_input_hash_version
+		) VALUES (
+			8,
+			'00000000-0000-4000-8000-000000000811',
+			1,
+			1,
+			1,
+			decode(repeat('31', 32), 'hex'),
+			2,
+			decode(repeat('32', 32), 'hex'),
+			decode(repeat('33', 32), 'hex'),
+			'{}',
+			'{"OrderChanges":[{"OrderID":"concurrent-old-order"}]}',
+			decode(repeat('34', 32), 'hex'),
+			1
+		)`); err != nil {
+		t.Fatalf("stage uncommitted old order receipt: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	migrationResult := make(chan error, 1)
+	go func() {
+		migrationResult <- current.Migrate(ctx)
+	}()
+	waitForTableLockWaiter(t, ctx, pool, "engine.input_receipts")
+	if err := oldWriter.Commit(ctx); err != nil {
+		t.Fatalf("commit concurrent old order receipt: %v", err)
+	}
+
+	err = <-migrationResult
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("concurrent old order migration error = %v, want 55000", err)
+	}
+	var (
+		lastMigration string
+		receiptCount  int
+		triggerCount  int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			(SELECT count(*) FROM engine.input_receipts),
+			(
+				SELECT count(*)
+				  FROM pg_trigger
+				 WHERE tgname IN (
+					'input_receipts_require_balance_projection_hash_v3',
+					'duplicate_receipts_require_decision_hash_v3'
+				 )
+				   AND NOT tgisinternal
+			)`,
+	).Scan(&lastMigration, &receiptCount, &triggerCount); err != nil {
+		t.Fatalf("inspect concurrent guard rollback: %v", err)
+	}
+	if lastMigration != "20260726000700_phase3_user_api_keys.up.sql" ||
+		receiptCount != 1 ||
+		triggerCount != 0 {
+		t.Fatalf(
+			"concurrent guard state = last %q receipts %d triggers %d",
+			lastMigration,
+			receiptCount,
+			triggerCount,
+		)
+	}
+}
+
+func TestBalanceProjectionHashV3MigrationFencesConcurrentOldDuplicateWriter(
+	t *testing.T,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("apply pre-v3 schema: %v", err)
+	}
+
+	oldWriter, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin old duplicate writer: %v", err)
+	}
+	defer func() { _ = oldWriter.Rollback(context.Background()) }()
+	if _, err := oldWriter.Exec(ctx, `
+		INSERT INTO engine.duplicate_delivery_receipts (
+			shard_id, stream_sequence, input_id, input_hash,
+			original_decision_hash, decision_hash, resulting_state_hash,
+			envelope, decision
+		) VALUES (
+			8,
+			1,
+			'00000000-0000-4000-8000-000000000821',
+			decode(repeat('41', 32), 'hex'),
+			decode(repeat('42', 32), 'hex'),
+			decode(repeat('43', 32), 'hex'),
+			decode(repeat('44', 32), 'hex'),
+			'{}',
+			'{"DecisionHashVersion":2}'
+		)`); err != nil {
+		t.Fatalf("stage uncommitted old duplicate receipt: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	migrationResult := make(chan error, 1)
+	go func() {
+		migrationResult <- current.Migrate(ctx)
+	}()
+	waitForTableLockWaiter(
+		t,
+		ctx,
+		pool,
+		"engine.duplicate_delivery_receipts",
+	)
+	if err := oldWriter.Commit(ctx); err != nil {
+		t.Fatalf("commit concurrent old duplicate receipt: %v", err)
+	}
+	if err := <-migrationResult; err != nil {
+		t.Fatalf("migrate after concurrent old duplicate receipt: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify duplicate writer fence: %v", err)
+	}
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO engine.duplicate_delivery_receipts (
+			shard_id, stream_sequence, input_id, input_hash,
+			original_decision_hash, decision_hash, resulting_state_hash,
+			envelope, decision
+		) VALUES (
+			8,
+			2,
+			'00000000-0000-4000-8000-000000000821',
+			decode(repeat('51', 32), 'hex'),
+			decode(repeat('52', 32), 'hex'),
+			decode(repeat('53', 32), 'hex'),
+			decode(repeat('54', 32), 'hex'),
+			'{}',
+			'{"DecisionHashVersion":2}'
+		)`)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55000" {
+		t.Fatalf("post-cutover old duplicate error = %v, want 55000", err)
+	}
+	var duplicateCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM engine.duplicate_delivery_receipts`,
+	).Scan(&duplicateCount); err != nil {
+		t.Fatalf("count duplicate receipts: %v", err)
+	}
+	if duplicateCount != 1 {
+		t.Fatalf("duplicate receipts = %d, want preserved historical row", duplicateCount)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
+func TestBalanceProjectionHashV3MigrationUsesBoundedLockAndRetries(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("apply pre-v3 schema: %v", err)
+	}
+	lockingTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin receipt lock: %v", err)
+	}
+	defer func() { _ = lockingTx.Rollback(context.Background()) }()
+	if _, err := lockingTx.Exec(
+		ctx,
+		"LOCK TABLE engine.input_receipts IN ROW EXCLUSIVE MODE",
+	); err != nil {
+		t.Fatalf("lock receipts: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	startedAt := time.Now()
+	err = current.Migrate(ctx)
+	elapsed := time.Since(startedAt)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "55P03" {
+		t.Fatalf("contended v3 migration error = %v, want 55P03", err)
+	}
+	if elapsed < time.Second || elapsed > 4*time.Second {
+		t.Fatalf("bounded v3 lock wait = %s, want approximately 2s", elapsed)
+	}
+	var (
+		lastMigration    string
+		markStillNotNull bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(SELECT max(filename) FROM engine.schema_migrations),
+			(
+				SELECT attnotnull
+				  FROM pg_attribute
+				 WHERE attrelid = 'market.books'::regclass
+				   AND attname = 'mark_price'
+				   AND NOT attisdropped
+			)`,
+	).Scan(&lastMigration, &markStillNotNull); err != nil {
+		t.Fatalf("read rolled-back migration history: %v", err)
+	}
+	if lastMigration != "20260726000700_phase3_user_api_keys.up.sql" ||
+		!markStillNotNull {
+		t.Fatalf(
+			"contended migration state = last %q mark not-null %t",
+			lastMigration,
+			markStillNotNull,
+		)
+	}
+	if err := lockingTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry v3 migration: %v", err)
+	}
+	if err := current.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify retried v3 migration: %v", err)
+	}
+	var markAllowsNull bool
+	if err := pool.QueryRow(ctx, `
+		SELECT NOT attnotnull
+		  FROM pg_attribute
+		 WHERE attrelid = 'market.books'::regclass
+		   AND attname = 'mark_price'
+		   AND NOT attisdropped`,
+	).Scan(&markAllowsNull); err != nil || !markAllowsNull {
+		t.Fatalf(
+			"retried mark nullability = %t, error %v",
+			markAllowsNull,
+			err,
+		)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
+func waitForTableLockWaiter(
+	t *testing.T,
+	ctx context.Context,
+	pool interface {
+		QueryRow(context.Context, string, ...any) pgx.Row
+	},
+	relation string,
+) {
+	t.Helper()
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				  FROM pg_locks
+				 WHERE relation = $1::regclass
+				   AND mode = 'ShareRowExclusiveLock'
+				   AND NOT granted
+			)`,
+			relation,
+		).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("migration did not wait on the receipt-table fence")
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
 func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	var count int
@@ -3539,9 +4888,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 19 ||
+	if count != 20 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260726000700_phase3_user_api_keys.up.sql" {
+		last != "20260726000800_phase3_balance_projection_hash_v3.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,
@@ -4280,7 +5629,7 @@ func assertReceiptIdentityConstraints(t *testing.T, pool *pgxpool.Pool) {
 			business_input_hash_version, decision_hash_version,
 			decision_hash, resulting_state_hash, envelope, decision
 		) VALUES (7, $1, $2, 1, 1, decode(repeat('01', 32), 'hex'),
-		          decode(repeat('04', 32), 'hex'), 1, 2,
+		          decode(repeat('04', 32), 'hex'), 1, 3,
 		          decode(repeat('02', 32), 'hex'), decode(repeat('03', 32), 'hex'),
 		          '{}'::jsonb, '{}'::jsonb)`
 	inputID := "019f9460-4b36-4e9b-8f44-682611f7ee01"

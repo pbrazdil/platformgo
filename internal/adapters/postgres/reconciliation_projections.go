@@ -522,7 +522,9 @@ func compareBooks(
 	expected map[string]sequencedBook,
 ) (uint64, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT instrument_id, trim_scale(mark_price)::text, bids, asks,
+		SELECT instrument_id,
+		       COALESCE(trim_scale(mark_price)::text, ''),
+		       bids, asks,
 		       stream_sequence
 		  FROM market.books`,
 	)

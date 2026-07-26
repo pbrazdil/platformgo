@@ -80,7 +80,7 @@ func (store *EngineStore) ReconcileShard(
 	); ownershipErr != nil {
 		return ReconciliationReport{}, ownershipErr
 	}
-	recovered, recoverErr := recoverTradingState(ctx, tx, shardID)
+	recovered, recoverErr := recoverTradingState(ctx, tx, shardID, false)
 	if recoverErr != nil {
 		return ReconciliationReport{}, fmt.Errorf(
 			"%w: replay shard %d: %w",
@@ -94,6 +94,19 @@ func (store *EngineStore) ReconcileShard(
 		NextStreamSequence: recovered.NextStreamSequence(),
 		Ready:              recovered.Ready(),
 	}
+	currencyScaleMismatches, err := compareRecoveredCurrencyScales(
+		ctx,
+		tx,
+		recovered,
+	)
+	if err != nil {
+		return ReconciliationReport{}, fmt.Errorf(
+			"reconcile shard %d currency-scale authority: %w",
+			shardID,
+			err,
+		)
+	}
+	report.ConfigurationMismatchCount += currencyScaleMismatches
 	var minimumSequence *uint64
 	var maximumSequence *uint64
 	var totalDeliveryCount uint64
@@ -615,6 +628,44 @@ func (store *EngineStore) ReconcileShard(
 		return report, fmt.Errorf("reconcile shard %d commit: %w", shardID, err)
 	}
 	return report, nil
+}
+
+func compareRecoveredCurrencyScales(
+	ctx context.Context,
+	querier postgresQuerier,
+	recovered engine.State,
+) (uint64, error) {
+	expected := make(map[string]uint8)
+	for _, currency := range recovered.CurrencyScales() {
+		expected[currency.Currency] = currency.Scale
+	}
+	rows, err := querier.Query(ctx, `
+		SELECT currency, scale
+		  FROM trading.currency_scales
+		 ORDER BY currency`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	var mismatches uint64
+	for rows.Next() {
+		var currency string
+		var scale int16
+		if err := rows.Scan(&currency, &scale); err != nil {
+			return 0, err
+		}
+		expectedScale, found := expected[currency]
+		if !found || scale < 0 || scale > 255 ||
+			expectedScale != uint8(scale) {
+			mismatches++
+		}
+		delete(expected, currency)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return mismatches + uint64(len(expected)), nil
 }
 
 func compareRecoveredPositions(

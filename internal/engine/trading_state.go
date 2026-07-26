@@ -7,16 +7,17 @@ import (
 )
 
 type tradingState struct {
-	instruments []instrumentRecord
-	accounts    []accountRecord
-	risks       []riskRecord
-	balances    []balanceRecord
-	funding     []fundingRecord
-	settlements []fundingSettlementRecord
-	books       []bookRecord
-	orders      []orderRecord
-	fills       []fillRecord
-	positions   []positionRecord
+	instruments    []instrumentRecord
+	currencyScales []domain.Currency
+	accounts       []accountRecord
+	risks          []riskRecord
+	balances       []balanceRecord
+	funding        []fundingRecord
+	settlements    []fundingSettlementRecord
+	books          []bookRecord
+	orders         []orderRecord
+	fills          []fillRecord
+	positions      []positionRecord
 }
 
 type instrumentRecord struct {
@@ -145,16 +146,17 @@ type positionRecord struct {
 
 func (state tradingState) clone() tradingState {
 	cloned := tradingState{
-		instruments: append([]instrumentRecord(nil), state.instruments...),
-		accounts:    append([]accountRecord(nil), state.accounts...),
-		risks:       append([]riskRecord(nil), state.risks...),
-		balances:    append([]balanceRecord(nil), state.balances...),
-		funding:     append([]fundingRecord(nil), state.funding...),
-		settlements: append([]fundingSettlementRecord(nil), state.settlements...),
-		orders:      append([]orderRecord(nil), state.orders...),
-		fills:       append([]fillRecord(nil), state.fills...),
-		positions:   append([]positionRecord(nil), state.positions...),
-		books:       make([]bookRecord, len(state.books)),
+		instruments:    append([]instrumentRecord(nil), state.instruments...),
+		currencyScales: append([]domain.Currency(nil), state.currencyScales...),
+		accounts:       append([]accountRecord(nil), state.accounts...),
+		risks:          append([]riskRecord(nil), state.risks...),
+		balances:       append([]balanceRecord(nil), state.balances...),
+		funding:        append([]fundingRecord(nil), state.funding...),
+		settlements:    append([]fundingSettlementRecord(nil), state.settlements...),
+		orders:         append([]orderRecord(nil), state.orders...),
+		fills:          append([]fillRecord(nil), state.fills...),
+		positions:      append([]positionRecord(nil), state.positions...),
+		books:          make([]bookRecord, len(state.books)),
 	}
 	for index, book := range state.books {
 		cloned.books[index] = book
@@ -162,6 +164,27 @@ func (state tradingState) clone() tradingState {
 		cloned.books[index].asks = append([]levelRecord(nil), book.asks...)
 	}
 	return cloned
+}
+
+func (state tradingState) currencyScale(code string) (domain.Currency, bool) {
+	for _, currency := range state.currencyScales {
+		if currency.Code() == code {
+			return currency, true
+		}
+	}
+	return domain.Currency{}, false
+}
+
+// rememberCurrencyScale is monotonic: receipt replay reconstructs every
+// historically accepted code-to-scale binding even after instrument changes.
+func (state *tradingState) rememberCurrencyScale(currency domain.Currency) {
+	if _, exists := state.currencyScale(currency.Code()); exists {
+		return
+	}
+	state.currencyScales = append(state.currencyScales, currency)
+	sort.Slice(state.currencyScales, func(left, right int) bool {
+		return state.currencyScales[left].Code() < state.currencyScales[right].Code()
+	})
 }
 
 func (state tradingState) instrument(instrumentID string) (domain.InstrumentRevision, bool) {

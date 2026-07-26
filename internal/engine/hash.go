@@ -101,13 +101,30 @@ func hashInputAtVersion(input InputEnvelope, version uint32) (Hash, *Error) {
 	}), nil
 }
 
-func hashDecision(previousStateHash Hash, inputHash Hash, effectsHash Hash) Hash {
+func hashDecisionAtVersion(
+	previousStateHash Hash,
+	inputHash Hash,
+	effectsHash Hash,
+	version uint32,
+) (Hash, *Error) {
+	var domain string
+	switch version {
+	case 2:
+		domain = "platformgo.engine.decision.v2"
+	case 3:
+		domain = "platformgo.engine.decision.v3"
+	default:
+		return Hash{}, &Error{
+			Kind:   ErrUnknownHashVersion,
+			Detail: "decision hash version is not supported",
+		}
+	}
 	return finishHash(func(hasher hash.Hash) {
-		writeString(hasher, "platformgo.engine.decision.v2")
+		writeString(hasher, domain)
 		writeBytes(hasher, previousStateHash[:])
 		writeBytes(hasher, inputHash[:])
 		writeBytes(hasher, effectsHash[:])
-	})
+	}), nil
 }
 
 func hashEffects(decision Decision) Hash {

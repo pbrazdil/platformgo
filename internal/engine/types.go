@@ -12,7 +12,7 @@ const (
 	CurrentSchemaVersion       uint32 = 1
 	CurrentInputHashVersion    uint32 = 1
 	CurrentBusinessHashVersion uint32 = 1
-	CurrentDecisionHashVersion uint32 = 2
+	CurrentDecisionHashVersion uint32 = 3
 )
 
 // IDError is a stable canonical-ID validation error.
@@ -186,4 +186,11 @@ type Decision struct {
 	Fills                   []FillSnapshot
 	PositionChanges         []PositionSnapshot
 	Events                  []DomainEvent
+}
+
+// CurrencyScaleSnapshot is one monotonic currency identity reconstructed from
+// accepted instrument-configuration receipts.
+type CurrencyScaleSnapshot struct {
+	Currency string
+	Scale    uint8
 }
