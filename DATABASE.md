@@ -90,25 +90,6 @@ The engine transaction for an input includes, as applicable:
 
 Network calls are outside the transaction.
 
-### Derived balance projection authority
-
-Decision hash generation 3 includes every computable final balance projection
-whose exact `used`, `free`, or `equity` changes even when `total` does not.
-This keeps working-order reservations, releases, fills, and market-only equity
-changes in the same receipt/checkpoint transaction as their causes.
-Reservation-only changes do not create a ledger transaction because
-their total delta is zero.
-
-Historical decision hash generation 2 remains replayable. Migration
-`20260726000800_phase3_balance_projection_hash_v3.up.sql` refuses any pre-v3
-receipt containing an order change because that history may have omitted a
-balance projection and cannot be repaired by inference during DDL. It preserves
-the database unchanged on refusal and requires an owner-reviewed forward
-repair or a complete restore/reset. Safe non-order v2 history may remain and is
-extended by v3 decisions. The migration trigger prevents an old writer from
-inserting any new pre-v3 decision after the authority boundary, including a
-market-only decision whose equity projection could otherwise be omitted.
-
 ## 7. Locking and isolation
 
 - One engine writer per shard removes most write contention but does not replace database constraints.
