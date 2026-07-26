@@ -267,6 +267,160 @@ func TestFillsHistoryFiltersBySideAndTradeID(t *testing.T) {
 // Ported from:
 //
 //	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/trading/e2e_fills.rs:252
+//	test: fill_history_returns_side_and_trade_type
+//
+// Adaptations:
+//   - Durable immutable fills replace legacy mirror rows.
+//   - The PostgreSQL compatibility reader replaces the Rust query dispatcher.
+//   - Current Go behavior remains authoritative: every engine-produced durable
+//     fill has a required position effect, so the legacy unclassified fixture
+//     is not imported as a nullable trade type.
+//
+// Assertions preserved:
+//   - BUY/open and SELL/close sides retain their source spellings.
+//   - Open, increase, reduce, flip, and close trade types project exactly.
+func TestFillHistoryReturnsSideAndTradeType(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("migrate fill side/trade-type database: %v", err)
+	}
+
+	const accountID = "urn:xb:account:fill-side-trade-type"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2,
+			0.1, 0.05, 10, -0.0001, 0.0005
+		);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:fill-side-trade-type', 'NETTING');
+		INSERT INTO trading.orders (
+			order_id, account_id, instrument_id, side, order_type,
+			time_in_force, status, quantity, filled_quantity,
+			average_fill_price, triggered, reduce_only, has_rested,
+			version
+		) VALUES
+			('019fa844-26c0-7000-8000-000000000081',
+			 'urn:xb:account:fill-side-trade-type', 'BTC-PERP', 'BUY',
+			 'MARKET', 'IOC', 'FILLED', 0.01, 0.01, 60000,
+			 false, false, false, 1),
+			('019fa844-26c0-7000-8000-000000000082',
+			 'urn:xb:account:fill-side-trade-type', 'BTC-PERP', 'BUY',
+			 'MARKET', 'IOC', 'FILLED', 0.01, 0.01, 60000,
+			 false, false, false, 1),
+			('019fa844-26c0-7000-8000-000000000083',
+			 'urn:xb:account:fill-side-trade-type', 'BTC-PERP', 'SELL',
+			 'MARKET', 'IOC', 'FILLED', 0.01, 0.01, 60000,
+			 false, false, false, 1),
+			('019fa844-26c0-7000-8000-000000000084',
+			 'urn:xb:account:fill-side-trade-type', 'BTC-PERP', 'SELL',
+			 'MARKET', 'IOC', 'FILLED', 0.01, 0.01, 60000,
+			 false, false, false, 1),
+			('019fa844-26c0-7000-8000-000000000085',
+			 'urn:xb:account:fill-side-trade-type', 'BTC-PERP', 'SELL',
+			 'MARKET', 'IOC', 'FILLED', 0.01, 0.01, 60000,
+			 false, false, false, 1);
+		INSERT INTO trading.fills (
+			fill_id, order_id, input_id, account_id, instrument_id,
+			side, price, quantity, position_id, position_effect,
+			liquidity_side, logical_time
+		) VALUES
+			('019fa844-26c0-7000-8000-000000000071',
+			 '019fa844-26c0-7000-8000-000000000081',
+			 '019fa844-26c0-7000-8000-000000000091',
+			 'urn:xb:account:fill-side-trade-type', 'BTC-PERP',
+			 'BUY', 60000, 0.01,
+			 '019fa844-26c0-7000-8000-0000000000a1',
+			 'open', 'TAKER', 1784901600000000071),
+			('019fa844-26c0-7000-8000-000000000072',
+			 '019fa844-26c0-7000-8000-000000000082',
+			 '019fa844-26c0-7000-8000-000000000092',
+			 'urn:xb:account:fill-side-trade-type', 'BTC-PERP',
+			 'BUY', 60000, 0.01,
+			 '019fa844-26c0-7000-8000-0000000000a1',
+			 'increase', 'TAKER', 1784901600000000072),
+			('019fa844-26c0-7000-8000-000000000073',
+			 '019fa844-26c0-7000-8000-000000000083',
+			 '019fa844-26c0-7000-8000-000000000093',
+			 'urn:xb:account:fill-side-trade-type', 'BTC-PERP',
+			 'SELL', 60000, 0.01,
+			 '019fa844-26c0-7000-8000-0000000000a1',
+			 'reduce', 'TAKER', 1784901600000000073),
+			('019fa844-26c0-7000-8000-000000000074',
+			 '019fa844-26c0-7000-8000-000000000084',
+			 '019fa844-26c0-7000-8000-000000000094',
+			 'urn:xb:account:fill-side-trade-type', 'BTC-PERP',
+			 'SELL', 60000, 0.01,
+			 '019fa844-26c0-7000-8000-0000000000a1',
+			 'flip', 'TAKER', 1784901600000000074),
+			('019fa844-26c0-7000-8000-000000000075',
+			 '019fa844-26c0-7000-8000-000000000085',
+			 '019fa844-26c0-7000-8000-000000000095',
+			 'urn:xb:account:fill-side-trade-type', 'BTC-PERP',
+			 'SELL', 60000, 0.01,
+			 '019fa844-26c0-7000-8000-0000000000a1',
+			 'close', 'TAKER', 1784901600000000075)`); err != nil {
+		t.Fatalf("seed durable fill side/trade types: %v", err)
+	}
+
+	apiPool := runtimeRoleLoginPool(
+		t,
+		pool,
+		"platformgo_fill_side_trade_type_api_login",
+		"platformgo_api",
+	)
+	page, err := platformpostgres.NewCompatibilityStore(apiPool).FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{Limit: 10},
+	)
+	if err != nil {
+		t.Fatalf("read fill side/trade types: %v", err)
+	}
+	if len(page.Items) != 5 {
+		t.Fatalf("fills = %#v, want five classified fills", page.Items)
+	}
+	want := map[string]struct {
+		side      string
+		tradeType string
+	}{
+		"019fa844-26c0-7000-8000-000000000071": {"BUY", "open"},
+		"019fa844-26c0-7000-8000-000000000072": {"BUY", "increase"},
+		"019fa844-26c0-7000-8000-000000000073": {"SELL", "reduce"},
+		"019fa844-26c0-7000-8000-000000000074": {"SELL", "flip"},
+		"019fa844-26c0-7000-8000-000000000075": {"SELL", "close"},
+	}
+	for _, fill := range page.Items {
+		expected, ok := want[fill.FillID]
+		if !ok {
+			t.Fatalf("unexpected fill = %#v", fill)
+		}
+		if fill.Side != expected.side || fill.TradeType != expected.tradeType {
+			t.Fatalf(
+				"fill %s = (%q, %q), want (%q, %q)",
+				fill.FillID,
+				fill.Side,
+				fill.TradeType,
+				expected.side,
+				expected.tradeType,
+			)
+		}
+	}
+}
+
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/trading/e2e_fills.rs:410
 //	test: fill_order_id_is_the_correlatable_order_urn
 //
@@ -474,6 +628,9 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 		"fills_account_side_history_idx",
 		`SELECT
 			fill.fill_id::text,
+			fill.order_id::text,
+			fill.side,
+			lower(fill.position_effect),
 			fill.logical_time,
 			count(*) OVER ()
 		   FROM trading.fills AS fill

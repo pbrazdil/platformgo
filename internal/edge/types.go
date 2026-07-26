@@ -366,9 +366,11 @@ type PageParams struct {
 // FillExecutionView is the narrow immutable execution-time projection proven
 // by the first native fill-history source port.
 type FillExecutionView struct {
-	FillID   string `json:"fillId"`
-	OrderID  string `json:"orderId"`
-	FilledAt string `json:"filledAt"`
+	FillID    string `json:"fillId"`
+	OrderID   string `json:"orderId"`
+	Side      string `json:"side"`
+	TradeType string `json:"tradeType"`
+	FilledAt  string `json:"filledAt"`
 }
 
 // FillExecutionPage is the narrow filtered execution projection proven by

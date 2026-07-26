@@ -1006,13 +1006,21 @@ func (store *CompatibilityStore) LatestFillExecution(
 		SELECT
 			fill.fill_id::text,
 			fill.order_id::text,
+			fill.side,
+			lower(fill.position_effect),
 			fill.logical_time
 		  FROM trading.fills AS fill
 		 WHERE fill.account_id = $1
 		 ORDER BY fill.logical_time DESC, fill.fill_id DESC
 		 LIMIT 1`,
 		accountID,
-	).Scan(&view.FillID, &view.OrderID, &logicalTime); err != nil {
+	).Scan(
+		&view.FillID,
+		&view.OrderID,
+		&view.Side,
+		&view.TradeType,
+		&logicalTime,
+	); err != nil {
 		return edge.FillExecutionView{}, fmt.Errorf("read latest fill execution: %w", err)
 	}
 	view.OrderID = "urn:xb:order:" + view.OrderID
@@ -1068,6 +1076,8 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		SELECT
 			fill.fill_id::text,
 			fill.order_id::text,
+			fill.side,
+			lower(fill.position_effect),
 			fill.logical_time,
 			count(*) OVER ()
 		  FROM trading.fills AS fill
@@ -1097,6 +1107,8 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		if err := rows.Scan(
 			&view.FillID,
 			&view.OrderID,
+			&view.Side,
+			&view.TradeType,
 			&logicalTime,
 			&total,
 		); err != nil {
