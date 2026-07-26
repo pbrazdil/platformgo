@@ -795,9 +795,136 @@ func TestUserAPIKeyReplayRotationUsesDistributeThenPromote(t *testing.T) {
 //	source: apps/app/tests/it/trading/e2e_rate_limit.rs:12
 //	test: protected_surface_is_per_principal_rate_limited
 //
-// The real HTTP/PostgreSQL adaptation proves the shared bucket across a
-// protected read, credential mutation, and second API replica while preserving
-// the source Retry-After and TooManyRequests wire contract.
+// Adaptations:
+//   - The Rust runtime is replaced by the Go HTTP edge and real PostgreSQL 17.
+//   - Fixed test accounts and a catalog instrument replace source fixture
+//     builders while preserving the same public and protected routes.
+//
+// Assertions preserved:
+//   - A principal initially receives 200 from its account positions route and
+//     then receives 429 after exhausting its protected-request bucket.
+//   - The 429 includes Retry-After and the too_many_requests error code.
+//   - A second principal retains an independent bucket on its own positions
+//     route.
+//   - Repeated anonymous instrument-catalog reads are never rate-limited.
+func TestProtectedSurfaceIsPerPrincipalRateLimited(t *testing.T) {
+	ctx, admin, apiPool, serverURL := newMyAPIKeyFixture(t, 25)
+	defer admin.Close()
+	defer apiPool.Close()
+	if _, err := admin.Exec(ctx, `
+		UPDATE identity.api_key_policy
+		   SET client_rate_limit_max_requests = 5,
+		       client_rate_limit_window_seconds = 60,
+		       version = version + 1
+		 WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, `
+		INSERT INTO identity.users (
+			user_id,
+			login,
+			normalized_login,
+			email,
+			normalized_email,
+			password_hash
+		)
+		SELECT
+			'urn:xb:user:second-owner',
+			'secondtrader',
+			'secondtrader',
+			'second@xb.local',
+			'second@xb.local',
+			password_hash
+		  FROM identity.users
+		 WHERE user_id = 'urn:xb:user:bot-owner'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2,
+			0.1, 0.05, 10, -0.0001, 0.0005
+		);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES
+			('urn:xb:account:rate-owner', 'NETTING'),
+			('urn:xb:account:rate-second', 'NETTING');
+		INSERT INTO identity.user_accounts (user_id, account_id)
+		VALUES
+			('urn:xb:user:bot-owner', 'urn:xb:account:rate-owner'),
+			('urn:xb:user:second-owner', 'urn:xb:account:rate-second')`); err != nil {
+		t.Fatal(err)
+	}
+	accessToken := loginMyAPIKeyOwner(t, serverURL)
+	ownerHeaders := map[string]string{"authorization": "Bearer " + accessToken}
+	positionsURL := serverURL + "/v1/accounts/urn:xb:account:rate-owner/positions"
+	var limited *http.Response
+	for range 50 {
+		response := requestJSON(
+			t,
+			http.MethodGet,
+			positionsURL,
+			"",
+			ownerHeaders,
+		)
+		if response.StatusCode == http.StatusTooManyRequests {
+			limited = response
+			break
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf(
+				"under-limit protected read status = %d, want 200",
+				response.StatusCode,
+			)
+		}
+	}
+	if limited == nil {
+		t.Fatal("owner did not reach the protected-request limit within 50 requests")
+	}
+	var limitedBody map[string]any
+	decodeAndClose(t, limited, &limitedBody)
+	if got := limited.Header.Get("retry-after"); got != "60" {
+		t.Fatalf("rate-limit Retry-After = %q, want 60", got)
+	}
+	if limitedBody["code"] != "too_many_requests" {
+		t.Fatalf("rate-limit body = %#v", limitedBody)
+	}
+	secondAccessToken := loginMyAPIKey(
+		t,
+		serverURL,
+		"secondtrader",
+	)
+	isolated := requestJSON(
+		t,
+		http.MethodGet,
+		serverURL+"/v1/accounts/urn:xb:account:rate-second/positions",
+		"",
+		map[string]string{"authorization": "Bearer " + secondAccessToken},
+	)
+	_ = isolated.Body.Close()
+	if isolated.StatusCode != http.StatusOK {
+		t.Fatalf("second owner status = %d, want 200", isolated.StatusCode)
+	}
+	for range 10 {
+		public := requestJSON(
+			t,
+			http.MethodGet,
+			serverURL+"/v1/instruments",
+			"",
+			nil,
+		)
+		_ = public.Body.Close()
+		if public.StatusCode == http.StatusTooManyRequests {
+			t.Fatal("anonymous instrument catalog was rate-limited")
+		}
+	}
+}
+
 func TestUserAPIKeyCreationIsRateLimitedPerPrincipal(t *testing.T) {
 	ctx, admin, apiPool, serverURL := newMyAPIKeyFixture(t, 25)
 	defer admin.Close()
@@ -831,7 +958,6 @@ func TestUserAPIKeyCreationIsRateLimitedPerPrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 	accessToken := loginMyAPIKeyOwner(t, serverURL)
-
 	protectedRead := requestJSON(
 		t,
 		http.MethodGet,
@@ -877,26 +1003,26 @@ func TestUserAPIKeyCreationIsRateLimitedPerPrincipal(t *testing.T) {
 		newMyAPIKeyAuthenticator(t),
 		[]application.APIKeyReplayKey{testAPIKeyReplayKey("test-v1", 1)},
 	)
-	limited := createMyAPIKey(
+	limitedMutation := createMyAPIKey(
 		t,
 		otherServerURL,
 		accessToken,
 		`{"name":"rate-bot-c"}`,
 		"request-rate-c",
 	)
-	if limited.status != http.StatusTooManyRequests {
+	if limitedMutation.status != http.StatusTooManyRequests {
 		t.Fatalf(
 			"rate-limited status = %d, body = %s",
-			limited.status,
-			limited.body,
+			limitedMutation.status,
+			limitedMutation.body,
 		)
 	}
-	if got := limited.header.Get("retry-after"); got != "60" {
+	if got := limitedMutation.header.Get("retry-after"); got != "60" {
 		t.Fatalf("rate-limit Retry-After = %q, want 60", got)
 	}
-	if !strings.Contains(limited.body, `"code":"too_many_requests"`) ||
-		!strings.Contains(limited.body, `"message":"rate_limited"`) {
-		t.Fatalf("rate-limit body = %s", limited.body)
+	if !strings.Contains(limitedMutation.body, `"code":"too_many_requests"`) ||
+		!strings.Contains(limitedMutation.body, `"message":"rate_limited"`) {
+		t.Fatalf("rate-limit body = %s", limitedMutation.body)
 	}
 	secondAccessToken := loginMyAPIKey(
 		t,
@@ -1625,9 +1751,15 @@ func newMyAPIKeyServerWithActiveKey(
 	server := httptest.NewServer(edge.NewServer(edge.ServerConfig{
 		Authenticator: authenticator,
 		Identity:      identity,
+		Trading:       tradingReader(store),
 	}).Handler())
 	t.Cleanup(server.Close)
 	return server.URL
+}
+
+func tradingReader(store application.IdentityStore) edge.TradingReader {
+	reader, _ := store.(edge.TradingReader)
+	return reader
 }
 
 func testAPIKeyReplayKey(id string, seed byte) application.APIKeyReplayKey {
