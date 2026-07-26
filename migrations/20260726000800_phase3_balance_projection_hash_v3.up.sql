@@ -218,6 +218,9 @@ BEGIN
 END
 $$;
 
+REVOKE ALL ON FUNCTION trading.require_currency_scale_consistency()
+FROM PUBLIC;
+
 CREATE TRIGGER instruments_require_currency_scale_consistency
 BEFORE INSERT OR UPDATE ON trading.instruments
 FOR EACH ROW EXECUTE FUNCTION trading.require_currency_scale_consistency();

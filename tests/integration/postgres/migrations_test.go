@@ -3973,12 +3973,128 @@ func TestCurrencyScaleRegistrySerializesConcurrentFirstUse(t *testing.T) {
 	).MigrateAndProvision(ctx, 8); err != nil {
 		t.Fatalf("migrate concurrent currency registry database: %v", err)
 	}
+	var (
+		apiCanExecute    bool
+		engineCanExecute bool
+		outboxCanExecute bool
+		runtimeCanMutate bool
+		engineCanRead    bool
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			has_function_privilege(
+				'platformgo_api',
+				'trading.require_currency_scale_consistency()',
+				'EXECUTE'
+			),
+			has_function_privilege(
+				'platformgo_engine',
+				'trading.require_currency_scale_consistency()',
+				'EXECUTE'
+			),
+			has_function_privilege(
+				'platformgo_outbox',
+				'trading.require_currency_scale_consistency()',
+				'EXECUTE'
+			),
+			EXISTS (
+				SELECT 1
+				  FROM unnest(ARRAY[
+					'platformgo_api',
+					'platformgo_engine',
+					'platformgo_outbox'
+				  ]) AS runtime_role
+				  CROSS JOIN unnest(ARRAY[
+					'INSERT',
+					'UPDATE',
+					'DELETE',
+					'TRUNCATE'
+				  ]) AS mutation
+				 WHERE has_table_privilege(
+					runtime_role,
+					'trading.currency_scales',
+					mutation
+				 )
+			),
+			has_table_privilege(
+				'platformgo_engine',
+				'trading.currency_scales',
+				'SELECT'
+			)`,
+	).Scan(
+		&apiCanExecute,
+		&engineCanExecute,
+		&outboxCanExecute,
+		&runtimeCanMutate,
+		&engineCanRead,
+	); err != nil ||
+		apiCanExecute ||
+		engineCanExecute ||
+		outboxCanExecute ||
+		runtimeCanMutate ||
+		!engineCanRead {
+		t.Fatalf(
+			"currency registry privileges execute(api=%t engine=%t outbox=%t) mutate=%t engine-read=%t error=%v",
+			apiCanExecute,
+			engineCanExecute,
+			outboxCanExecute,
+			runtimeCanMutate,
+			engineCanRead,
+			err,
+		)
+	}
+	assertRoleStatementDenied(t, pool, "platformgo_api", `
+		INSERT INTO trading.currency_scales (currency, scale)
+		VALUES ('USDC', 8)`)
+	assertRoleStatementDenied(t, pool, "platformgo_api", `
+		UPDATE trading.currency_scales SET scale = 8`)
+	assertRoleStatementDenied(t, pool, "platformgo_api", `
+		DELETE FROM trading.currency_scales`)
+	assertRoleStatementDenied(t, pool, "platformgo_api", `
+		TRUNCATE trading.currency_scales`)
+
+	poisoning, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin API registry poisoning probe: %v", err)
+	}
+	if _, err := poisoning.Exec(ctx, "SET LOCAL ROLE platformgo_api"); err != nil {
+		_ = poisoning.Rollback(context.Background())
+		t.Fatalf("assume API role for registry poisoning probe: %v", err)
+	}
+	_, err = poisoning.Exec(ctx, `
+		CREATE TEMP TABLE currency_scale_poison (
+			settlement_currency text NOT NULL,
+			settlement_currency_scale smallint NOT NULL
+		);
+		CREATE TRIGGER currency_scale_poison
+		BEFORE INSERT ON currency_scale_poison
+		FOR EACH ROW EXECUTE FUNCTION
+			trading.require_currency_scale_consistency()`)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) || postgresError.Code != "42501" {
+		_ = poisoning.Rollback(context.Background())
+		t.Fatalf("API trigger-function poisoning error = %v, want 42501", err)
+	}
+	_ = poisoning.Rollback(context.Background())
+	var registryCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM trading.currency_scales`,
+	).Scan(&registryCount); err != nil || registryCount != 0 {
+		t.Fatalf(
+			"registry after API poisoning probe count=%d error=%v",
+			registryCount,
+			err,
+		)
+	}
 
 	first, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin first currency registration: %v", err)
 	}
 	defer func() { _ = first.Rollback(context.Background()) }()
+	if _, err := first.Exec(ctx, "SET LOCAL ROLE platformgo_engine"); err != nil {
+		t.Fatalf("assume engine role for currency registration: %v", err)
+	}
 	const insertInstrument = `
 		INSERT INTO trading.instruments (
 			instrument_id, revision, price_scale, quantity_scale,
@@ -4025,7 +4141,6 @@ func TestCurrencyScaleRegistrySerializesConcurrentFirstUse(t *testing.T) {
 		t.Fatalf("commit first currency scale: %v", err)
 	}
 	err = <-secondResult
-	var postgresError *pgconn.PgError
 	if !errors.As(err, &postgresError) || postgresError.Code != "23514" {
 		t.Fatalf("concurrent conflicting currency scale = %v, want 23514", err)
 	}
