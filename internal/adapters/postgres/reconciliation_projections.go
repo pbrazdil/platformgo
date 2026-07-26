@@ -54,8 +54,17 @@ type inputFill struct {
 }
 
 type inputFunding struct {
-	Snapshot engine.FundingSnapshot
-	InputID  engine.ID
+	Snapshot   engine.FundingSnapshot
+	InputID    engine.ID
+	Projection fundingHistoryProjection
+}
+
+type fundingHistoryProjection struct {
+	Present      bool
+	AccountID    string
+	InstrumentID string
+	PositionID   string
+	LogicalTime  engine.LogicalTime
 }
 
 type durableDomainEvent struct {
@@ -268,6 +277,13 @@ func loadExpectedProjections(
 			expected.funding[change.FundingID.String()] = inputFunding{
 				Snapshot: change,
 				InputID:  input.InputID,
+				Projection: fundingHistoryProjection{
+					Present:      true,
+					AccountID:    change.AccountID,
+					InstrumentID: change.InstrumentID,
+					PositionID:   change.PositionID.String(),
+					LogicalTime:  input.LogicalTime,
+				},
 			}
 		}
 		for _, change := range decision.LedgerChanges {
@@ -907,12 +923,22 @@ func compareFunding(
 	expected map[string]inputFunding,
 ) (uint64, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT funding_id::text, settlement_id::text, position_id::text,
-		       input_id::text, funding.account_id, instrument_id,
-		       trim_scale(signed_quantity)::text,
-		       trim_scale(oracle_price)::text, trim_scale(rate)::text,
-		       trim_scale(amount)::text, settlement_currency
-		  FROM trading.funding_settlements AS funding`)
+		SELECT funding.funding_id::text, funding.settlement_id::text,
+		       funding.position_id::text, funding.input_id::text,
+		       funding.account_id, funding.instrument_id,
+		       trim_scale(funding.signed_quantity)::text,
+		       trim_scale(funding.oracle_price)::text,
+		       trim_scale(funding.rate)::text,
+		       trim_scale(funding.amount)::text,
+		       funding.settlement_currency,
+		       history.funding_id IS NOT NULL,
+		       COALESCE(history.account_id, ''),
+		       COALESCE(history.instrument_id, ''),
+		       COALESCE(history.position_id::text, ''),
+		       COALESCE(history.logical_time, 0)
+		  FROM trading.funding_settlements AS funding
+		  LEFT JOIN trading.funding_history_projection AS history
+		    ON history.funding_id = funding.funding_id`)
 	if err != nil {
 		return 0, err
 	}
@@ -933,6 +959,11 @@ func compareFunding(
 			&actual.Snapshot.Rate,
 			&actual.Snapshot.Amount,
 			&actual.Snapshot.SettlementCurrency,
+			&actual.Projection.Present,
+			&actual.Projection.AccountID,
+			&actual.Projection.InstrumentID,
+			&actual.Projection.PositionID,
+			&actual.Projection.LogicalTime,
 		); scanErr != nil {
 			return 0, scanErr
 		}

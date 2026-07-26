@@ -269,10 +269,40 @@ type BalanceView struct {
 	Equity   string `json:"equity"`
 }
 
+// PageParams is the frozen keyset-pagination query shape.
+type PageParams struct {
+	Limit     int
+	Cursor    string
+	Direction string
+}
+
+// FundingView is one exact, append-only client funding projection.
+type FundingView struct {
+	FundingID              string `json:"fundingId"`
+	Symbol                 string `json:"symbol"`
+	PositionID             string `json:"positionId"`
+	PositionSignedQuantity string `json:"positionSignedQty"`
+	OraclePrice            string `json:"oraclePrice"`
+	FundingRate            string `json:"fundingRate"`
+	FundingAmount          string `json:"fundingAmount"`
+	Currency               string `json:"currency"`
+	FundingTime            string `json:"fundingTime"`
+	AccountLogin           *int64 `json:"accountLogin,omitempty"`
+}
+
+// FundingPage is the frozen list envelope used by funding history reads.
+type FundingPage struct {
+	Items      []FundingView `json:"items"`
+	NextCursor *string       `json:"nextCursor,omitempty"`
+	PrevCursor *string       `json:"prevCursor,omitempty"`
+	Total      *int64        `json:"total,omitempty"`
+}
+
 // TradingReader provides PostgreSQL-backed compatibility projections.
 type TradingReader interface {
 	Instruments(context.Context) ([]InstrumentView, error)
 	Orders(context.Context, string) ([]OrderView, error)
 	Positions(context.Context, string) ([]PositionView, error)
 	Balances(context.Context, string) ([]BalanceView, error)
+	Funding(context.Context, string, PageParams) (FundingPage, error)
 }

@@ -35,6 +35,7 @@
     "GET /v1/accounts/{accountId}/orders",
     "GET /v1/accounts/{accountId}/positions",
     "GET /v1/accounts/{accountId}/balances",
+    "GET /v1/accounts/{accountId}/funding",
     "GET /broker/v1/ping",
     "POST /broker/v1/echo",
     "POST /broker/v1/users",
@@ -54,7 +55,7 @@
   "openAPIArtifacts": {
     "openapi/admin-v1.json": "615e8a49f9e6a71f6a3ea0108bd71353bd5b7050cc79cee6b17d98af84a6aeb3",
     "openapi/broker-v1.json": "f8bd15b8c0c9fee3069f779dcbf9ade2cea82e7583804999f6c3e117a91fdac6",
-    "openapi/client-v1.json": "f3a49a95828bc5bbf13bca89c15400007bcaa61141b7eef210510b5e1432423d"
+    "openapi/client-v1.json": "dc711a2136e601408ea99f1cd7b67e2ec1f3fc7dfa46dbbc7f7f336955b5e085"
   },
   "platformSourceRevision": "50141367492be46ebf5623f6191a14b94af2f2bd",
   "protobufDescriptor": {

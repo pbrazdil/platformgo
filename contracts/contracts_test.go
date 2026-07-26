@@ -94,8 +94,13 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 	assertPointer(t, admin, "components", "securitySchemes", "bearer")
 
 	client := decodeDocument(t, documents["/v1/openapi.json"])
-	assertMethod(t, client, "/v1/accounts/{accountId}/funding", "get")
+	funding := assertMethod(t, client, "/v1/accounts/{accountId}/funding", "get")
 	assertPointer(t, client, "components", "schemas", "FundingView")
+	assertPointer(t, client, "components", "schemas", "FundingPage")
+	assertResponse(t, funding, "200")
+	if funding["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
+		t.Fatalf("funding contract status = %v", funding["x-platformgo-contract-status"])
+	}
 	order := assertMethod(t, client, "/v1/accounts/{accountId}/orders", "post")
 	parameters, ok := order["parameters"].([]any)
 	if !ok {
