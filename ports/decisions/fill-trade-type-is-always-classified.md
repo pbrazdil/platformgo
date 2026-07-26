@@ -20,8 +20,8 @@ Reachable current-Go fills retain their exact economic position effect across
 persistence, restart, reconciliation, and compatibility reads. This prevents a
 nullable legacy mirror artifact from weakening the deterministic classification
 or hiding corrupt durable state. The external fills route remains inactive; its
-eventual contract must preserve the classified current-Go behavior and document
-that `tradeType` is present for every returned fill.
+eventual HTTP field name, omission/nullability behavior, and activation remain
+unresolved until a separate contract gate.
 
 Options considered:
 1. Import the legacy nullable mirror behavior and allow a durable fill without a
