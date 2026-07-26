@@ -3962,6 +3962,241 @@ func TestBalanceProjectionHashV3MigrationGuardsCurrencyScaleConflicts(
 	assertFinalMigrationHistory(t, pool)
 }
 
+func TestBalanceProjectionHashV3MigrationRejectsMalformedCurrencyHistory(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	previous := migrationFilesThrough(
+		t,
+		"20260726000700_phase3_user_api_keys.up.sql",
+	)
+	current := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	seedReceipt := func(testingT *testing.T, decision string) {
+		testingT.Helper()
+		connection, err := pool.Acquire(ctx)
+		if err != nil {
+			testingT.Fatalf("acquire malformed receipt connection: %v", err)
+		}
+		defer connection.Release()
+		if _, err := connection.Exec(ctx, `
+			SELECT set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				false
+			)`); err != nil {
+			testingT.Fatalf("bind malformed receipt schema revision: %v", err)
+		}
+		if _, err := connection.Exec(ctx, `
+			INSERT INTO engine.input_receipts (
+				shard_id, input_id, stream_sequence, schema_version,
+				input_hash_version, input_hash, decision_hash_version,
+				decision_hash, resulting_state_hash, envelope, decision,
+				business_input_hash, business_input_hash_version
+			) VALUES (
+				8,
+				'00000000-0000-4000-8000-000000000833',
+				1,
+				1,
+				1,
+				decode(repeat('81', 32), 'hex'),
+				2,
+				decode(repeat('82', 32), 'hex'),
+				decode(repeat('83', 32), 'hex'),
+				'{}',
+				$1::jsonb,
+				decode(repeat('84', 32), 'hex'),
+				1
+			)`,
+			decision,
+		); err != nil {
+			testingT.Fatalf("seed malformed currency receipt: %v", err)
+		}
+	}
+
+	cases := []struct {
+		name     string
+		decision string
+	}{
+		{
+			name: "numeric currency",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":123,
+				"SettlementCurrencyScale":2
+			}]}`,
+		},
+		{
+			name: "null currency",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":null,
+				"SettlementCurrencyScale":2
+			}]}`,
+		},
+		{
+			name: "object currency",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":{},
+				"SettlementCurrencyScale":2
+			}]}`,
+		},
+		{
+			name: "array currency",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":[],
+				"SettlementCurrencyScale":2
+			}]}`,
+		},
+		{
+			name: "noncanonical currency",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"usdc",
+				"SettlementCurrencyScale":2
+			}]}`,
+		},
+		{
+			name: "missing currency",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrencyScale":2
+			}]}`,
+		},
+		{
+			name: "string scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":"2"
+			}]}`,
+		},
+		{
+			name: "boolean scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":true
+			}]}`,
+		},
+		{
+			name: "null scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":null
+			}]}`,
+		},
+		{
+			name: "object scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":{}
+			}]}`,
+		},
+		{
+			name: "array scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":[]
+			}]}`,
+		},
+		{
+			name: "fractional scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":2.5
+			}]}`,
+		},
+		{
+			name: "out of range scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC",
+				"SettlementCurrencyScale":19
+			}]}`,
+		},
+		{
+			name: "missing scale",
+			decision: `{"InstrumentChanges":[{
+				"SettlementCurrency":"USDC"
+			}]}`,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			resetDurableSchemas(t, pool)
+			if err := platformpostgres.NewMigrator(pool, previous).
+				MigrateAndProvision(ctx, 8); err != nil {
+				t.Fatalf("apply pre-v3 schema: %v", err)
+			}
+			seedReceipt(t, test.decision)
+			err := current.Migrate(ctx)
+			var postgresError *pgconn.PgError
+			if !errors.As(err, &postgresError) ||
+				postgresError.Code != "55000" {
+				t.Fatalf("malformed history error = %v, want 55000", err)
+			}
+			var (
+				lastMigration  string
+				receiptCount   int
+				markNotNull    bool
+				registryExists bool
+				triggerExists  bool
+			)
+			if err := pool.QueryRow(ctx, `
+				SELECT
+					(SELECT max(filename) FROM engine.schema_migrations),
+					(SELECT count(*) FROM engine.input_receipts),
+					(
+						SELECT attnotnull
+						  FROM pg_attribute
+						 WHERE attrelid = 'market.books'::regclass
+						   AND attname = 'mark_price'
+						   AND NOT attisdropped
+					),
+					to_regclass('trading.currency_scales') IS NOT NULL,
+					EXISTS (
+						SELECT 1
+						  FROM pg_trigger
+						 WHERE tgname =
+						       'instruments_require_currency_scale_consistency'
+						   AND NOT tgisinternal
+					)`,
+			).Scan(
+				&lastMigration,
+				&receiptCount,
+				&markNotNull,
+				&registryExists,
+				&triggerExists,
+			); err != nil {
+				t.Fatalf("inspect malformed-history rollback: %v", err)
+			}
+			if lastMigration !=
+				"20260726000700_phase3_user_api_keys.up.sql" ||
+				receiptCount != 1 ||
+				!markNotNull ||
+				registryExists ||
+				triggerExists {
+				t.Fatalf(
+					"rollback last=%q receipts=%d mark-not-null=%t registry=%t trigger=%t",
+					lastMigration,
+					receiptCount,
+					markNotNull,
+					registryExists,
+					triggerExists,
+				)
+			}
+		})
+	}
+
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(pool, previous).
+		MigrateAndProvision(ctx, 8); err != nil {
+		t.Fatalf("reapply pre-v3 schema for legacy null: %v", err)
+	}
+	seedReceipt(t, `{"InstrumentChanges":null}`)
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("migrate legacy null instrument changes: %v", err)
+	}
+	assertFinalMigrationHistory(t, pool)
+}
+
 func TestCurrencyScaleRegistrySerializesConcurrentFirstUse(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

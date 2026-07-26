@@ -51,23 +51,35 @@ BEGIN
                   THEN receipt.decision -> 'InstrumentChanges'
                   ELSE '[]'::jsonb
               END
-          ) AS change
+         ) AS change
          WHERE jsonb_typeof(change) <> 'object'
-            OR COALESCE(change ->> 'SettlementCurrency', '') = ''
-            OR CASE
-                   WHEN COALESCE(
-                       change ->> 'SettlementCurrencyScale',
-                       ''
-                   ) ~ '^[0-9]+$'
-                   THEN (change ->> 'SettlementCurrencyScale')::numeric
-                        NOT BETWEEN 0 AND 18
-                   ELSE true
-               END
+            OR jsonb_typeof(change -> 'SettlementCurrency')
+               IS DISTINCT FROM 'string'
+            OR COALESCE(change ->> 'SettlementCurrency', '')
+               !~ '^[A-Z0-9]{3,12}$'
+            OR jsonb_typeof(change -> 'SettlementCurrencyScale')
+               IS DISTINCT FROM 'number'
+            OR COALESCE(
+                change ->> 'SettlementCurrencyScale',
+                ''
+            ) !~ '^(0|[1-9]|1[0-8])$'
     ) THEN
         RAISE EXCEPTION USING
             ERRCODE = '55000',
             MESSAGE = 'instrument change history has an invalid currency identity',
             HINT = 'keep writers halted; preserve the database and resolve the malformed receipt through an owner-reviewed forward repair or restore/reset';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+          FROM trading.instruments
+         WHERE settlement_currency !~ '^[A-Z0-9]{3,12}$'
+            OR settlement_currency_scale NOT BETWEEN 0 AND 18
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'instrument catalog has an invalid currency identity',
+            HINT = 'keep writers halted; preserve the database and resolve the malformed catalog through an owner-reviewed forward repair or restore/reset';
     END IF;
 
     IF EXISTS (
@@ -119,7 +131,7 @@ END
 $$;
 
 CREATE TABLE trading.currency_scales (
-    currency text PRIMARY KEY CHECK (currency <> ''),
+    currency text PRIMARY KEY CHECK (currency ~ '^[A-Z0-9]{3,12}$'),
     scale smallint NOT NULL CHECK (scale BETWEEN 0 AND 18)
 );
 
