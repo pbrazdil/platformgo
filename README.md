@@ -71,6 +71,17 @@ fails closed on an injected orphan projection without repairing immutable
 history. Operational realtime lease time remains part of worker readiness, not
 an implicit wall-clock input to a durable engine fault.
 
+Terminal-only audit recovery is now also landed and separately accepted. A
+pending command and its in-progress idempotency record remain recoverable
+without manufacturing a terminal business receipt. The terminal retry commits
+the accepted command, completed idempotency state, one immutable receipt, one
+NETTING account projection, and its checkpoint atomically. Pre-commit rollback,
+fresh ownership recovery, same-sequence replay, later-sequence redelivery, and
+restart preserve exactly one terminal business fact and one account version;
+every other economic, event, funding, market, ledger, and realtime projection
+remains empty. The current Go command and receipt model is authoritative, and
+the legacy saga schema and scheduler are not imported.
+
 The client account-summary slice now implements authenticated
 `GET /v1/me/accounts`. It reads only the caller's complete durable account
 graph through the least-privilege API role, exposes the frozen camel-case
@@ -129,8 +140,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 62
-independently reviewed green source tests; 2,589 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 63
+independently reviewed green source tests; 2,588 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
@@ -144,7 +155,7 @@ This repository is not yet a production-capable replacement.
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
 | 2 — Durable execution | Complete | PostgreSQL 17 authority, immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
-| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, authenticated caller-scoped account summaries, and hash-only self-service API-key creation with encrypted durable replay, a PostgreSQL-authoritative owner cap, protected-client rate limiting, and an atomic audit fact. Funding, account-summary, and API-key implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first seven separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, same-statement filtered totals, a correlatable fill-to-order identity using the current Go `urn:xb:order:<UUID>` representation, exact classified side/trade-type projection, strict deterministic tuple pagination with stable filter-wide totals, per-position exact realized PnL/currency that keeps hedged legs isolated, and atomic fee-bearing order/fill settlement across rollback, retry, duplicate delivery, restart, and fail-closed reconciliation. Rejected-order durability is also landed and separately accepted using the deterministic current-Go transition: exact terminal reason, reservation release, duplicate/restart/reconciliation stability, decision-hash v3 balance authority, markless recovery, and monotonic currency scales. Current Go fill semantics and durable identities remain authoritative, and the external fills route remains inventory until its complete source contract is implemented and reviewed. |
+| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, authenticated caller-scoped account summaries, and hash-only self-service API-key creation with encrypted durable replay, a PostgreSQL-authoritative owner cap, protected-client rate limiting, and an atomic audit fact. Funding, account-summary, and API-key implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first seven separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, same-statement filtered totals, a correlatable fill-to-order identity using the current Go `urn:xb:order:<UUID>` representation, exact classified side/trade-type projection, strict deterministic tuple pagination with stable filter-wide totals, per-position exact realized PnL/currency that keeps hedged legs isolated, and atomic fee-bearing order/fill settlement across rollback, retry, duplicate delivery, restart, and fail-closed reconciliation. Terminal-only audit recovery is separately accepted through the current Go command/idempotency/receipt authority, including transaction rollback, duplicate delivery, restart, exact permitted-effect, and full durable-projection evidence. Rejected-order durability is also landed and separately accepted using the deterministic current-Go transition: exact terminal reason, reservation release, duplicate/restart/reconciliation stability, decision-hash v3 balance authority, markless recovery, and monotonic currency scales. Current Go fill semantics and durable identities remain authoritative, and the external fills route remains inventory until its complete source contract is implemented and reviewed. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
@@ -199,6 +210,16 @@ replay reproduces the final state hash. Injected orphan projection corruption
 fails readiness closed without repair. Its separate source acceptance records
 the owner-approved current-Go authority, while realtime lease timestamps remain
 operational readiness metadata rather than durable reconciliation input.
+The landed terminal-only audit slice additionally proves on PostgreSQL 17 that
+the recoverable pending command has no terminal business receipt, a
+post-persist/pre-commit fault leaves every terminal and economic projection
+absent, and the exact retry commits one accepted command, completed idempotency
+record, immutable receipt, NETTING account version, and checkpoint atomically.
+Same-sequence replay, later-sequence duplicate delivery, exact duplicate replay,
+and restart retain one terminal business fact while every forbidden economic,
+event, ledger, funding, market, and realtime projection remains empty. Its
+separate source acceptance records the owner-approved current-Go command and
+receipt authority without importing legacy saga storage.
 The client account-summary slice additionally has live PostgreSQL 17 HTTP
 proof through the least-privilege API role, cross-user isolation, exact full
 wire-shape assertions, and a contended additive-schema upgrade that rolls back
