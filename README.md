@@ -37,17 +37,22 @@ projection integrity, nanosecond keyset pagination, exact aggregation,
 least-privilege reads, populated-schema upgrade coverage, and separate
 source-port acceptance.
 
+The fill-history foundation is also landed: its indexed newest-execution read
+preserves the immutable engine execution time exactly, and its first
+source-derived behavior has separate port-ledger acceptance. The external
+fills route remains inventory.
+
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
   broker, gRPC, realtime, and deployment-role contracts;
-- complete, independently review, and land the current exact fill-history
-  compatibility slice;
-- obtain separate port-ledger acceptance for each source behavior proven by
-  subsequent implementation slices.
+- continue the remaining fill-history behaviors through complete, independently
+  reviewed compatibility slices;
+- obtain separate port-ledger acceptance for each additional source behavior
+  proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 49
-independently reviewed green source tests; 2,602 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 50
+independently reviewed green source tests; 2,601 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
@@ -61,7 +66,7 @@ This repository is not yet a production-capable replacement.
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
 | 2 — Durable execution | Complete | PostgreSQL 17 authority, immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
-| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, and exact client funding history with PostgreSQL 17 query-plan and migration evidence. Funding implementation and separate port-ledger acceptance are landed. A locally green candidate now starts the fill-history foundation with an indexed newest-execution read and exact engine-time fidelity; the external fills route remains inventory until its complete source contract is implemented and reviewed. |
+| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, and exact client funding history with PostgreSQL 17 query-plan and migration evidence. Funding implementation and separate port-ledger acceptance are landed. The fill-history foundation and its first separately accepted source behavior add an indexed newest-execution read with exact engine-time fidelity; the external fills route remains inventory until its complete source contract is implemented and reviewed. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
@@ -84,10 +89,10 @@ remaining Phase 3 scope.
 
 ## Next milestone
 
-Complete and land the exact fill-history vertical slice and its separate ledger
-acceptance, then continue the remaining frozen compatibility operations and
-worker roles through vertically narrow changes. Phase 4 begins only after the
-Phase 3 charter and release gates are fully satisfied.
+Continue the remaining fill-history behaviors through vertically narrow
+implementation and separate ledger-acceptance changes, then continue the
+remaining frozen compatibility operations and worker roles. Phase 4 begins
+only after the Phase 3 charter and release gates are fully satisfied.
 
 The authoritative scope and completion criteria are in
 `PROJECT_CHARTER.md`. Repository-wide execution rules are in `AGENTS.md`.
