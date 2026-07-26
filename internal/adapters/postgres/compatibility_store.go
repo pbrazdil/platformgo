@@ -1006,14 +1006,28 @@ func (store *CompatibilityStore) LatestFillExecution(
 		SELECT
 			fill.fill_id::text,
 			fill.order_id::text,
+			fill.side,
+			fill.position_effect,
 			fill.logical_time
 		  FROM trading.fills AS fill
 		 WHERE fill.account_id = $1
 		 ORDER BY fill.logical_time DESC, fill.fill_id DESC
 		 LIMIT 1`,
 		accountID,
-	).Scan(&view.FillID, &view.OrderID, &logicalTime); err != nil {
+	).Scan(
+		&view.FillID,
+		&view.OrderID,
+		&view.Side,
+		&view.TradeType,
+		&logicalTime,
+	); err != nil {
 		return edge.FillExecutionView{}, fmt.Errorf("read latest fill execution: %w", err)
+	}
+	if err := validateFillTradeType(view.TradeType); err != nil {
+		return edge.FillExecutionView{}, fmt.Errorf(
+			"read latest fill execution: %w",
+			err,
+		)
 	}
 	view.OrderID = "urn:xb:order:" + view.OrderID
 	view.FilledAt = time.Unix(0, logicalTime).UTC().Format(time.RFC3339Nano)
@@ -1068,6 +1082,8 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		SELECT
 			fill.fill_id::text,
 			fill.order_id::text,
+			fill.side,
+			fill.position_effect,
 			fill.logical_time,
 			count(*) OVER ()
 		  FROM trading.fills AS fill
@@ -1097,9 +1113,17 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		if err := rows.Scan(
 			&view.FillID,
 			&view.OrderID,
+			&view.Side,
+			&view.TradeType,
 			&logicalTime,
 			&total,
 		); err != nil {
+			return edge.FillExecutionPage{}, fmt.Errorf(
+				"scan filtered fill execution: %w",
+				err,
+			)
+		}
+		if err := validateFillTradeType(view.TradeType); err != nil {
 			return edge.FillExecutionPage{}, fmt.Errorf(
 				"scan filtered fill execution: %w",
 				err,
@@ -1114,6 +1138,19 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		return edge.FillExecutionPage{}, fmt.Errorf("filter fill executions: %w", err)
 	}
 	return page, nil
+}
+
+func validateFillTradeType(tradeType string) error {
+	switch engine.PositionEffect(tradeType) {
+	case engine.PositionEffectOpen,
+		engine.PositionEffectIncrease,
+		engine.PositionEffectReduce,
+		engine.PositionEffectFlip,
+		engine.PositionEffectClose:
+		return nil
+	default:
+		return fmt.Errorf("unsupported durable fill position effect %q", tradeType)
+	}
 }
 
 // Funding returns one exact, newest-first account funding page.
