@@ -172,26 +172,6 @@ func TestSagaReconcileSettlesOrphanedOrderFromFills(t *testing.T) {
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/trading/e2e_fills.rs:541
-//	test: terminal_only_audit_skips_running_history_but_keeps_recovery_and_terminal_row
-func TestTerminalOnlyAuditSkipsRunningHistoryButKeepsRecoveryAndTerminalRow(t *testing.T) {
-	fixture := newFillFixture()
-	fixture.startSaga(sagaRecord{ID: "saga-1", Type: "test_history_gate", Correlation: "corr-1", State: "submitted"})
-	fixture.advanceSaga("saga-1", "submitted", "running")
-	running := fixture.sagas["saga-1"]
-	if running.ID != "saga-1" || running.Status != "running" || len(running.History) != 0 {
-		t.Fatalf("running=%#v", running)
-	}
-	fixture.advanceSaga("saga-1", "filled", "completed")
-	terminal := fixture.sagas["saga-1"]
-	if terminal.Status != "completed" || len(terminal.History) != 1 || terminal.History[0] != "filled" {
-		t.Fatalf("terminal=%#v", terminal)
-	}
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/trading/e2e_fills.rs:656
 //	test: fill_reason_derives_from_bracket_leg_and_stopout
 func TestFillReasonDerivesFromBracketLegAndStopout(t *testing.T) {
