@@ -155,8 +155,10 @@ func Serve(ctx context.Context, config Config) error {
 		compatibilityStore,
 		authenticator,
 		application.IdentityConfig{
-			CommandReadiness:   commandReady,
-			MaxAPIKeysPerOwner: config.MaxAPIKeysPerOwner,
+			CommandReadiness: commandReady,
+			APIKeyReplayKeys: applicationReplayKeys(
+				config.APIKeyReplayKeys,
+			),
 		},
 	)
 	if err != nil {
@@ -239,6 +241,19 @@ func Serve(ctx context.Context, config Config) error {
 	}
 	shutdownServers(ctx, httpServer, grpcServer)
 	return nil
+}
+
+func applicationReplayKeys(
+	configured []APIKeyReplayKey,
+) []application.APIKeyReplayKey {
+	keys := make([]application.APIKeyReplayKey, len(configured))
+	for index, configuredKey := range configured {
+		keys[index] = application.APIKeyReplayKey{
+			ID:  configuredKey.ID,
+			Key: configuredKey.Key,
+		}
+	}
+	return keys
 }
 
 // RunWorkers runs each requested compatible handler until cancellation.

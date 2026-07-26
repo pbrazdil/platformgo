@@ -3088,8 +3088,10 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 	assertFinalMigrationHistory(t, pool)
 
 	var (
-		apiCanInsert  bool
-		apiCanExecute bool
+		apiCanInsert       bool
+		apiCanExecute      bool
+		apiCanUpdatePolicy bool
+		apiCanReadReplay   bool
 	)
 	if err := pool.QueryRow(ctx, `
 		SELECT
@@ -3100,20 +3102,47 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 			),
 			has_function_privilege(
 				'platformgo_api',
-				'identity.create_user_api_key(text,uuid,text,bytea,text,text[],timestamptz,uuid,text,integer,bigint)',
+				'identity.create_user_api_key(text,uuid,text,bytea,text,text[],uuid,text,text,bytea,text,bytea,bytea)',
 				'EXECUTE'
+			),
+			has_table_privilege(
+				'platformgo_api',
+				'identity.api_key_policy',
+				'UPDATE'
+			),
+			has_table_privilege(
+				'platformgo_api',
+				'identity.api_key_replays',
+				'SELECT'
 			)`,
-	).Scan(&apiCanInsert, &apiCanExecute); err != nil {
+	).Scan(
+		&apiCanInsert,
+		&apiCanExecute,
+		&apiCanUpdatePolicy,
+		&apiCanReadReplay,
+	); err != nil {
 		t.Fatalf("inspect API-key role boundary: %v", err)
 	}
-	if apiCanInsert || !apiCanExecute {
+	if apiCanInsert ||
+		!apiCanExecute ||
+		apiCanUpdatePolicy ||
+		apiCanReadReplay {
 		t.Fatalf(
-			"API-key role boundary = insert %t execute %t",
+			"API-key role boundary = insert %t execute %t policy-update %t replay-read %t",
 			apiCanInsert,
 			apiCanExecute,
+			apiCanUpdatePolicy,
+			apiCanReadReplay,
 		)
 	}
 
+	if _, err := pool.Exec(ctx, `
+		UPDATE identity.api_key_policy
+		   SET version = 2,
+		       max_active_per_owner = 1
+		 WHERE singleton`); err != nil {
+		t.Fatalf("set durable API-key test policy: %v", err)
+	}
 	if _, err := pool.Exec(ctx, `
 		SELECT identity.create_user_api_key(
 			'urn:xb:user:key-upgrade',
@@ -3122,14 +3151,59 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 			decode(repeat('01', 32), 'hex'),
 			'000000000701',
 			ARRAY['orders:write'],
-			'2026-07-26T07:01:00Z',
 			'00000000-0000-4000-8000-000000000702',
 			'request-upgrade-key',
-			25,
-			1
+			'upgrade-idempotency',
+			decode(repeat('02', 32), 'hex'),
+			'test-v1',
+			decode(repeat('03', 12), 'hex'),
+			decode(repeat('04', 17), 'hex')
 		)`,
 	); err != nil {
 		t.Fatalf("create API key through authority function: %v", err)
+	}
+	_, overCapErr := pool.Exec(ctx, `
+		SELECT identity.create_user_api_key(
+			'urn:xb:user:key-upgrade',
+			'00000000-0000-4000-8000-000000000703',
+			'over-cap-key',
+			decode(repeat('05', 32), 'hex'),
+			'000000000703',
+			ARRAY[]::text[],
+			'00000000-0000-4000-8000-000000000704',
+			'request-over-cap-key',
+			'over-cap-idempotency',
+			decode(repeat('06', 32), 'hex'),
+			'test-v1',
+			decode(repeat('07', 12), 'hex'),
+			decode(repeat('08', 17), 'hex')
+		)`)
+	var capError *pgconn.PgError
+	if !errors.As(overCapErr, &capError) || capError.Code != "P0001" {
+		t.Fatalf("durable owner-cap error = %v, want SQLSTATE P0001", overCapErr)
+	}
+	var (
+		auditConfigurationVersion int
+		auditEffectiveMax         int
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT
+			(detail->>'configurationVersion')::integer,
+			(detail->>'effectiveMaxActive')::integer
+		  FROM audit.events
+		 WHERE event_id = '00000000-0000-4000-8000-000000000702'`,
+	).Scan(
+		&auditConfigurationVersion,
+		&auditEffectiveMax,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if auditConfigurationVersion != 2 || auditEffectiveMax != 1 {
+		t.Fatalf(
+			"audit policy = version %d max %d",
+			auditConfigurationVersion,
+			auditEffectiveMax,
+		)
 	}
 	if _, err := pool.Exec(ctx, `
 		UPDATE identity.api_keys

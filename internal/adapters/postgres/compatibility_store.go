@@ -301,15 +301,39 @@ func (store *CompatibilityStore) CreateSession(
 	return nil
 }
 
-// CreateUserAPIKey atomically enforces the owner cap, stores only the secret
-// hash, and appends the corresponding audit fact.
+// ClaimClientRateLimit uses shared PostgreSQL authority across API replicas.
+func (store *CompatibilityStore) ClaimClientRateLimit(
+	ctx context.Context,
+	principal string,
+	at time.Time,
+) (bool, error) {
+	var allowed bool
+	if err := store.pool.QueryRow(ctx, `
+		SELECT identity.claim_client_rate_limit($1,$2)`,
+		principal,
+		at,
+	).Scan(&allowed); err != nil {
+		return false, fmt.Errorf("claim client rate limit: %w", err)
+	}
+	return allowed, nil
+}
+
+// CreateUserAPIKey atomically claims optional idempotency, enforces the
+// PostgreSQL-authoritative owner cap, stores only the secret hash, and appends
+// the corresponding audit fact.
 func (store *CompatibilityStore) CreateUserAPIKey(
 	ctx context.Context,
 	creation application.UserAPIKeyCreation,
-) error {
-	if _, err := store.pool.Exec(ctx, `
-		SELECT identity.create_user_api_key(
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
+) (application.UserAPIKeyCreationResult, error) {
+	var result application.UserAPIKeyCreationResult
+	if err := store.pool.QueryRow(ctx, `
+		SELECT
+			replayed,
+			replay_key_id,
+			response_nonce,
+			response_ciphertext
+		  FROM identity.create_user_api_key(
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
 		)`,
 		creation.OwnerUserID,
 		creation.APIKeyID.String(),
@@ -317,25 +341,38 @@ func (store *CompatibilityStore) CreateUserAPIKey(
 		creation.KeyHash[:],
 		creation.Prefix,
 		creation.Scopes,
-		creation.CreatedAt,
 		creation.AuditEventID.String(),
 		creation.RequestID,
-		creation.MaxActive,
-		creation.ConfigurationVersion,
+		creation.IdempotencyKey,
+		creation.RequestHash[:],
+		creation.ReplayKeyID,
+		creation.ReplayNonce,
+		creation.ReplayCiphertext,
+	).Scan(
+		&result.Replayed,
+		&result.ReplayKeyID,
+		&result.ReplayNonce,
+		&result.ReplayCiphertext,
 	); err != nil {
 		var postgresError *pgconn.PgError
 		switch {
 		case errors.As(err, &postgresError) &&
 			postgresError.Code == "P0001":
-			return edge.ErrConflict
+			return application.UserAPIKeyCreationResult{}, edge.ErrConflict
 		case errors.As(err, &postgresError) &&
 			postgresError.Code == "P0002":
-			return application.ErrIdentityNotFound
+			return application.UserAPIKeyCreationResult{},
+				application.ErrIdentityNotFound
+		case errors.As(err, &postgresError) &&
+			postgresError.Code == "P0003":
+			return application.UserAPIKeyCreationResult{},
+				edge.ErrIdempotencyConflict
 		default:
-			return fmt.Errorf("create user API key: %w", err)
+			return application.UserAPIKeyCreationResult{},
+				fmt.Errorf("create user API key: %w", err)
 		}
 	}
-	return nil
+	return result, nil
 }
 
 // BrokerEcho atomically stores or replays the exact principal-scoped response.

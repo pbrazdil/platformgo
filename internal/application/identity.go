@@ -2,6 +2,8 @@ package application
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -11,14 +13,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/upcomers-org/platformgo/internal/edge"
 	"github.com/upcomers-org/platformgo/internal/engine"
 	"golang.org/x/crypto/argon2"
+)
+
+var apiKeyReplayKeyIDPattern = regexp.MustCompile(
+	`^[A-Za-z0-9._-]{1,64}$`,
 )
 
 const (
@@ -27,8 +33,6 @@ const (
 	maxBrokerTokenTTL     = time.Hour
 	defaultBrokerTokenTTL = 15 * time.Minute
 	brokerIdempotencyTTL  = 24 * time.Hour
-	defaultMaxAPIKeys     = 25
-	maximumMaxAPIKeys     = 25
 )
 
 // ErrIdentityNotFound is returned by durable identity lookup ports.
@@ -59,22 +63,45 @@ type AccountRecord struct {
 // UserAPIKeyCreation is the complete non-secret durable mutation passed to
 // PostgreSQL. The plaintext token is intentionally absent.
 type UserAPIKeyCreation struct {
-	OwnerUserID          string
-	APIKeyID             engine.ID
-	Name                 string
-	KeyHash              [sha256.Size]byte
-	Prefix               string
-	Scopes               []string
-	CreatedAt            time.Time
-	AuditEventID         engine.ID
-	RequestID            string
-	MaxActive            int
-	ConfigurationVersion uint64
+	OwnerUserID      string
+	APIKeyID         engine.ID
+	Name             string
+	KeyHash          [sha256.Size]byte
+	Prefix           string
+	Scopes           []string
+	AuditEventID     engine.ID
+	RequestID        string
+	IdempotencyKey   string
+	RequestHash      [sha256.Size]byte
+	ReplayKeyID      string
+	ReplayNonce      []byte
+	ReplayCiphertext []byte
+}
+
+// UserAPIKeyCreationResult contains only authenticated encrypted replay
+// material. Replayed is false when this request created the durable effect.
+type UserAPIKeyCreationResult struct {
+	Replayed         bool
+	ReplayKeyID      string
+	ReplayNonce      []byte
+	ReplayCiphertext []byte
 }
 
 // UserAPIKeyStore atomically owns key persistence, cap enforcement, and audit.
 type UserAPIKeyStore interface {
-	CreateUserAPIKey(context.Context, UserAPIKeyCreation) error
+	ClaimClientRateLimit(context.Context, string, time.Time) (bool, error)
+	CreateUserAPIKey(
+		context.Context,
+		UserAPIKeyCreation,
+	) (UserAPIKeyCreationResult, error)
+}
+
+// APIKeyReplayKey is one AES-256-GCM key retained for bounded response replay.
+// The first configured key encrypts new responses; following keys decrypt
+// responses created before rotation.
+type APIKeyReplayKey struct {
+	ID  string
+	Key [32]byte
 }
 
 // IdentityStore is the durable identity boundary.
@@ -138,7 +165,7 @@ type IdentityConfig struct {
 	Entropy                    io.Reader
 	CommandReadiness           func(context.Context) error
 	AccountProvisioningTimeout time.Duration
-	MaxAPIKeysPerOwner         int
+	APIKeyReplayKeys           []APIKeyReplayKey
 }
 
 // Identity implements password login and broker identity delegation.
@@ -149,7 +176,8 @@ type Identity struct {
 	entropy          io.Reader
 	commandReadiness func(context.Context) error
 	accountTimeout   time.Duration
-	maxAPIKeys       int
+	replayKeyID      string
+	replayKeys       map[string]cipher.AEAD
 }
 
 // NewIdentity constructs the production identity application service.
@@ -170,20 +198,34 @@ func NewIdentity(
 	if config.AccountProvisioningTimeout <= 0 {
 		config.AccountProvisioningTimeout = 5 * time.Second
 	}
-	if config.MaxAPIKeysPerOwner == 0 {
-		config.MaxAPIKeysPerOwner = defaultMaxAPIKeys
+	replayKeys := make(map[string]cipher.AEAD, len(config.APIKeyReplayKeys))
+	for _, replayKey := range config.APIKeyReplayKeys {
+		if !apiKeyReplayKeyIDPattern.MatchString(replayKey.ID) {
+			return nil, errors.New("identity: API-key replay key ID is invalid")
+		}
+		if _, exists := replayKeys[replayKey.ID]; exists {
+			return nil, errors.New("identity: duplicate API-key replay key ID")
+		}
+		block, err := aes.NewCipher(replayKey.Key[:])
+		if err != nil {
+			return nil, fmt.Errorf("identity: API-key replay cipher: %w", err)
+		}
+		aead, err := cipher.NewGCM(block)
+		if err != nil {
+			return nil, fmt.Errorf("identity: API-key replay GCM: %w", err)
+		}
+		replayKeys[replayKey.ID] = aead
 	}
-	if config.MaxAPIKeysPerOwner < 0 ||
-		config.MaxAPIKeysPerOwner > maximumMaxAPIKeys {
-		return nil, errors.New(
-			"identity: API-key owner limit must be between 1 and 25",
-		)
+	activeReplayKeyID := ""
+	if len(config.APIKeyReplayKeys) > 0 {
+		activeReplayKeyID = config.APIKeyReplayKeys[0].ID
 	}
 	return &Identity{
 		store: store, signer: signer, clock: config.Clock, entropy: config.Entropy,
 		commandReadiness: config.CommandReadiness,
 		accountTimeout:   config.AccountProvisioningTimeout,
-		maxAPIKeys:       config.MaxAPIKeysPerOwner,
+		replayKeyID:      activeReplayKeyID,
+		replayKeys:       replayKeys,
 	}, nil
 }
 
@@ -270,11 +312,42 @@ func (identity *Identity) MyAccounts(
 	return accounts, nil
 }
 
+// CheckClientMutationRate applies the shared durable protected-client limiter
+// before credential entropy is consumed.
+func (identity *Identity) CheckClientMutationRate(
+	ctx context.Context,
+	principal edge.Principal,
+) error {
+	store, ok := identity.store.(UserAPIKeyStore)
+	if !ok {
+		return errors.New("identity API-key store is unavailable")
+	}
+	if principal.Subject == "" ||
+		principal.Audience != edge.AudienceClient ||
+		!strings.HasPrefix(principal.Subject, "urn:xb:user:") {
+		return edge.ErrUnauthorized
+	}
+	allowed, err := store.ClaimClientRateLimit(
+		ctx,
+		principal.Subject,
+		identity.clock.Now().UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("identity client rate limit: %w", err)
+	}
+	if !allowed {
+		return edge.ErrRateLimited
+	}
+	return nil
+}
+
 // CreateMyAPIKey returns one opaque credential while persisting only its hash.
+// An explicit Idempotency-Key replays the exact encrypted response.
 func (identity *Identity) CreateMyAPIKey(
 	ctx context.Context,
 	principal edge.Principal,
 	requestID string,
+	idempotencyKey string,
 	request edge.CreateAPIKeyRequest,
 ) (edge.APIKeyCreated, error) {
 	store, ok := identity.store.(UserAPIKeyStore)
@@ -283,33 +356,33 @@ func (identity *Identity) CreateMyAPIKey(
 			"identity API-key store is unavailable",
 		)
 	}
-	name := strings.TrimSpace(request.Name)
 	requestID = strings.TrimSpace(requestID)
 	if principal.Subject == "" ||
 		principal.Audience != edge.AudienceClient ||
 		!strings.HasPrefix(principal.Subject, "urn:xb:user:") ||
-		name == "" ||
-		name != request.Name ||
-		utf8.RuneCountInString(name) > 128 ||
+		request.Name == "" ||
 		requestID == "" ||
-		utf8.RuneCountInString(requestID) > 128 ||
-		len(request.Scopes) > 32 {
+		len(requestID) > 128 {
 		return edge.APIKeyCreated{}, edge.ErrInvalidRequest
 	}
-	scopes := make([]string, len(request.Scopes))
-	seenScopes := make(map[string]struct{}, len(request.Scopes))
-	for index, scope := range request.Scopes {
-		if scope == "" ||
-			scope != strings.TrimSpace(scope) ||
-			utf8.RuneCountInString(scope) > 128 {
-			return edge.APIKeyCreated{}, edge.ErrInvalidRequest
-		}
-		if _, exists := seenScopes[scope]; exists {
-			return edge.APIKeyCreated{}, edge.ErrInvalidRequest
-		}
-		seenScopes[scope] = struct{}{}
-		scopes[index] = scope
+	if identity.replayKeyID == "" {
+		return edge.APIKeyCreated{}, errors.New(
+			"identity API-key replay encryption is unavailable",
+		)
 	}
+	scopes := make([]string, len(request.Scopes))
+	copy(scopes, request.Scopes)
+	canonical, err := json.Marshal(struct {
+		Name   string   `json:"name"`
+		Scopes []string `json:"scopes"`
+	}{Name: request.Name, Scopes: scopes})
+	if err != nil {
+		return edge.APIKeyCreated{}, fmt.Errorf(
+			"identity create API key: canonical request: %w",
+			err,
+		)
+	}
+	requestHash := sha256.Sum256(canonical)
 
 	apiKeyID, err := identity.randomIdentityID()
 	if err != nil {
@@ -348,33 +421,151 @@ func (identity *Identity) CreateMyAPIKey(
 	prefix := fmt.Sprintf("%x", prefixBytes)
 	secret := fmt.Sprintf("%x", secretBytes)
 	keyHash := sha256.Sum256([]byte(secret))
-	now := identity.clock.Now().UTC()
-	if err := store.CreateUserAPIKey(ctx, UserAPIKeyCreation{
-		OwnerUserID:          principal.Subject,
-		APIKeyID:             apiKeyID,
-		Name:                 name,
-		KeyHash:              keyHash,
-		Prefix:               prefix,
-		Scopes:               scopes,
-		CreatedAt:            now,
-		AuditEventID:         auditEventID,
-		RequestID:            requestID,
-		MaxActive:            identity.maxAPIKeys,
-		ConfigurationVersion: 1,
-	}); err != nil {
-		if errors.Is(err, edge.ErrConflict) {
-			return edge.APIKeyCreated{}, edge.ErrConflict
-		}
-		return edge.APIKeyCreated{}, fmt.Errorf(
-			"identity create API key: %w",
-			err,
-		)
-	}
-	return edge.APIKeyCreated{
+	candidate := edge.APIKeyCreated{
 		ID:     "urn:xb:apikey:" + apiKeyID.String(),
 		Prefix: prefix,
 		Token:  "xbk_" + prefix + "." + secret,
-	}, nil
+	}
+	replayNonce, replayCiphertext, err := identity.encryptAPIKeyReplay(
+		principal.Subject,
+		idempotencyKey,
+		requestHash,
+		candidate,
+	)
+	if err != nil {
+		return edge.APIKeyCreated{}, err
+	}
+	stored, err := store.CreateUserAPIKey(ctx, UserAPIKeyCreation{
+		OwnerUserID:      principal.Subject,
+		APIKeyID:         apiKeyID,
+		Name:             request.Name,
+		KeyHash:          keyHash,
+		Prefix:           prefix,
+		Scopes:           scopes,
+		AuditEventID:     auditEventID,
+		RequestID:        requestID,
+		IdempotencyKey:   idempotencyKey,
+		RequestHash:      requestHash,
+		ReplayKeyID:      identity.replayKeyID,
+		ReplayNonce:      replayNonce,
+		ReplayCiphertext: replayCiphertext,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, edge.ErrConflict):
+			return edge.APIKeyCreated{}, edge.ErrConflict
+		case errors.Is(err, edge.ErrIdempotencyConflict):
+			return edge.APIKeyCreated{}, edge.ErrIdempotencyConflict
+		default:
+			return edge.APIKeyCreated{}, fmt.Errorf(
+				"identity create API key: %w",
+				err,
+			)
+		}
+	}
+	if !stored.Replayed {
+		return candidate, nil
+	}
+	return identity.decryptAPIKeyReplay(
+		principal.Subject,
+		idempotencyKey,
+		requestHash,
+		stored,
+	)
+}
+
+func (identity *Identity) encryptAPIKeyReplay(
+	owner string,
+	idempotencyKey string,
+	requestHash [sha256.Size]byte,
+	response edge.APIKeyCreated,
+) ([]byte, []byte, error) {
+	aead := identity.replayKeys[identity.replayKeyID]
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(identity.entropy, nonce); err != nil {
+		return nil, nil, fmt.Errorf(
+			"identity create API key: replay nonce entropy: %w",
+			err,
+		)
+	}
+	plaintext, err := json.Marshal(response)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"identity create API key: encode replay: %w",
+			err,
+		)
+	}
+	return nonce, aead.Seal(
+		nil,
+		nonce,
+		plaintext,
+		apiKeyReplayAAD(
+			owner,
+			idempotencyKey,
+			requestHash,
+			identity.replayKeyID,
+		),
+	), nil
+}
+
+func (identity *Identity) decryptAPIKeyReplay(
+	owner string,
+	idempotencyKey string,
+	requestHash [sha256.Size]byte,
+	stored UserAPIKeyCreationResult,
+) (edge.APIKeyCreated, error) {
+	aead, ok := identity.replayKeys[stored.ReplayKeyID]
+	if !ok {
+		return edge.APIKeyCreated{}, errors.New(
+			"identity create API key: replay key is unavailable",
+		)
+	}
+	plaintext, err := aead.Open(
+		nil,
+		stored.ReplayNonce,
+		stored.ReplayCiphertext,
+		apiKeyReplayAAD(
+			owner,
+			idempotencyKey,
+			requestHash,
+			stored.ReplayKeyID,
+		),
+	)
+	if err != nil {
+		return edge.APIKeyCreated{}, errors.New(
+			"identity create API key: replay authentication failed",
+		)
+	}
+	var response edge.APIKeyCreated
+	if err := json.Unmarshal(plaintext, &response); err != nil ||
+		response.ID == "" ||
+		response.Prefix == "" ||
+		response.Token == "" {
+		return edge.APIKeyCreated{}, errors.New(
+			"identity create API key: replay payload is invalid",
+		)
+	}
+	return response, nil
+}
+
+func apiKeyReplayAAD(
+	owner string,
+	idempotencyKey string,
+	requestHash [sha256.Size]byte,
+	replayKeyID string,
+) []byte {
+	aad := make(
+		[]byte,
+		0,
+		len(owner)+len(idempotencyKey)+len(replayKeyID)+sha256.Size+3,
+	)
+	aad = append(aad, owner...)
+	aad = append(aad, 0)
+	aad = append(aad, idempotencyKey...)
+	aad = append(aad, 0)
+	aad = append(aad, replayKeyID...)
+	aad = append(aad, 0)
+	return append(aad, requestHash[:]...)
 }
 
 func (identity *Identity) randomIdentityID() (engine.ID, error) {

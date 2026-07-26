@@ -123,19 +123,38 @@ func TestClientCreatesOwnAPIKey(t *testing.T) {
 	if strings.Contains(string(storedHash), created.Token) {
 		t.Fatal("stored API-key hash contains the returned token")
 	}
-	sourceCompatible := createMyAPIKey(
-		t,
-		serverURL,
-		accessToken,
-		`{"name":" bad ","scopes":["orders:write","orders:write"]}`,
-		"request-source-compatible-key",
-	)
-	if sourceCompatible.status != http.StatusCreated {
-		t.Fatalf(
-			"source-compatible status = %d, body = %s",
-			sourceCompatible.status,
-			sourceCompatible.body,
+	manyScopes := make([]string, 33)
+	for index := range manyScopes {
+		manyScopes[index] = "scope-" + string(rune('a'+index))
+	}
+	for index, request := range []edge.CreateAPIKeyRequest{
+		{
+			Name:   " bad ",
+			Scopes: []string{"orders:write", "orders:write"},
+		},
+		{Name: strings.Repeat("x", 129)},
+		{Name: "many-scopes", Scopes: manyScopes},
+		{Name: "empty-scope", Scopes: []string{""}},
+	} {
+		encoded, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sourceCompatible := createMyAPIKey(
+			t,
+			serverURL,
+			accessToken,
+			string(encoded),
+			"request-source-compatible-"+string(rune('a'+index)),
 		)
+		if sourceCompatible.status != http.StatusCreated {
+			t.Fatalf(
+				"source-compatible case %d status = %d, body = %s",
+				index,
+				sourceCompatible.status,
+				sourceCompatible.body,
+			)
+		}
 	}
 	var compatibleCount int
 	if err := admin.QueryRow(ctx, `
@@ -145,9 +164,9 @@ func TestClientCreatesOwnAPIKey(t *testing.T) {
 	).Scan(&compatibleCount); err != nil {
 		t.Fatal(err)
 	}
-	if compatibleCount != 2 {
+	if compatibleCount != 5 {
 		t.Fatalf(
-			"key count after source-compatible request = %d, want 2",
+			"key count after source-compatible requests = %d, want 5",
 			compatibleCount,
 		)
 	}
@@ -163,29 +182,86 @@ func TestUserAPIKeyCreationReplaysOneDurableCredential(t *testing.T) {
 	defer apiPool.Close()
 	accessToken := loginMyAPIKeyOwner(t, serverURL)
 
-	first := createMyAPIKeyWithIdempotency(
+	authenticator := newMyAPIKeyAuthenticator(t)
+	faultStore := &postCommitUnknownAPIKeyStore{
+		CompatibilityStore: platformpostgres.NewCompatibilityStore(apiPool),
+	}
+	faultServerURL := newMyAPIKeyServer(
 		t,
-		serverURL,
+		faultStore,
+		authenticator,
+		[]application.APIKeyReplayKey{testAPIKeyReplayKey("old-v1", 1)},
+	)
+	lost := createMyAPIKeyWithIdempotency(
+		t,
+		faultServerURL,
 		accessToken,
 		`{"name":"replay-bot","scopes":["orders:write"]}`,
 		"request-replay-first",
 		"create-replay-bot",
 	)
-	replay := createMyAPIKeyWithIdempotency(
+	if lost.status != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"post-commit unknown status = %d, body = %s",
+			lost.status,
+			lost.body,
+		)
+	}
+
+	missingRotationKeyURL := newMyAPIKeyServer(
 		t,
-		serverURL,
+		platformpostgres.NewCompatibilityStore(apiPool),
+		authenticator,
+		[]application.APIKeyReplayKey{testAPIKeyReplayKey("new-v2", 2)},
+	)
+	unrecoverable := createMyAPIKeyWithIdempotency(
+		t,
+		missingRotationKeyURL,
+		accessToken,
+		`{"name":"replay-bot","scopes":["orders:write"]}`,
+		"request-replay-missing-key",
+		"create-replay-bot",
+	)
+	if unrecoverable.status != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"missing rotation key status = %d, body = %s",
+			unrecoverable.status,
+			unrecoverable.body,
+		)
+	}
+
+	recoveryServerURL := newMyAPIKeyServer(
+		t,
+		platformpostgres.NewCompatibilityStore(apiPool),
+		authenticator,
+		[]application.APIKeyReplayKey{
+			testAPIKeyReplayKey("new-v2", 2),
+			testAPIKeyReplayKey("old-v1", 1),
+		},
+	)
+	recovered := createMyAPIKeyWithIdempotency(
+		t,
+		recoveryServerURL,
 		accessToken,
 		`{"name":"replay-bot","scopes":["orders:write"]}`,
 		"request-replay-second",
 		"create-replay-bot",
 	)
-	if first.status != http.StatusCreated ||
+	replay := createMyAPIKeyWithIdempotency(
+		t,
+		recoveryServerURL,
+		accessToken,
+		`{"name":"replay-bot","scopes":["orders:write"]}`,
+		"request-replay-third",
+		"create-replay-bot",
+	)
+	if recovered.status != http.StatusCreated ||
 		replay.status != http.StatusCreated ||
-		first.body != replay.body {
+		recovered.body != replay.body {
 		t.Fatalf(
-			"idempotent responses = first %d %q replay %d %q",
-			first.status,
-			first.body,
+			"idempotent responses = recovered %d %q replay %d %q",
+			recovered.status,
+			recovered.body,
 			replay.status,
 			replay.body,
 		)
@@ -193,7 +269,7 @@ func TestUserAPIKeyCreationReplaysOneDurableCredential(t *testing.T) {
 
 	conflict := createMyAPIKeyWithIdempotency(
 		t,
-		serverURL,
+		recoveryServerURL,
 		accessToken,
 		`{"name":"changed-bot","scopes":["orders:write"]}`,
 		"request-replay-conflict",
@@ -205,6 +281,76 @@ func TestUserAPIKeyCreationReplaysOneDurableCredential(t *testing.T) {
 			conflict.status,
 			conflict.body,
 		)
+	}
+
+	const duplicateDeliveries = 8
+	type deliveryResult struct {
+		status int
+		body   string
+		err    error
+	}
+	start := make(chan struct{})
+	deliveries := make(chan deliveryResult, duplicateDeliveries)
+	var wait sync.WaitGroup
+	for range duplicateDeliveries {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			request, err := http.NewRequestWithContext(
+				context.Background(),
+				http.MethodPost,
+				recoveryServerURL+"/v1/me/api-keys",
+				strings.NewReader(
+					`{"name":"concurrent-bot","scopes":["orders:read"]}`,
+				),
+			)
+			if err != nil {
+				deliveries <- deliveryResult{err: err}
+				return
+			}
+			request.Header.Set("content-type", "application/json")
+			request.Header.Set("authorization", "Bearer "+accessToken)
+			request.Header.Set("idempotency-key", "create-concurrent-bot")
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				deliveries <- deliveryResult{err: err}
+				return
+			}
+			var raw bytes.Buffer
+			_, readErr := raw.ReadFrom(response.Body)
+			_ = response.Body.Close()
+			deliveries <- deliveryResult{
+				status: response.StatusCode,
+				body:   raw.String(),
+				err:    readErr,
+			}
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(deliveries)
+	var concurrentBody string
+	for delivery := range deliveries {
+		if delivery.err != nil {
+			t.Fatal(delivery.err)
+		}
+		if delivery.status != http.StatusCreated {
+			t.Fatalf(
+				"duplicate delivery status = %d, body = %s",
+				delivery.status,
+				delivery.body,
+			)
+		}
+		if concurrentBody == "" {
+			concurrentBody = delivery.body
+		} else if delivery.body != concurrentBody {
+			t.Fatalf(
+				"concurrent replay body = %q, want %q",
+				delivery.body,
+				concurrentBody,
+			)
+		}
 	}
 
 	var (
@@ -221,7 +367,7 @@ func TestUserAPIKeyCreationReplaysOneDurableCredential(t *testing.T) {
 	).Scan(&keyCount, &auditCount, &replayCount); err != nil {
 		t.Fatal(err)
 	}
-	if keyCount != 1 || auditCount != 1 || replayCount != 1 {
+	if keyCount != 2 || auditCount != 2 || replayCount != 2 {
 		t.Fatalf(
 			"durable replay state = keys %d audits %d replays %d",
 			keyCount,
@@ -230,19 +376,25 @@ func TestUserAPIKeyCreationReplaysOneDurableCredential(t *testing.T) {
 		)
 	}
 
-	var plaintextLeaks int
-	if err := admin.QueryRow(ctx, `
-		SELECT
-			(count(*) FILTER (
-				WHERE convert_from(response_ciphertext, 'UTF8')
-				      LIKE '%xbk_%'
-			))
-		  FROM identity.api_key_replays`,
-	).Scan(&plaintextLeaks); err != nil {
+	rows, err := admin.Query(ctx, `
+		SELECT response_ciphertext
+		  FROM identity.api_key_replays`)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if plaintextLeaks != 0 {
-		t.Fatalf("encrypted replay rows containing plaintext token = %d", plaintextLeaks)
+	defer rows.Close()
+	for rows.Next() {
+		var encryptedReplay []byte
+		if err := rows.Scan(&encryptedReplay); err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(encryptedReplay, []byte(recovered.created.Token)) ||
+			bytes.Contains(encryptedReplay, []byte("xbk_")) {
+			t.Fatal("encrypted replay contains plaintext token material")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -260,6 +412,26 @@ func TestUserAPIKeyCreationIsRateLimitedPerPrincipal(t *testing.T) {
 		       client_rate_limit_window_seconds = 60,
 		       version = version + 1
 		 WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, `
+		INSERT INTO identity.users (
+			user_id,
+			login,
+			normalized_login,
+			email,
+			normalized_email,
+			password_hash
+		)
+		SELECT
+			'urn:xb:user:second-owner',
+			'secondtrader',
+			'secondtrader',
+			'second@xb.local',
+			'second@xb.local',
+			password_hash
+		  FROM identity.users
+		 WHERE user_id = 'urn:xb:user:bot-owner'`); err != nil {
 		t.Fatal(err)
 	}
 	accessToken := loginMyAPIKeyOwner(t, serverURL)
@@ -281,9 +453,15 @@ func TestUserAPIKeyCreationIsRateLimitedPerPrincipal(t *testing.T) {
 			)
 		}
 	}
+	otherServerURL := newMyAPIKeyServer(
+		t,
+		platformpostgres.NewCompatibilityStore(apiPool),
+		newMyAPIKeyAuthenticator(t),
+		[]application.APIKeyReplayKey{testAPIKeyReplayKey("test-v1", 1)},
+	)
 	limited := createMyAPIKey(
 		t,
-		serverURL,
+		otherServerURL,
 		accessToken,
 		`{"name":"rate-bot-c"}`,
 		"request-rate-c",
@@ -293,6 +471,25 @@ func TestUserAPIKeyCreationIsRateLimitedPerPrincipal(t *testing.T) {
 			"rate-limited status = %d, body = %s",
 			limited.status,
 			limited.body,
+		)
+	}
+	secondAccessToken := loginMyAPIKey(
+		t,
+		serverURL,
+		"secondtrader",
+	)
+	isolated := createMyAPIKey(
+		t,
+		serverURL,
+		secondAccessToken,
+		`{"name":"second-owner-bot"}`,
+		"request-second-owner",
+	)
+	if isolated.status != http.StatusCreated {
+		t.Fatalf(
+			"second owner status = %d, body = %s",
+			isolated.status,
+			isolated.body,
 		)
 	}
 	var (
@@ -307,7 +504,7 @@ func TestUserAPIKeyCreationIsRateLimitedPerPrincipal(t *testing.T) {
 	).Scan(&keyCount, &auditCount); err != nil {
 		t.Fatal(err)
 	}
-	if keyCount != 2 || auditCount != 2 {
+	if keyCount != 3 || auditCount != 3 {
 		t.Fatalf(
 			"rate-limited durable state = keys %d audits %d",
 			keyCount,
@@ -564,6 +761,30 @@ type myAPIKeyHTTPResult struct {
 	created edge.APIKeyCreated
 }
 
+type postCommitUnknownAPIKeyStore struct {
+	*platformpostgres.CompatibilityStore
+	mu     sync.Mutex
+	failed bool
+}
+
+func (store *postCommitUnknownAPIKeyStore) CreateUserAPIKey(
+	ctx context.Context,
+	creation application.UserAPIKeyCreation,
+) (application.UserAPIKeyCreationResult, error) {
+	result, err := store.CompatibilityStore.CreateUserAPIKey(ctx, creation)
+	if err != nil {
+		return application.UserAPIKeyCreationResult{}, err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if !store.failed {
+		store.failed = true
+		return application.UserAPIKeyCreationResult{},
+			errors.New("injected unknown outcome after commit")
+	}
+	return result, nil
+}
+
 func createMyAPIKey(
 	t *testing.T,
 	serverURL string,
@@ -646,6 +867,16 @@ func newMyAPIKeyFixture(
 		admin.Close()
 		t.Fatal(err)
 	}
+	if _, err := admin.Exec(ctx, `
+		UPDATE identity.api_key_policy
+		   SET max_active_per_owner = $1,
+		       version = version + 1
+		 WHERE singleton`,
+		maxKeys,
+	); err != nil {
+		admin.Close()
+		t.Fatal(err)
+	}
 	passwordHash, err := application.HashPassword(
 		"trade-password",
 		bytes.NewReader(bytes.Repeat([]byte{31}, 16)),
@@ -680,26 +911,44 @@ func newMyAPIKeyFixture(
 		admin.Close()
 		t.Fatal(err)
 	}
+	authenticator := newMyAPIKeyAuthenticator(t)
+	store := platformpostgres.NewCompatibilityStore(apiPool)
+	serverURL := newMyAPIKeyServer(
+		t,
+		store,
+		authenticator,
+		[]application.APIKeyReplayKey{testAPIKeyReplayKey("test-v1", 1)},
+	)
+	return ctx, admin, apiPool, serverURL
+}
+
+func newMyAPIKeyAuthenticator(t *testing.T) *edge.HMACAuthenticator {
+	t.Helper()
 	authenticator, err := edge.NewHMACAuthenticator(edge.HMACAuthenticatorConfig{
 		ClientTokenSecret: []byte("phase3-my-api-keys-client-secret"),
 	})
 	if err != nil {
-		apiPool.Close()
-		admin.Close()
 		t.Fatal(err)
 	}
-	store := platformpostgres.NewCompatibilityStore(apiPool)
+	return authenticator
+}
+
+func newMyAPIKeyServer(
+	t *testing.T,
+	store application.IdentityStore,
+	authenticator *edge.HMACAuthenticator,
+	replayKeys []application.APIKeyReplayKey,
+) string {
+	t.Helper()
 	identity, err := application.NewIdentity(
 		store,
 		authenticator,
 		application.IdentityConfig{
-			Entropy:            &incrementingReader{},
-			MaxAPIKeysPerOwner: maxKeys,
+			Entropy:          &incrementingReader{},
+			APIKeyReplayKeys: replayKeys,
 		},
 	)
 	if err != nil {
-		apiPool.Close()
-		admin.Close()
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(edge.NewServer(edge.ServerConfig{
@@ -707,16 +956,32 @@ func newMyAPIKeyFixture(
 		Identity:      identity,
 	}).Handler())
 	t.Cleanup(server.Close)
-	return ctx, admin, apiPool, server.URL
+	return server.URL
+}
+
+func testAPIKeyReplayKey(id string, seed byte) application.APIKeyReplayKey {
+	key := application.APIKeyReplayKey{ID: id}
+	for index := range key.Key {
+		key.Key[index] = seed + byte(index)
+	}
+	return key
 }
 
 func loginMyAPIKeyOwner(t *testing.T, serverURL string) string {
+	return loginMyAPIKey(t, serverURL, "bottrader")
+}
+
+func loginMyAPIKey(
+	t *testing.T,
+	serverURL string,
+	login string,
+) string {
 	t.Helper()
 	response := requestJSON(
 		t,
 		http.MethodPost,
 		serverURL+"/v1/auth/login",
-		`{"login":"bottrader","password":"trade-password"}`,
+		`{"login":"`+login+`","password":"trade-password"}`,
 		nil,
 	)
 	var authenticated edge.LoginResponse

@@ -221,6 +221,29 @@ func (server *Server) handleCreateMyAPIKey(
 		)
 		return
 	}
+	if err := server.identity.CheckClientMutationRate(
+		request.Context(),
+		principal,
+	); err != nil {
+		if errors.Is(err, ErrRateLimited) {
+			writeError(
+				writer,
+				request,
+				http.StatusTooManyRequests,
+				"rate_limited",
+				"client request rate limit reached",
+			)
+			return
+		}
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"identity unavailable",
+		)
+		return
+	}
 	var body CreateAPIKeyRequest
 	if err := decodeJSON(request.Body, &body); err != nil {
 		writeError(
@@ -236,6 +259,7 @@ func (server *Server) handleCreateMyAPIKey(
 		request.Context(),
 		principal,
 		request.Header.Get("x-request-id"),
+		request.Header.Get("idempotency-key"),
 		body,
 	)
 	switch {
@@ -246,6 +270,14 @@ func (server *Server) handleCreateMyAPIKey(
 			http.StatusBadRequest,
 			"invalid_request",
 			"invalid API-key request",
+		)
+	case errors.Is(err, ErrIdempotencyConflict):
+		writeError(
+			writer,
+			request,
+			http.StatusConflict,
+			"idempotency_conflict",
+			"idempotency key conflicts with another request",
 		)
 	case errors.Is(err, ErrConflict):
 		writeError(

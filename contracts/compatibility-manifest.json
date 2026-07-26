@@ -1,7 +1,7 @@
 {
   "environmentKeys": [
     "UZO_AUTH_CLIENT_TOKEN_SECRET",
-    "UZO_AUTH_MAX_API_KEYS_PER_OWNER",
+    "UZO_AUTH_API_KEY_REPLAY_KEYS",
     "UZO_BROKER_API_KEYS",
     "UZO_CORS_ALLOWED_ORIGINS",
     "UZO_DATABASE_URL",
@@ -58,7 +58,7 @@
   "openAPIArtifacts": {
     "openapi/admin-v1.json": "615e8a49f9e6a71f6a3ea0108bd71353bd5b7050cc79cee6b17d98af84a6aeb3",
     "openapi/broker-v1.json": "f8bd15b8c0c9fee3069f779dcbf9ade2cea82e7583804999f6c3e117a91fdac6",
-    "openapi/client-v1.json": "f6b8db80df5f70833b8fadbdf8be9a58bf391f4876b797d4eef6d97323ba5f65"
+    "openapi/client-v1.json": "69b3435651f9f1916c47aeb4d4984faa3bc6f6bc8a99baab37474442c9dc910d"
   },
   "platformSourceRevision": "50141367492be46ebf5623f6191a14b94af2f2bd",
   "protobufDescriptor": {

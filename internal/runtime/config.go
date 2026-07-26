@@ -3,11 +3,13 @@ package runtime
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +25,8 @@ const (
 	defaultHealthAddress = "0.0.0.0:8081"
 )
 
+var apiKeyReplayKeyID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
 // Config is the deployment-role configuration loaded from frozen environment
 // keys. Secrets are never included in its formatted errors.
 type Config struct {
@@ -35,7 +39,7 @@ type Config struct {
 	AllowedOrigin         string
 	TrustedProxies        []netip.Prefix
 	ClientTokenSecret     []byte
-	MaxAPIKeysPerOwner    int
+	APIKeyReplayKeys      []APIKeyReplayKey
 	BrokerCredentials     []edge.BrokerCredential
 	CentrifugoAPIURL      string
 	CentrifugoAPIKey      string
@@ -51,6 +55,18 @@ type brokerEnvironment struct {
 	Scopes      []string `json:"scopes"`
 	IPAllowlist []string `json:"ipAllowlist"`
 	ExpiresAt   string   `json:"expiresAt"`
+}
+
+// APIKeyReplayKey is one externally supplied AES-256-GCM replay key. The first
+// entry is active; following entries remain available during rotation.
+type APIKeyReplayKey struct {
+	ID  string
+	Key [32]byte
+}
+
+type apiKeyReplayEnvironment struct {
+	ID  string `json:"id"`
+	Key string `json:"key"`
 }
 
 // LoadConfig reads the Phase 3 deployment environment.
@@ -79,15 +95,11 @@ func loadConfig(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	maxAPIKeys, err := unsignedValue(
-		getenv,
-		"UZO_AUTH_MAX_API_KEYS_PER_OWNER",
-		25,
+	replayKeys, err := parseAPIKeyReplayKeys(
+		getenv("UZO_AUTH_API_KEY_REPLAY_KEYS"),
 	)
-	if err != nil || maxAPIKeys == 0 || maxAPIKeys > 25 {
-		return Config{}, errors.New(
-			"UZO_AUTH_MAX_API_KEYS_PER_OWNER must be between 1 and 25",
-		)
+	if err != nil {
+		return Config{}, err
 	}
 	return Config{
 		DatabaseURL:           getenv("UZO_DATABASE_URL"),
@@ -99,7 +111,7 @@ func loadConfig(getenv func(string) string) (Config, error) {
 		AllowedOrigin:         valueOrDefault(getenv, "UZO_CORS_ALLOWED_ORIGINS", "*"),
 		TrustedProxies:        trustedProxies,
 		ClientTokenSecret:     []byte(getenv("UZO_AUTH_CLIENT_TOKEN_SECRET")),
-		MaxAPIKeysPerOwner:    int(maxAPIKeys),
+		APIKeyReplayKeys:      replayKeys,
 		BrokerCredentials:     brokers,
 		CentrifugoAPIURL:      getenv("UZO_REALTIME_API_URL"),
 		CentrifugoAPIKey:      getenv("UZO_REALTIME_API_KEY"),
@@ -107,6 +119,49 @@ func loadConfig(getenv func(string) string) (Config, error) {
 		CentrifugoTokenTTL:    tokenTTL,
 		ShardID:               engine.ShardID(shard),
 	}, nil
+}
+
+func parseAPIKeyReplayKeys(raw string) ([]APIKeyReplayKey, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var encoded []apiKeyReplayEnvironment
+	if err := json.Unmarshal([]byte(raw), &encoded); err != nil {
+		return nil, errors.New(
+			"UZO_AUTH_API_KEY_REPLAY_KEYS must be valid JSON",
+		)
+	}
+	keys := make([]APIKeyReplayKey, 0, len(encoded))
+	seen := make(map[string]struct{}, len(encoded))
+	for _, value := range encoded {
+		if !apiKeyReplayKeyID.MatchString(value.ID) {
+			return nil, errors.New(
+				"UZO_AUTH_API_KEY_REPLAY_KEYS contains an invalid key ID",
+			)
+		}
+		if _, exists := seen[value.ID]; exists {
+			return nil, errors.New(
+				"UZO_AUTH_API_KEY_REPLAY_KEYS contains a duplicate key ID",
+			)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(value.Key)
+		if err != nil || len(decoded) != 32 {
+			return nil, errors.New(
+				"UZO_AUTH_API_KEY_REPLAY_KEYS must contain base64 AES-256 keys",
+			)
+		}
+		var key APIKeyReplayKey
+		key.ID = value.ID
+		copy(key.Key[:], decoded)
+		keys = append(keys, key)
+		seen[value.ID] = struct{}{}
+	}
+	if len(keys) == 0 {
+		return nil, errors.New(
+			"UZO_AUTH_API_KEY_REPLAY_KEYS must contain at least one key",
+		)
+	}
+	return keys, nil
 }
 
 func parseTrustedProxies(value string) ([]netip.Prefix, error) {
@@ -225,6 +280,9 @@ func (config Config) ValidateFor(command string) error {
 	case "serve":
 		if len(config.ClientTokenSecret) < 32 {
 			missing = append(missing, "UZO_AUTH_CLIENT_TOKEN_SECRET")
+		}
+		if len(config.APIKeyReplayKeys) == 0 {
+			missing = append(missing, "UZO_AUTH_API_KEY_REPLAY_KEYS")
 		}
 		if config.CentrifugoAPIURL == "" {
 			missing = append(missing, "UZO_REALTIME_API_URL")

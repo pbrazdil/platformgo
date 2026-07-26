@@ -164,7 +164,8 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "security": "bearer",
     },
     ("POST", "/v1/me/api-keys"): {
-        "statuses": [201, 400, 401, 409, 503],
+        "statuses": [201, 400, 401, 409, 429, 503],
+        "idempotency": True,
         "request": "CreateAPIKeyRequest",
         "success": "APIKeyCreated",
         "security": "bearer",
@@ -242,6 +243,7 @@ def response(
         403: "Forbidden",
         404: "Not found",
         409: "Idempotency conflict",
+        429: "Rate limited",
         503: "Dependency unavailable",
     }
     value: dict[str, object] = {"description": descriptions[status]}
@@ -393,16 +395,10 @@ def schemas(client: bool) -> dict[str, object]:
                 "name": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 128,
                 },
                 "scopes": {
                     "type": "array",
-                    "maxItems": 32,
-                    "items": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 128,
-                    },
+                    "items": {"type": "string"},
                     "default": [],
                 },
                 "ipAllowlist": {

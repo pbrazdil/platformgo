@@ -194,18 +194,14 @@
             "type": "array"
           },
           "name": {
-            "maxLength": 128,
             "minLength": 1,
             "type": "string"
           },
           "scopes": {
             "default": [],
             "items": {
-              "maxLength": 128,
-              "minLength": 1,
               "type": "string"
             },
-            "maxItems": 32,
             "type": "array"
           },
           "tenantId": {
@@ -1425,6 +1421,16 @@
     "/v1/me/api-keys": {
       "post": {
         "operationId": "post_v1_me_api-keys",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1475,6 +1481,16 @@
               }
             },
             "description": "Active API-key limit reached"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rate limited"
           },
           "503": {
             "content": {

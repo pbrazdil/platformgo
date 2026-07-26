@@ -199,6 +199,12 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 			netip.MustParsePrefix("::1/128"),
 		},
 		ClientTokenSecret: []byte("0123456789abcdef0123456789abcdef"),
+		APIKeyReplayKeys: []platformruntime.APIKeyReplayKey{{
+			ID: "test-v1",
+			Key: [32]byte{
+				1, 2, 3, 4, 5, 6, 7, 8,
+			},
+		}},
 		BrokerCredentials: []edge.BrokerCredential{
 			{
 				Prefix: "xbk_full", SecretHash: edge.HashBrokerSecret("full-secret"),

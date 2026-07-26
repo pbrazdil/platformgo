@@ -21,6 +21,7 @@ var (
 	ErrInvalidRequest      = errors.New("invalid request")
 	ErrNotFound            = errors.New("not found")
 	ErrConflict            = errors.New("conflict")
+	ErrRateLimited         = errors.New("rate limited")
 	ErrIdempotencyConflict = errors.New("idempotency key conflicts with another request")
 )
 
@@ -226,9 +227,11 @@ type IdentityService interface {
 	Login(context.Context, LoginRequest) (LoginResponse, error)
 	Profile(context.Context, Principal) (UserProfile, error)
 	MyAccounts(context.Context, Principal) ([]MyAccountView, error)
+	CheckClientMutationRate(context.Context, Principal) error
 	CreateMyAPIKey(
 		context.Context,
 		Principal,
+		string,
 		string,
 		CreateAPIKeyRequest,
 	) (APIKeyCreated, error)

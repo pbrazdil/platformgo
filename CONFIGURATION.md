@@ -57,14 +57,36 @@ Existing environment names required for drop-in deployment are retained or expli
 
 Freeze the environment key list in the compatibility manifest.
 
-### Phase 3 user API-key limit
+### Phase 3 user API-key authority
 
-`UZO_AUTH_MAX_API_KEYS_PER_OWNER` is a non-secret positive integer with a
-default and hard maximum of `25`, matching the pinned platform default. The
-value is parsed once at API startup and passed immutably to the identity
-application service. PostgreSQL serializes creation for one durable owner and
-enforces the same hard ceiling inside the creation function, so concurrent
-requests or a compromised caller cannot raise the cap beyond `25`.
+The effective API-key policy is a versioned singleton in PostgreSQL, not a
+process-local environment value. Migration `20260726000700` installs the pinned
+defaults: `25` active keys per owner, `600` authenticated client mutations per
+`60` seconds, and a `24` hour idempotency replay window. Every successful audit
+fact records the durable policy version and effective owner cap. Policy changes
+require a separately reviewed, audited PostgreSQL operation; mixed API replicas
+cannot submit different limits.
+
+`UZO_AUTH_API_KEY_REPLAY_KEYS` is secret JSON containing an ordered AES-256-GCM
+keyring. The first entry encrypts new idempotency responses; following entries
+decrypt responses created before rotation:
+
+```json
+[{"id":"2026-07-primary","key":"<base64-encoded 32 bytes>"}]
+```
+
+Rotation prepends the new key, retains every previous key for at least the
+durable replay TTL, and removes an old key only after that interval has elapsed.
+The API fails closed when replay material names an unavailable key. Plaintext
+API-key tokens are never stored in the key table, audit trail, or replay table.
+
+`platformgo_api` is the trusted authenticated-principal authority for this
+slice. PostgreSQL independently enforces the durable policy, transaction, and
+audit shape, but the shared API role is intentionally authorized to attest the
+user owner passed by the authenticated application. Compromise of that database
+credential is therefore a credential-minting incident and requires immediate
+role rotation and reconciliation; it is not claimed as contained by table
+revocations alone.
 
 ## 6. Reloading
 

@@ -154,9 +154,17 @@ func (testIdentity) MyAccounts(
 	}}, nil
 }
 
+func (testIdentity) CheckClientMutationRate(
+	_ context.Context,
+	_ Principal,
+) error {
+	return nil
+}
+
 func (testIdentity) CreateMyAPIKey(
 	_ context.Context,
 	_ Principal,
+	_ string,
 	_ string,
 	_ CreateAPIKeyRequest,
 ) (APIKeyCreated, error) {
@@ -165,6 +173,29 @@ func (testIdentity) CreateMyAPIKey(
 		Prefix: "000000000001",
 		Token:  "xbk_000000000001.secret",
 	}, nil
+}
+
+type rateLimitedIdentity struct {
+	testIdentity
+	createCalls int
+}
+
+func (identity *rateLimitedIdentity) CheckClientMutationRate(
+	_ context.Context,
+	_ Principal,
+) error {
+	return ErrRateLimited
+}
+
+func (identity *rateLimitedIdentity) CreateMyAPIKey(
+	_ context.Context,
+	_ Principal,
+	_ string,
+	_ string,
+	_ CreateAPIKeyRequest,
+) (APIKeyCreated, error) {
+	identity.createCalls++
+	return APIKeyCreated{}, nil
 }
 
 func (testIdentity) BrokerEcho(
@@ -355,6 +386,35 @@ func TestCORSPreflightAndRequestHardening(t *testing.T) {
 	}
 	if response.Header().Get("x-request-id") == "" {
 		t.Fatal("response missing x-request-id")
+	}
+}
+
+func TestAPIKeyRateLimitRejectsBeforeCredentialCreation(t *testing.T) {
+	identity := &rateLimitedIdentity{}
+	handler := NewServer(ServerConfig{
+		Authenticator: testAuthenticator{},
+		Identity:      identity,
+	}).Handler()
+	response := performRequest(
+		t,
+		handler,
+		http.MethodPost,
+		"/v1/me/api-keys",
+		[]byte(`{"name":"blocked"}`),
+		map[string]string{
+			"authorization": "Bearer client-token",
+			"content-type":  "application/json",
+		},
+	)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf(
+			"rate-limit status = %d, body = %s",
+			response.Code,
+			response.Body.String(),
+		)
+	}
+	if identity.createCalls != 0 {
+		t.Fatalf("credential creation calls = %d, want 0", identity.createCalls)
 	}
 }
 

@@ -23,7 +23,7 @@ func TestLoadConfigPreservesFrozenEnvironmentKeys(t *testing.T) {
 		"UZO_HTTP_HEALTH_ADDR":              "127.0.0.1:9002",
 		"UZO_TRUSTED_PROXY_CIDRS":           "10.0.0.0/8,2001:db8:ffff::/48",
 		"UZO_AUTH_CLIENT_TOKEN_SECRET":      "0123456789abcdef0123456789abcdef",
-		"UZO_AUTH_MAX_API_KEYS_PER_OWNER":   "17",
+		"UZO_AUTH_API_KEY_REPLAY_KEYS":      `[{"id":"v1","key":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="}]`,
 		"UZO_REALTIME_API_URL":              "http://centrifugo:8000",
 		"UZO_REALTIME_TOKEN_SECRET":         "abcdef0123456789abcdef0123456789",
 		"UZO_REALTIME_TOKEN_TTL_SECS":       "3600",
@@ -52,7 +52,8 @@ func TestLoadConfigPreservesFrozenEnvironmentKeys(t *testing.T) {
 		len(config.TrustedProxies) != 2 ||
 		config.TrustedProxies[0].String() != "10.0.0.0/8" ||
 		config.ShardID != 7 ||
-		config.MaxAPIKeysPerOwner != 17 ||
+		len(config.APIKeyReplayKeys) != 1 ||
+		config.APIKeyReplayKeys[0].ID != "v1" ||
 		config.NATSStreamLimits.MaxBytes != 3<<30 ||
 		config.NATSStreamLimits.MaxAge.String() != "336h0m0s" {
 		t.Fatalf("config = %#v", config)
@@ -72,17 +73,22 @@ func TestTrustedProxyConfigRequiresExplicitCIDRs(t *testing.T) {
 	}
 }
 
-func TestAPIKeyOwnerLimitIsBounded(t *testing.T) {
-	for _, value := range []string{"0", "26", "invalid"} {
+func TestAPIKeyReplayKeysRequireValidAES256Material(t *testing.T) {
+	for _, value := range []string{
+		`[]`,
+		`[{"id":"v1","key":"short"}]`,
+		`[{"id":"v1","key":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="},{"id":"v1","key":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="}]`,
+		`invalid`,
+	} {
 		_, err := loadConfig(func(name string) string {
-			if name == "UZO_AUTH_MAX_API_KEYS_PER_OWNER" {
+			if name == "UZO_AUTH_API_KEY_REPLAY_KEYS" {
 				return value
 			}
 			return ""
 		})
 		if err == nil ||
-			!strings.Contains(err.Error(), "UZO_AUTH_MAX_API_KEYS_PER_OWNER") {
-			t.Fatalf("limit %q error = %v", value, err)
+			!strings.Contains(err.Error(), "UZO_AUTH_API_KEY_REPLAY_KEYS") {
+			t.Fatalf("replay keys %q error = %v", value, err)
 		}
 	}
 }
@@ -181,10 +187,13 @@ func TestRealtimePublisherDoesNotDependOnNATS(t *testing.T) {
 func TestServeRequiresDistinctClientAndRealtimeTokenSecrets(t *testing.T) {
 	secret := []byte("0123456789abcdef0123456789abcdef")
 	config := Config{
-		DatabaseURL:           "postgres://example",
-		NATSURL:               "nats://example",
-		NATSStreamLimits:      runtimeTestLimitsForUnit(),
-		ClientTokenSecret:     secret,
+		DatabaseURL:       "postgres://example",
+		NATSURL:           "nats://example",
+		NATSStreamLimits:  runtimeTestLimitsForUnit(),
+		ClientTokenSecret: secret,
+		APIKeyReplayKeys: []APIKeyReplayKey{{
+			ID: "v1",
+		}},
 		CentrifugoAPIURL:      "http://centrifugo:8000",
 		CentrifugoTokenSecret: append([]byte(nil), secret...),
 	}
