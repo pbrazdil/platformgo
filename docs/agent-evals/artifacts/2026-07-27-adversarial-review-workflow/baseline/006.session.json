@@ -2,13 +2,13 @@
   "schema_version": 1,
   "session_meta": {
     "cli_version": "0.145.0",
-    "id": "019fa35b-2e9f-7a61-92a4-2d6cab73b6fc",
+    "id": "019fa380-3943-7153-abbd-5e6cb2eee6c5",
     "model_provider": "openai",
-    "session_id": "019fa35b-2e9f-7a61-92a4-2d6cab73b6fc",
+    "session_id": "019fa380-3943-7153-abbd-5e6cb2eee6c5",
     "source": "exec"
   },
-  "source_rollout_sha256": "206e1c0fc1e25e99aca025d5a8ccfd6ac5b9d6f7d19097d745ecf439cc676f4f",
-  "thread_id": "019fa35b-2e9f-7a61-92a4-2d6cab73b6fc",
+  "source_rollout_sha256": "631633f156d32e0d02895553678cfebc58d91b9a5687a397d716a9ecc3bd9e44",
+  "thread_id": "019fa380-3943-7153-abbd-5e6cb2eee6c5",
   "turn_context": {
     "approval_policy": "never",
     "effort": "xhigh",
@@ -16,6 +16,6 @@
     "sandbox_policy": {
       "type": "read-only"
     },
-    "turn_id": "019fa35b-2f07-7b00-aaae-b28bb4146968"
+    "turn_id": "019fa380-39a5-76c1-8a60-a0bcd6af8f88"
   }
 }

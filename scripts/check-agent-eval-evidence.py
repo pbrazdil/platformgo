@@ -58,6 +58,8 @@ CONTEXT_ONLY_PROMPT_PATHS = {
     "RECONCILIATION.md",
     "TESTING.md",
 }
+EVIDENCE_ROOT = pathlib.PurePosixPath("docs/agent-evals/artifacts")
+REPORT_ROOT = pathlib.PurePosixPath("docs/agent-evals")
 
 
 def fail(message: str) -> None:
@@ -149,6 +151,48 @@ def triggers_evaluation(path: str) -> bool:
         path == trigger or trigger.endswith("/") and path.startswith(trigger)
         for trigger in TRIGGER_PATHS
     )
+
+
+def artifact_manifest(relative: str) -> pathlib.Path | None:
+    path = pathlib.PurePosixPath(relative)
+    parts = path.parts
+    if len(parts) < 4 or parts[:3] != EVIDENCE_ROOT.parts:
+        return None
+    return ROOT / EVIDENCE_ROOT / parts[3] / "manifest.json"
+
+
+def evidence_manifests(changed: set[str]) -> set[pathlib.Path]:
+    """Resolve every changed machine-evidence or bound-report path."""
+    manifests: set[pathlib.Path] = set()
+    for relative in changed:
+        manifest = artifact_manifest(relative)
+        if manifest is not None:
+            manifests.add(manifest)
+            continue
+        path = pathlib.PurePosixPath(relative)
+        if (
+            path.parent == REPORT_ROOT
+            and path.suffix == ".md"
+            and path.name != "README.md"
+        ):
+            candidate = (
+                ROOT
+                / EVIDENCE_ROOT
+                / path.stem
+                / "manifest.json"
+            )
+            if candidate.is_file():
+                manifests.add(candidate)
+    return manifests
+
+
+def changed_artifact_manifests(changed: set[str]) -> set[pathlib.Path]:
+    """Resolve manifests for changed raw evidence, excluding report-only edits."""
+    return {
+        manifest
+        for relative in changed
+        if (manifest := artifact_manifest(relative)) is not None
+    }
 
 
 def git_reader(commit: str) -> evals.Reader:
@@ -840,21 +884,22 @@ def validate_manifest(path: pathlib.Path, merge_base: str) -> None:
 
 def main() -> int:
     changed, merge_base = changed_paths()
-    if not any(triggers_evaluation(path) for path in changed):
-        return 0
-    manifests = sorted(
-        path
-        for path in ROOT.glob("docs/agent-evals/artifacts/*/manifest.json")
-        if path.relative_to(ROOT).as_posix() in changed
-        or any(
-            candidate == path.relative_to(ROOT).as_posix()
-            or candidate.startswith(path.parent.relative_to(ROOT).as_posix() + "/")
-            for candidate in changed
-        )
+    requires_new_evaluation = any(
+        triggers_evaluation(path) for path in changed
     )
-    if not manifests:
+    manifests = evidence_manifests(changed)
+    if not requires_new_evaluation and not manifests:
+        return 0
+    changed_artifacts = changed_artifact_manifests(changed)
+    if requires_new_evaluation and not changed_artifacts:
         fail("agent-governance change requires changed behavioral evaluation evidence")
-    for manifest in manifests:
+    manifests.update(changed_artifacts)
+    for manifest in sorted(manifests):
+        if not manifest.is_file():
+            fail(
+                "changed behavioral evidence lacks manifest: "
+                f"{manifest.relative_to(ROOT)}"
+            )
         validate_manifest(manifest, merge_base)
     print("agent evaluation evidence valid")
     return 0

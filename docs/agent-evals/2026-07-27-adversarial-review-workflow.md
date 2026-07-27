@@ -95,6 +95,9 @@ The policy suites prove:
   `gpt-5.6-sol`;
 - governance/evaluator scripts and artifacts are protected from implementation
   mixing and missing behavioral evidence;
+- artifact-only and bound-report-only changes independently resolve and
+  validate their manifest, so no unrelated prompt change is needed to detect
+  later evidence tampering;
 - companion architecture and subsystem documents are hash-bound whenever core
   agent governance changes, but do not independently impose the full corpus on
   an otherwise ordinary implementation PR.
@@ -103,20 +106,21 @@ The policy suites prove:
 
 - Task success: baseline 7/8; candidate 8/8.
 - Required evidence: baseline 7/8; candidate 8/8.
-- Critical violations: baseline 1; candidate 0.
+- Critical violations: baseline 0; candidate 0. The baseline failure is missing
+  required evidence, not a forbidden action.
 - Approval prompts: 0. Out-of-scope files changed: 0. Tool calls: 0.
 - Final response completeness: baseline 7/8; candidate 8/8.
 - Token usage:
 
   | Side | Input | Cached input | Cache writes | Output | Reasoning output |
   |---|---:|---:|---:|---:|---:|
-  | Baseline | 254,935 | 99,840 | 0 | 38,746 | 19,314 |
-  | Candidate | 266,840 | 65,280 | 0 | 46,767 | 24,115 |
+  | Baseline | 254,935 | 65,280 | 0 | 44,051 | 22,655 |
+  | Candidate | 266,840 | 65,280 | 0 | 43,988 | 21,826 |
 
-- Sum of subject-run latency: baseline 687.481 seconds; candidate 772.031
-  seconds. Median subject latency: baseline 79.930 seconds; candidate 89.362
+- Sum of subject-run latency: baseline 750.181 seconds; candidate 779.312
+  seconds. Median subject latency: baseline 91.555 seconds; candidate 88.380
   seconds.
-- Scorer latency: baseline 100.990 seconds; candidate 89.686 seconds.
+- Scorer latency: baseline 82.902 seconds; candidate 125.858 seconds.
 - Corpus SHA-256:
   `bc24163189e87b61ed721578dc77a777ef247e89125a588ea8817009e27a258d`.
 - Runner SHA-256:
@@ -142,7 +146,7 @@ The policy suites prove:
   "baseline_pass": 7,
   "candidate_pass": 8,
   "corpus_sha256": "bc24163189e87b61ed721578dc77a777ef247e89125a588ea8817009e27a258d",
-  "critical_rule_violations": 1,
+  "critical_rule_violations": 0,
   "files_changed_outside_scope": 0,
   "final_response_complete": 15,
   "manifest": "docs/agent-evals/artifacts/2026-07-27-adversarial-review-workflow/manifest.json",

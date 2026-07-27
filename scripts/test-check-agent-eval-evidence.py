@@ -622,7 +622,47 @@ def prepare_trigger_only_change(repo: pathlib.Path, relative: str) -> None:
     git(repo, "commit", "-qm", "change workflow enforcement")
 
 
+def prepare_evidence_only_change(repo: pathlib.Path) -> None:
+    """Leave a net diff containing evidence paths but no prompt trigger."""
+    (repo / "AGENTS.md").write_text("# Baseline agents\n")
+    git(repo, "add", "AGENTS.md")
+    git(repo, "commit", "-qm", "revert prompt change")
+    create_evidence(repo)
+
+
 def main() -> None:
+    committed_manifest = (
+        ROOT
+        / "docs"
+        / "agent-evals"
+        / "artifacts"
+        / "2026-07-27-adversarial-review-workflow"
+        / "manifest.json"
+    )
+    for relative in (
+        "docs/agent-evals/artifacts/2026-07-27-adversarial-review-workflow/"
+        "candidate/008.events.jsonl",
+        "docs/agent-evals/artifacts/2026-07-27-adversarial-review-workflow/"
+        "candidate/008.session.json",
+        "docs/agent-evals/artifacts/2026-07-27-adversarial-review-workflow/"
+        "candidate/008.json",
+        "docs/agent-evals/artifacts/2026-07-27-adversarial-review-workflow/"
+        "review-candidate.events.jsonl",
+        "docs/agent-evals/artifacts/2026-07-27-adversarial-review-workflow/"
+        "review-candidate.session.json",
+        "docs/agent-evals/artifacts/2026-07-27-adversarial-review-workflow/"
+        "reviews.json",
+        "docs/agent-evals/artifacts/2026-07-27-adversarial-review-workflow/"
+        "manifest.json",
+        "docs/agent-evals/2026-07-27-adversarial-review-workflow.md",
+    ):
+        if checker_module.evidence_manifests({relative}) != {
+            committed_manifest
+        }:
+            raise AssertionError(
+                f"changed evidence does not resolve its manifest: {relative}"
+            )
+
     fixture = (ROOT / evals.FIXTURE_ROOT / evals.FIXTURE_NAMES[6]).read_bytes()
     visible, hidden = evals.split_fixture(fixture)
     subject = evals.compose_subject_prompt(
@@ -843,6 +883,54 @@ def main() -> None:
             repo,
             "contradictory report",
             "behavioral summary contradicts evidence",
+        )
+
+        repo = new_repo(parent, "artifact-only-tamper")
+        prepare_evidence_only_change(repo)
+        artifact = (
+            repo
+            / pathlib.Path(MANIFEST_RELATIVE).parent
+            / "candidate"
+            / "008.json"
+        )
+        artifact.write_text(artifact.read_text() + "\n")
+        expect_fail(
+            repo,
+            "artifact-only evidence tamper",
+            "artifact identity mismatch",
+        )
+
+        repo = new_repo(parent, "raw-events-only-tamper")
+        prepare_evidence_only_change(repo)
+        events = (
+            repo
+            / pathlib.Path(MANIFEST_RELATIVE).parent
+            / "candidate"
+            / "008.events.jsonl"
+        )
+        events.write_text(events.read_text() + "{}\n")
+        expect_fail(
+            repo,
+            "raw-events-only evidence tamper",
+            "raw evidence hash mismatch",
+        )
+
+        repo = new_repo(parent, "report-only-tamper")
+        git(repo, "add", ".")
+        git(repo, "commit", "-qm", "land evaluated governance")
+        git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git(repo, "switch", "-qc", "report-only-tamper")
+        report = repo / "docs" / "agent-evals" / "2026-07-27-test.md"
+        report.write_text(
+            report.read_text().replace(
+                '"candidate_pass": 8',
+                '"candidate_pass": 7',
+            )
+        )
+        expect_fail(
+            repo,
+            "report-only evidence tamper",
+            "baseline context mismatch",
         )
 
         trigger_paths = (
