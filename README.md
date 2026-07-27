@@ -31,8 +31,9 @@ executable `app` and `nautilus` commands; frozen OpenAPI, protobuf, and
 realtime inventories; selected REST, gRPC, client and broker authentication
 flows; reviewed JWT signing and verification; trusted-proxy client-address
 derivation; least-privilege runtime PostgreSQL role enforcement; exact command
-replay; runtime readiness/drain behavior; a forward-only identity authority
-cutover guard; direct Centrifugo contract proof; and a committed
+replay; runtime readiness/drain behavior; a frozen deployment-visible worker
+health-listener address; a forward-only identity authority cutover guard;
+direct Centrifugo contract proof; and a committed
 PostgreSQL-to-Centrifugo realtime publication path with stable event identity,
 per-channel ordering, bounded claims, retry, and crash recovery.
 Exact client funding history is also landed with immutable PostgreSQL
@@ -188,9 +189,14 @@ This repository is not yet a production-capable replacement.
 ## Validation snapshot
 
 The landed Phase 3 slices have passed repository-wide formatting, lint, unit,
-race, repeat, vulnerability, module-consistency, and policy checks, plus live
-tests against disposable PostgreSQL 17, NATS, and Centrifugo. Their exact SHAs
-are green in hosted CI. The realtime path additionally has live PostgreSQL 17
+race, repeat, vulnerability, module-consistency, and policy checks. Historical
+slices were originally validated against disposable PostgreSQL 17; current CI
+and every newly qualified database slice use PostgreSQL 19 Beta 2 alongside
+NATS and Centrifugo. Their exact SHAs are green in hosted CI. The frozen
+deployment manifest also covers the worker's production
+`UZO_HTTP_HEALTH_ADDR` bootstrap key, whose typed parsing and real
+`/healthz`/`/readyz` listener wiring are exercised by native Go tests. The
+realtime path additionally has live PostgreSQL 17
 commit/order/retry evidence, a simulated Centrifugo outage proof, a real
 Centrifugo history proof, independent determinism and money review, an indexed
 representative-backlog claim plan, and migration 011 bounded-lock
