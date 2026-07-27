@@ -219,6 +219,15 @@ token endpoint return one channel and anonymous access returns `401`. Additive
 stable event identity and sequence remain required for retry and recovery; this
 does not claim network-level exactly-once delivery.
 
+The broker delegated-token source behavior is separately accepted through the
+production HTTP identity edge, least-privilege API role, and PostgreSQL 19 Beta
+2. One focused test proves that two independent requests from the same scoped
+broker converge case-insensitive email to one tenant-owned identity, a requested
+120-second client token authenticates the original profile, a broker without
+`tokens:mint` receives `403`, and a well-formed unknown user receives `400`.
+This slice does not claim broker-user exact-response replay, token-expiry
+behavior, or account-claim propagation beyond the pinned source assertions.
+
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
@@ -228,8 +237,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 68
-independently reviewed green source tests; 2,583 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 69
+independently reviewed green source tests; 2,582 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
