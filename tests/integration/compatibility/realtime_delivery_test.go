@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/upcomers-org/platformgo/internal/adapters/centrifugo"
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
+	"github.com/upcomers-org/platformgo/internal/application"
+	"github.com/upcomers-org/platformgo/internal/edge"
 	platformruntime "github.com/upcomers-org/platformgo/internal/runtime"
 	"github.com/upcomers-org/platformgo/migrations"
 )
@@ -414,11 +417,30 @@ func TestRealtimeWorkerRetriesCommittedPublicationWithStableIdentity(t *testing.
 	}
 }
 
-func TestRealtimeWorkerPublishesCommittedOutboxToCentrifugo(t *testing.T) {
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/realtime/e2e_gateway.rs:15
+//	test: realtime_gateway_json_event_publish_and_token
+//
+// Adaptations:
+//   - The legacy Redis stream is replaced by the committed PostgreSQL
+//     publication and the production realtime worker.
+//   - Additive event identity and sequence fields are asserted alongside the
+//     source-visible envelope.
+//
+// Assertions preserved:
+//   - The committed JSON event reaches real Centrifugo history at offset >= 1.
+//   - The wire type and canonical account URN are preserved without internal
+//     execution names.
+//   - Production password login succeeds and the authenticated token endpoint
+//     returns one exact user channel, while anonymous access returns 401.
+func TestRealtimeGatewayJSONEventPublishAndToken(t *testing.T) {
 	databaseURL := os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN")
 	centrifugoURL := os.Getenv("PLATFORMGO_TEST_CENTRIFUGO_URL")
 	apiKey := os.Getenv("PLATFORMGO_TEST_CENTRIFUGO_API_KEY")
-	if databaseURL == "" || centrifugoURL == "" {
+	tokenSecret := []byte(os.Getenv("PLATFORMGO_TEST_CENTRIFUGO_TOKEN_SECRET"))
+	if databaseURL == "" || centrifugoURL == "" || len(tokenSecret) < 32 {
 		t.Skip("PostgreSQL and Centrifugo dependencies are not configured")
 	}
 	ctx := context.Background()
@@ -443,19 +465,43 @@ func TestRealtimeWorkerPublishesCommittedOutboxToCentrifugo(t *testing.T) {
 		databaseURL,
 		"platformgo_realtime",
 	)
+	apiDatabaseURL := provisionRuntimeLogin(
+		t,
+		ctx,
+		pool,
+		databaseURL,
+		"platformgo_api",
+	)
+	passwordHash, err := application.HashPassword(
+		"correct horse battery staple",
+		bytes.NewReader(bytes.Repeat([]byte{29}, 16)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	const (
 		channel = "user:committed-realtime"
 		eventID = "019f9460-4b36-4e9b-8f44-682611f72401"
 	)
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO trading.accounts (account_id, oms_mode)
-		VALUES ('urn:xb:account:committed-realtime', 'NETTING');
-		INSERT INTO identity.users (user_id, login, normalized_login)
-		VALUES (
+		INSERT INTO identity.users (
+			user_id, login, normalized_login, email, normalized_email,
+			password_hash
+		) VALUES (
 			'urn:xb:user:committed-realtime',
 			'committed-realtime',
-			'committed-realtime'
-		);
+			'committed-realtime',
+			'committed-realtime@example.com',
+			'committed-realtime@example.com',
+			$1
+		)`,
+		passwordHash,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:committed-realtime', 'NETTING');
 		INSERT INTO identity.user_accounts (user_id, account_id)
 		VALUES (
 			'urn:xb:user:committed-realtime',
@@ -480,6 +526,107 @@ func TestRealtimeWorkerPublishesCommittedOutboxToCentrifugo(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	apiPool, err := pgxpool.New(ctx, apiDatabaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer apiPool.Close()
+	clientTokenSecret := []byte(
+		"phase3-realtime-client-token-secret-0123456789abcdef",
+	)
+	authenticator, err := edge.NewHMACAuthenticator(
+		edge.HMACAuthenticatorConfig{
+			ClientTokenSecret: clientTokenSecret,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := application.NewIdentity(
+		platformpostgres.NewCompatibilityStore(apiPool),
+		authenticator,
+		application.IdentityConfig{
+			Entropy: bytes.NewReader(bytes.Repeat([]byte{31}, 64)),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realtimeGateway, err := centrifugo.New(centrifugo.Config{
+		APIURL:      centrifugoURL,
+		APIKey:      apiKey,
+		TokenSecret: tokenSecret,
+		TokenTTL:    time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(edge.NewServer(edge.ServerConfig{
+		Authenticator: authenticator,
+		Identity:      identity,
+		Realtime:      realtimeGateway,
+	}).Handler())
+	defer server.Close()
+
+	loginResponse := requestJSON(
+		t,
+		http.MethodPost,
+		server.URL+"/v1/auth/login",
+		`{"login":"committed-realtime","password":"correct horse battery staple"}`,
+		nil,
+	)
+	var login edge.LoginResponse
+	decodeAndClose(t, loginResponse, &login)
+	if loginResponse.StatusCode != http.StatusOK || login.AccessToken == "" {
+		t.Fatalf(
+			"login status=%d body=%#v",
+			loginResponse.StatusCode,
+			login,
+		)
+	}
+	tokenResponse := requestJSON(
+		t,
+		http.MethodPost,
+		server.URL+"/v1/me/realtime/token",
+		"",
+		map[string]string{
+			"authorization": "Bearer " + login.AccessToken,
+		},
+	)
+	var realtimeToken edge.RealtimeToken
+	decodeAndClose(t, tokenResponse, &realtimeToken)
+	if tokenResponse.StatusCode != http.StatusOK ||
+		realtimeToken.Token == "" ||
+		len(realtimeToken.Channels) != 1 ||
+		realtimeToken.Channels[0] != channel {
+		t.Fatalf(
+			"realtime token status=%d body=%#v",
+			tokenResponse.StatusCode,
+			realtimeToken,
+		)
+	}
+	anonymousResponse := requestJSON(
+		t,
+		http.MethodPost,
+		server.URL+"/v1/me/realtime/token",
+		"",
+		nil,
+	)
+	if anonymousResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf(
+			"anonymous realtime token status=%d, want 401",
+			anonymousResponse.StatusCode,
+		)
+	}
+	_ = anonymousResponse.Body.Close()
+
+	baselineHistory := readCentrifugoHistory(
+		t,
+		ctx,
+		centrifugoURL,
+		apiKey,
+		channel,
+	)
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	result := make(chan error, 1)
@@ -519,59 +666,60 @@ func TestRealtimeWorkerPublishesCommittedOutboxToCentrifugo(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	historyBody, err := json.Marshal(map[string]any{
-		"channel": channel,
-		"limit":   100,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		strings.TrimRight(centrifugoURL, "/")+"/api/history",
-		bytes.NewReader(historyBody),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("content-type", "application/json")
-	request.Header.Set("x-api-key", apiKey)
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = response.Body.Close() }()
-	var history struct {
-		Result struct {
-			Publications []struct {
-				Data struct {
-					Type          string `json:"type"`
-					AccountID     string `json:"accountId"`
-					EventID       string `json:"eventId"`
-					SchemaVersion uint32 `json:"schemaVersion"`
-					Sequence      uint64 `json:"sequence"`
-				} `json:"data"`
-			} `json:"publications"`
-		} `json:"result"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&history); err != nil {
-		t.Fatal(err)
-	}
+	history := readCentrifugoHistory(t, ctx, centrifugoURL, apiKey, channel)
 	found := false
+	var foundEnvelope struct {
+		Type          string `json:"type"`
+		AccountID     string `json:"accountId"`
+		EventID       string `json:"eventId"`
+		SchemaVersion uint32 `json:"schemaVersion"`
+		Sequence      uint64 `json:"sequence"`
+	}
 	for _, publication := range history.Result.Publications {
-		if publication.Data.EventID != eventID {
+		if publication.Offset <= baselineHistory.Result.Offset {
 			continue
 		}
-		found = publication.Data.Type == "order.updated" &&
-			publication.Data.AccountID == "urn:xb:account:committed-realtime" &&
-			publication.Data.SchemaVersion == 1 &&
-			publication.Data.Sequence == 1
+		var envelope struct {
+			Type          string `json:"type"`
+			AccountID     string `json:"accountId"`
+			EventID       string `json:"eventId"`
+			SchemaVersion uint32 `json:"schemaVersion"`
+			Sequence      uint64 `json:"sequence"`
+		}
+		if err := json.Unmarshal(publication.Data, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.EventID != eventID {
+			continue
+		}
+		foundEnvelope = envelope
+		for _, internalName := range []string{
+			"SHAREDNETTING",
+			"SHAREDHEDGING",
+			"BBOOK",
+		} {
+			if bytes.Contains(publication.Data, []byte(internalName)) {
+				t.Fatalf(
+					"Centrifugo history exposed internal name %q: %s",
+					internalName,
+					publication.Data,
+				)
+			}
+		}
+		found = envelope.Type == "order.updated" &&
+			strings.HasPrefix(envelope.AccountID, "urn:xb:account:") &&
+			envelope.AccountID == "urn:xb:account:committed-realtime" &&
+			envelope.SchemaVersion == 1 &&
+			envelope.Sequence == 1
 	}
-	if response.StatusCode != http.StatusOK || !found {
+	if history.Result.Offset <= baselineHistory.Result.Offset ||
+		len(history.Result.Publications) == 0 ||
+		!found {
 		t.Fatalf(
-			"Centrifugo history status=%d publications=%#v",
-			response.StatusCode,
+			"Centrifugo history baseline=%d offset=%d envelope=%#v publications=%#v",
+			baselineHistory.Result.Offset,
+			history.Result.Offset,
+			foundEnvelope,
 			history.Result.Publications,
 		)
 	}
@@ -585,6 +733,61 @@ func TestRealtimeWorkerPublishesCommittedOutboxToCentrifugo(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("realtime worker did not shut down")
 	}
+}
+
+type centrifugoHistory struct {
+	Result struct {
+		Offset       uint64 `json:"offset"`
+		Publications []struct {
+			Data   json.RawMessage `json:"data"`
+			Offset uint64          `json:"offset"`
+		} `json:"publications"`
+	} `json:"result"`
+}
+
+func readCentrifugoHistory(
+	t *testing.T,
+	ctx context.Context,
+	apiURL string,
+	apiKey string,
+	channel string,
+) centrifugoHistory {
+	t.Helper()
+	historyBody, err := json.Marshal(map[string]any{
+		"channel": channel,
+		"limit":   100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		strings.TrimRight(apiURL, "/")+"/api/history",
+		bytes.NewReader(historyBody),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("content-type", "application/json")
+	request.Header.Set("x-api-key", apiKey)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	var history centrifugoHistory
+	if err := json.NewDecoder(response.Body).Decode(&history); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf(
+			"Centrifugo history status=%d body=%#v",
+			response.StatusCode,
+			history,
+		)
+	}
+	return history
 }
 
 type edgeWireEvent struct {
