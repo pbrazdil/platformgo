@@ -84,6 +84,7 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 		"broker-account-identifiers-preserve-current-go-urns",
 		"client-api-key-creation-requires-idempotency-key",
 		"fill-trade-type-is-always-classified",
+		"native-login-refresh-placement-preserves-current-go-client-boundary",
 		"trader-profile-preserves-current-go-identity-boundary",
 	}
 	foundDeviations := make(map[string]bool, len(requiredDeviations))
