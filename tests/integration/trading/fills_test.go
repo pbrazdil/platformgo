@@ -172,38 +172,6 @@ func TestSagaReconcileSettlesOrphanedOrderFromFills(t *testing.T) {
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/trading/e2e_fills.rs:656
-//	test: fill_reason_derives_from_bracket_leg_and_stopout
-func TestFillReasonDerivesFromBracketLegAndStopout(t *testing.T) {
-	fixture := newFillFixture()
-	fixture.insertOrder(fillOrder{ID: "sl", Intent: "brk:sl", BracketLeg: "stop_loss", OrderType: "STOP_MARKET"})
-	fixture.insertOrder(fillOrder{ID: "tp", Intent: "brk:tp", BracketLeg: "take_profit", OrderType: "TAKE_PROFIT_MARKET"})
-	fixture.insertOrder(fillOrder{ID: "liq", Intent: "stopout:42:BTC-PERP", OrderType: "MARKET"})
-	fixture.insertOrder(fillOrder{ID: "flat", Intent: "flatten:01JZTESTFLATTEN0000000000", OrderType: "MARKET"})
-	fixture.insertOrder(fillOrder{ID: "manual", Intent: "manual-close", OrderType: "MARKET"})
-	for fillID, orderID := range map[string]string{"f-sl": "sl", "f-tp": "tp", "f-liq": "liq", "f-flat": "flat", "f-user": "manual"} {
-		fixture.seedFill(fillSeed{
-			FillID: fillID, AccountID: "acct-1", UserID: "user-1", OrderID: orderID,
-			PositionID: "pos-1", Symbol: "BTC-PERP", Side: "SELL", Quantity: "0.02",
-			Price: "60000", Commission: "0", Liquidity: "taker", Entry: "close",
-		})
-	}
-	page := fixture.queryFills(fillQuery{AccountID: "acct-1", Limit: 10})
-	reasons := make(map[string]string)
-	for _, fill := range page.Items {
-		reasons[fill.FillID] = fill.Reason
-	}
-	want := map[string]string{"f-sl": "stop_loss", "f-tp": "take_profit", "f-liq": "liquidation", "f-flat": "flatten", "f-user": "manual"}
-	for id, reason := range want {
-		if reasons[id] != reason {
-			t.Fatalf("%s reason=%q want=%q", id, reasons[id], reason)
-		}
-	}
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/trading/e2e_fills.rs:849
 //	test: fill_realized_isolates_hedged_legs_by_position
 func TestFillRealizedIsolatesHedgedLegsByPosition(t *testing.T) {

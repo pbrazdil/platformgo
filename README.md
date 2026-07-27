@@ -146,17 +146,16 @@ fail closed on disagreement. The pinned leverage behavior now has separate
 owner-approved port-ledger acceptance; it does not activate the external fills
 route.
 
-The current fill-reason implementation candidate derives each compatibility
-projection only from durable canonical provenance. Exact `stop_loss` and
-`take_profit` bracket legs take precedence over intent prefixes; exact
-`stopout:` and `flatten:` intents map to liquidation and flatten; entry,
-absent, and ordinary intent provenance map to manual. Both fill readers fail
-closed with no partial output when the fill, order, intent, and command
-accounts disagree or when a stored bracket leg is empty, padded, case-shifted,
-or unknown. Fresh least-privilege API-role connections return the same
-immutable reasons without changing any durable economic, audit, checkpoint,
-receipt, or outbox state. Its separate port-ledger acceptance remains pending;
-the external fills route remains inventory.
+The landed fill-reason slice derives each compatibility projection only from
+durable canonical provenance. Exact `stop_loss` and `take_profit` bracket legs
+take precedence over intent prefixes; exact `stopout:` and `flatten:` intents
+map to liquidation and flatten; entry, absent, and ordinary intent provenance
+map to manual. Both fill readers fail closed with no partial output when the
+fill, order, intent, and command accounts disagree or when a stored bracket leg
+is empty, padded, case-shifted, or unknown. Fresh least-privilege API-role
+connections return the same immutable reasons without changing any durable
+economic, audit, checkpoint, receipt, or outbox state. Its pinned source
+behavior is separately accepted; the external fills route remains inventory.
 
 Phase 3 is not complete. The runtime must still:
 
@@ -167,8 +166,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 64
-independently reviewed green source tests; 2,587 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 65
+independently reviewed green source tests; 2,586 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
@@ -182,7 +181,7 @@ This repository is not yet a production-capable replacement.
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
 | 2 — Durable execution | Complete | PostgreSQL authority, historically completed and validated on PostgreSQL 17; immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
-| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, authenticated caller-scoped account summaries, and hash-only self-service API-key creation with encrypted durable replay, a PostgreSQL-authoritative owner cap, protected-client rate limiting, and an atomic audit fact. Funding, account-summary, and API-key implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first eight separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, same-statement filtered totals, a correlatable fill-to-order identity using the current Go `urn:xb:order:<UUID>` representation, exact classified side/trade-type projection, strict deterministic tuple pagination with stable filter-wide totals, per-position exact realized PnL/currency that keeps hedged legs isolated, atomic fee-bearing order/fill settlement across rollback, retry, duplicate delivery, restart, and fail-closed reconciliation, and decision-hash v4 frozen execution-time leverage shared by decisions, durable state, PostgreSQL, recovery, and reconciliation while retaining v2/v3 history. A ninth fill-reason implementation candidate is green and independently reviewed, but its separate port-ledger acceptance remains pending. Terminal-only audit recovery is separately accepted through the current Go command/idempotency/receipt authority, including transaction rollback, duplicate delivery, restart, exact permitted-effect, and full durable-projection evidence. Rejected-order durability is also landed and separately accepted using the deterministic current-Go transition: exact terminal reason, reservation release, duplicate/restart/reconciliation stability, historical decision-hash v3 balance authority, markless recovery, and monotonic currency scales. Current Go fill semantics and durable identities remain authoritative, and the external fills route remains inventory until its complete source contract is implemented and reviewed. |
+| 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, authenticated caller-scoped account summaries, and hash-only self-service API-key creation with encrypted durable replay, a PostgreSQL-authoritative owner cap, protected-client rate limiting, and an atomic audit fact. Funding, account-summary, and API-key implementation plus their separate port-ledger acceptance are landed. The fill-history foundation and its first nine separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, same-statement filtered totals, a correlatable fill-to-order identity using the current Go `urn:xb:order:<UUID>` representation, exact classified side/trade-type and durable reason projection, strict deterministic tuple pagination with stable filter-wide totals, per-position exact realized PnL/currency that keeps hedged legs isolated, atomic fee-bearing order/fill settlement across rollback, retry, duplicate delivery, restart, and fail-closed reconciliation, and decision-hash v4 frozen execution-time leverage shared by decisions, durable state, PostgreSQL, recovery, and reconciliation while retaining v2/v3 history. Terminal-only audit recovery is separately accepted through the current Go command/idempotency/receipt authority, including transaction rollback, duplicate delivery, restart, exact permitted-effect, and full durable-projection evidence. Rejected-order durability is also landed and separately accepted using the deterministic current-Go transition: exact terminal reason, reservation release, duplicate/restart/reconciliation stability, historical decision-hash v3 balance authority, markless recovery, and monotonic currency scales. Current Go fill semantics and durable identities remain authoritative, and the external fills route remains inventory until its complete source contract is implemented and reviewed. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
@@ -283,16 +282,15 @@ determinism, money, migration, and release reviews before merge. PostgreSQL 19
 Beta 2 remains a nonproduction qualification; this evidence is not a
 production major-upgrade rehearsal. The owner-approved source adaptation is
 separately accepted in the port ledger.
-The current fill-reason implementation candidate has PostgreSQL 19 Beta 2
-proof through both production compatibility readers and distinct
-least-privilege API-role connections. It preserves exact bracket precedence,
-liquidation, flatten, and manual mappings; rejects corrupt bracket or
-cross-account authority with no partial page or view; and leaves exact orders,
-fills, intents, commands, ledger, receipts, checkpoints, and outbox state
-unchanged. The strengthened native source port was first proven red against
-the pre-implementation commit, then passed race and repeated deterministic
-execution. Its independent semantic review is GO; separate ledger acceptance
-remains pending.
+The landed fill-reason slice has PostgreSQL 19 Beta 2 proof through both
+production compatibility readers and distinct least-privilege API-role
+connections. It preserves exact bracket precedence, liquidation, flatten, and
+manual mappings; rejects corrupt bracket or cross-account authority with no
+partial page or view; and leaves exact orders, fills, intents, commands,
+ledger, receipts, checkpoints, and outbox state unchanged. The strengthened
+native source port was first proven red against the pre-implementation commit,
+then passed race and repeated deterministic execution. Its independent
+semantic review and separate ledger acceptance are landed.
 The current upgrade-rehearsal candidate additionally uses the exact final Go
 decision-hash v3 artifact to create the invalid pre-009 authority through
 the durable command journal, outbox, and audited single-writer engine inputs on
