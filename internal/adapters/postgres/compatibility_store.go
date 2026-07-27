@@ -1346,7 +1346,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			intentAccount  *string
 			commandAccount *string
 		)
-		if err := rows.Scan(
+		if scanErr := rows.Scan(
 			&fillID,
 			&orderID,
 			&positionID,
@@ -1362,10 +1362,10 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			&intentAccount,
 			&commandAccount,
 			&total,
-		); err != nil {
+		); scanErr != nil {
 			return edge.FillExecutionPage{}, fmt.Errorf(
 				"scan filtered fill execution: %w",
-				err,
+				scanErr,
 			)
 		}
 		if fillID == nil {
@@ -1395,13 +1395,15 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				"scan filtered fill execution: incomplete realized PnL",
 			)
 		}
-		if err := validateFillTradeType(row.view.TradeType); err != nil {
+		if tradeTypeErr := validateFillTradeType(
+			row.view.TradeType,
+		); tradeTypeErr != nil {
 			return edge.FillExecutionPage{}, fmt.Errorf(
 				"scan filtered fill execution: %w",
-				err,
+				tradeTypeErr,
 			)
 		}
-		row.view.Reason, err = fillExecutionReason(
+		reason, reasonErr := fillExecutionReason(
 			accountID,
 			orderAccount,
 			bracketLeg,
@@ -1409,12 +1411,13 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			intentAccount,
 			commandAccount,
 		)
-		if err != nil {
+		if reasonErr != nil {
 			return edge.FillExecutionPage{}, fmt.Errorf(
 				"scan filtered fill execution: %w",
-				err,
+				reasonErr,
 			)
 		}
+		row.view.Reason = reason
 		row.view.OrderID = "urn:xb:order:" + row.view.OrderID
 		row.view.FilledAt = time.Unix(0, row.logicalTime).
 			UTC().
