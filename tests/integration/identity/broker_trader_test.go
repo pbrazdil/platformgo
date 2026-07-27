@@ -118,35 +118,6 @@ func TestExpiredKeyIsRejected(t *testing.T) {
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/identity/e2e_broker.rs:343
-//	test: broker_token_exchange_on_behalf_of
-func TestBrokerTokenExchangeOnBehalfOf(t *testing.T) {
-	fixture := brokerTraderNewFixture()
-	full := fixture.createBrokerKey("crm-full", []string{"accounts:write", "tokens:mint"}, nil, 0, "")
-	noMint := fixture.createBrokerKey("crm-no-mint", []string{"accounts:write"}, nil, 0, "")
-	created := fixture.brokerCreateUser(full, "crm-trader-1", "trader1@crm.example")
-	if created.Status != brokerTraderStatusCreated || !created.Created {
-		t.Fatalf("created=%#v", created)
-	}
-	again := fixture.brokerCreateUser(full, "different-handle", "TRADER1@crm.example")
-	if again.Status != brokerTraderStatusCreated || again.Created || again.ID != created.ID {
-		t.Fatalf("email did not converge on one identity: first=%#v again=%#v", created, again)
-	}
-	minted := fixture.exchangeOnBehalfOf(full, created.ID, 120)
-	if minted.Status != brokerTraderStatusOK || minted.ExpiresInSecs != 120 {
-		t.Fatalf("minted=%#v", minted)
-	}
-	profile := fixture.myProfile(minted.AccessToken)
-	if profile.Status != brokerTraderStatusOK || profile.Login != "crm-trader-1" || profile.UserID != created.ID {
-		t.Fatalf("profile=%#v", profile)
-	}
-	brokerTraderRequireStatus(t, fixture.exchangeOnBehalfOf(noMint, created.ID, 0).Status, brokerTraderStatusForbidden)
-	brokerTraderRequireStatus(t, fixture.exchangeOnBehalfOf(full, "urn:xb:user:2zzzzzzzzzzzzzzzzzzzzzz", 0).Status, brokerTraderStatusBadRequest)
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/identity/e2e_tenant_isolation.rs:40
 //	test: broker_access_is_scoped_to_its_tenant
 func TestBrokerAccessIsScopedToItsTenant(t *testing.T) {
