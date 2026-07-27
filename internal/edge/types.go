@@ -32,6 +32,7 @@ var (
 // remaining comparable with ErrRateLimited through errors.Is.
 type RateLimitError struct {
 	RetryAfterSeconds uint64
+	CapacityScope     string
 }
 
 func (err RateLimitError) Error() string {
@@ -285,7 +286,7 @@ type IdentityService interface {
 		context.Context,
 		Principal,
 		string,
-	) (string, error)
+	) (StoredResponse, error)
 	CreateBrokerUser(
 		context.Context,
 		Principal,

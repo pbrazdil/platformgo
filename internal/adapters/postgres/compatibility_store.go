@@ -406,6 +406,92 @@ func (store *CompatibilityStore) PurgeExpiredAPIKeyReplays(
 	return deleted, nil
 }
 
+// PurgeExpiredBrokerEchoReplays deletes one bounded database-time batch.
+func (store *CompatibilityStore) PurgeExpiredBrokerEchoReplays(
+	ctx context.Context,
+	batchLimit int,
+) (int64, error) {
+	var deleted int64
+	if err := store.pool.QueryRow(ctx, `
+		SELECT identity.purge_expired_broker_echo_replays($1)`,
+		batchLimit,
+	).Scan(&deleted); err != nil {
+		return 0, fmt.Errorf("purge expired broker-echo replays: %w", err)
+	}
+	return deleted, nil
+}
+
+// BrokerEchoReplayCoverage is the aggregate bounded-retention authority.
+type BrokerEchoReplayCoverage struct {
+	MaxTotalRows               int
+	MaxRowsPerPrincipal        int
+	PurgeBatchSize             int
+	MaxBatchesPerCycle         int
+	CleanupIntervalSeconds     int
+	CleanupCycleTimeoutSeconds int
+	ExpiredReadinessSLOSeconds int
+	MaxRetryAfterSeconds       int
+	TotalRows                  int64
+	LiveRows                   int64
+	InvalidLiveRows            int64
+	OverlongLiveRows           int64
+	ExpiredRows                int64
+	MaximumPrincipalRows       int64
+	OldestLiveExpiresAt        string
+	OldestExpiredAt            string
+	OldestExpiredAgeSeconds    int64
+}
+
+// BrokerEchoReplayCoverage loads aggregate policy and backlog evidence.
+func (store *CompatibilityStore) BrokerEchoReplayCoverage(
+	ctx context.Context,
+) (BrokerEchoReplayCoverage, error) {
+	var coverage BrokerEchoReplayCoverage
+	if err := store.pool.QueryRow(ctx, `
+		SELECT
+			max_total_rows,
+			max_rows_per_principal,
+			purge_batch_size,
+			max_batches_per_cycle,
+			cleanup_interval_seconds,
+			cleanup_cycle_timeout_seconds,
+			expired_readiness_slo_seconds,
+			max_retry_after_seconds,
+			total_rows,
+			live_rows,
+			invalid_live_rows,
+			overlong_live_rows,
+			expired_rows,
+			maximum_principal_rows,
+			oldest_live_expires_at,
+			oldest_expired_at,
+			oldest_expired_age_seconds
+		  FROM identity.broker_echo_replay_coverage()`,
+	).Scan(
+		&coverage.MaxTotalRows,
+		&coverage.MaxRowsPerPrincipal,
+		&coverage.PurgeBatchSize,
+		&coverage.MaxBatchesPerCycle,
+		&coverage.CleanupIntervalSeconds,
+		&coverage.CleanupCycleTimeoutSeconds,
+		&coverage.ExpiredReadinessSLOSeconds,
+		&coverage.MaxRetryAfterSeconds,
+		&coverage.TotalRows,
+		&coverage.LiveRows,
+		&coverage.InvalidLiveRows,
+		&coverage.OverlongLiveRows,
+		&coverage.ExpiredRows,
+		&coverage.MaximumPrincipalRows,
+		&coverage.OldestLiveExpiresAt,
+		&coverage.OldestExpiredAt,
+		&coverage.OldestExpiredAgeSeconds,
+	); err != nil {
+		return BrokerEchoReplayCoverage{},
+			fmt.Errorf("load broker-echo replay coverage: %w", err)
+	}
+	return coverage, nil
+}
+
 // APIKeyReplayCoverage reports the live encrypted replay backlog by key ID.
 type APIKeyReplayCoverage struct {
 	KeyID           string
@@ -524,28 +610,80 @@ func nullableUint64Decimal(value *uint64) any {
 func (store *CompatibilityStore) BrokerEcho(
 	ctx context.Context,
 	principal string,
-	idempotencyKey string,
+	idempotencyHash [sha256.Size]byte,
 	requestHash [sha256.Size]byte,
-	resultID string,
-	expiresAt time.Time,
-) (string, error) {
-	var stored string
+	response edge.StoredResponse,
+) (edge.StoredResponse, error) {
+	responseHeaders, err := canonicalJSON(response.Headers)
+	if err != nil {
+		return edge.StoredResponse{}, fmt.Errorf(
+			"broker echo response headers: %w",
+			err,
+		)
+	}
+	var stored edge.StoredResponse
+	var (
+		outcome        string
+		retryAfterText string
+		capacityScope  string
+	)
 	if err := store.pool.QueryRow(ctx, `
-		SELECT identity.claim_broker_echo($1,$2,$3,$4,$5)`,
+		SELECT
+			outcome,
+			retry_after_seconds::text,
+			capacity_scope,
+			response_status,
+			response_headers,
+			response_body
+		  FROM identity.claim_broker_echo_response($1,$2,$3,$4,$5,$6)`,
 		principal,
-		idempotencyKey,
+		idempotencyHash[:],
 		requestHash[:],
-		resultID,
-		expiresAt,
-	).Scan(&stored); err != nil {
+		response.Status,
+		responseHeaders,
+		response.Body,
+	).Scan(
+		&outcome,
+		&retryAfterText,
+		&capacityScope,
+		&stored.Status,
+		&stored.Headers,
+		&stored.Body,
+	); err != nil {
 		var postgresError *pgconn.PgError
 		if errors.As(err, &postgresError) &&
 			postgresError.Code == "23505" {
-			return "", edge.ErrIdempotencyConflict
+			return edge.StoredResponse{}, edge.ErrIdempotencyConflict
 		}
-		return "", fmt.Errorf("broker echo: %w", err)
+		return edge.StoredResponse{}, fmt.Errorf("broker echo: %w", err)
 	}
-	return stored, nil
+	switch outcome {
+	case "stored":
+		return stored, nil
+	case "capacity_limited":
+		retryAfter, parseErr := strconv.ParseUint(retryAfterText, 10, 64)
+		if parseErr != nil {
+			return edge.StoredResponse{}, fmt.Errorf(
+				"broker echo: invalid capacity retry: %q: %w",
+				retryAfterText,
+				parseErr,
+			)
+		}
+		if retryAfter == 0 {
+			return edge.StoredResponse{}, errors.New(
+				"broker echo: invalid zero capacity retry",
+			)
+		}
+		return edge.StoredResponse{}, edge.RateLimitError{
+			RetryAfterSeconds: retryAfter,
+			CapacityScope:     capacityScope,
+		}
+	default:
+		return edge.StoredResponse{}, fmt.Errorf(
+			"broker echo: invalid durable outcome %q",
+			outcome,
+		)
+	}
 }
 
 // ReplayBrokerAccount resolves an existing durable mutation without requiring

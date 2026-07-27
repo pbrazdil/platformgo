@@ -63,6 +63,7 @@ func NewHMACAuthenticator(
 		config.Clock = authWallClock{}
 	}
 	brokers := make(map[string]BrokerCredential, len(config.BrokerCredentials))
+	subjects := make(map[string]struct{}, len(config.BrokerCredentials))
 	for _, credential := range config.BrokerCredentials {
 		if credential.Prefix == "" ||
 			credential.Subject == "" ||
@@ -71,18 +72,39 @@ func NewHMACAuthenticator(
 				"auth: broker prefix, subject, and tenant are required",
 			)
 		}
+		if !validBrokerURN(credential.Subject, "urn:xb:apikey:") {
+			return nil, errors.New(
+				"auth: broker subject must match urn:xb:apikey:<nonempty>",
+			)
+		}
+		if !validBrokerURN(credential.Tenant, "urn:xb:tenant:") {
+			return nil, errors.New(
+				"auth: broker tenant must match urn:xb:tenant:<nonempty>",
+			)
+		}
 		if _, exists := brokers[credential.Prefix]; exists {
 			return nil, fmt.Errorf("auth: duplicate broker prefix %q", credential.Prefix)
+		}
+		if _, exists := subjects[credential.Subject]; exists {
+			return nil, fmt.Errorf("auth: duplicate broker subject %q", credential.Subject)
 		}
 		credential.Scopes = append([]string(nil), credential.Scopes...)
 		credential.IPAllowlist = append([]netip.Addr(nil), credential.IPAllowlist...)
 		brokers[credential.Prefix] = credential
+		subjects[credential.Subject] = struct{}{}
 	}
 	return &HMACAuthenticator{
 		clientSecret: append([]byte(nil), config.ClientTokenSecret...),
 		brokers:      brokers,
 		clock:        config.Clock,
 	}, nil
+}
+
+func validBrokerURN(value, prefix string) bool {
+	return strings.HasPrefix(value, prefix) &&
+		len(value) > len(prefix) &&
+		len(value) <= 512 &&
+		!strings.ContainsRune(value, '\x1f')
 }
 
 // ClientClaims is the supported client access-token contract.

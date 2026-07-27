@@ -188,6 +188,20 @@ type rateLimitedIdentity struct {
 	allowRate   bool
 }
 
+type brokerEchoCountingIdentity struct {
+	testIdentity
+	calls int
+}
+
+func (identity *brokerEchoCountingIdentity) BrokerEcho(
+	ctx context.Context,
+	principal Principal,
+	key string,
+) (StoredResponse, error) {
+	identity.calls++
+	return identity.testIdentity.BrokerEcho(ctx, principal, key)
+}
+
 func (identity *rateLimitedIdentity) CheckClientRate(
 	_ context.Context,
 	_ Principal,
@@ -214,8 +228,15 @@ func (testIdentity) BrokerEcho(
 	_ context.Context,
 	principal Principal,
 	key string,
-) (string, error) {
-	return principal.Subject + ":" + key, nil
+) (StoredResponse, error) {
+	body, _ := json.Marshal(map[string]string{
+		"id": principal.Subject + ":" + key,
+	})
+	return StoredResponse{
+		Status:  http.StatusOK,
+		Headers: []byte(`{"Content-Type":["application/json"]}`),
+		Body:    append(body, '\n'),
+	}, nil
 }
 
 func (testIdentity) CreateBrokerUser(
@@ -746,6 +767,60 @@ func TestBrokerAPIKeyAndPrincipalScopedEchoReplay(t *testing.T) {
 	)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("full-scope account provision = %d, want 201", created.Code)
+	}
+}
+
+func TestBrokerKeylessEchoFailsClosedWithoutGeneratedIdentity(t *testing.T) {
+	identity := &brokerEchoCountingIdentity{}
+	handler := NewServer(ServerConfig{
+		Authenticator: testAuthenticator{},
+		Identity:      identity,
+		RequestID:     func() string { return "" },
+		TrustedProxies: []netip.Prefix{
+			netip.MustParsePrefix("192.0.2.0/24"),
+		},
+	}).Handler()
+	headers := map[string]string{
+		"x-api-key":       "broker-key",
+		"x-forwarded-for": "203.0.113.7",
+		"x-request-id":    "transport-attempt",
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		response := performRequest(
+			t,
+			handler,
+			http.MethodPost,
+			"/broker/v1/echo",
+			nil,
+			headers,
+		)
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf(
+				"keyless attempt %d status = %d, want 503",
+				attempt+1,
+				response.Code,
+			)
+		}
+	}
+	if identity.calls != 0 {
+		t.Fatalf("keyless entropy failure reached identity %d times", identity.calls)
+	}
+
+	headers["idempotency-key"] = "caller-owned-key"
+	response := performRequest(
+		t,
+		handler,
+		http.MethodPost,
+		"/broker/v1/echo",
+		nil,
+		headers,
+	)
+	if response.Code != http.StatusOK || identity.calls != 1 {
+		t.Fatalf(
+			"explicit key status=%d identity calls=%d",
+			response.Code,
+			identity.calls,
+		)
 	}
 }
 

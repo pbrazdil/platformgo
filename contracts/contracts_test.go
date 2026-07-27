@@ -183,6 +183,12 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 	if inventory["x-platformgo-contract-status"] != "source-route-inventory" {
 		t.Fatalf("broker account read inventory status = %v", inventory["x-platformgo-contract-status"])
 	}
+	echo := assertMethod(t, broker, "/broker/v1/echo", "post")
+	for _, status := range []string{"200", "401", "403", "409", "429", "503"} {
+		assertResponse(t, echo, status)
+	}
+	assertIdempotencyHeader(t, echo)
+	assertOptionalRetryAfterHeader(t, echo)
 }
 
 func assertIdempotencyHeader(t *testing.T, operation map[string]any) {

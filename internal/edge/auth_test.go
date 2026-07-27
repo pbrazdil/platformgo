@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,6 +146,112 @@ func signRawJWT(t *testing.T, payload string, secret []byte) string {
 		t.Fatal(err)
 	}
 	return unsigned + "." + encoding.EncodeToString(signature)
+}
+
+func TestNewHMACAuthenticatorValidatesBrokerPrincipalConfiguration(t *testing.T) {
+	valid := BrokerCredential{
+		Prefix:     "xbk_partner",
+		SecretHash: HashBrokerSecret("secret"),
+		Subject:    "urn:xb:apikey:partner",
+		Tenant:     "urn:xb:tenant:partner",
+	}
+	tests := []struct {
+		name        string
+		credentials []BrokerCredential
+		wantError   bool
+	}{
+		{
+			name:        "valid credential",
+			credentials: []BrokerCredential{valid},
+		},
+		{
+			name: "subject has wrong namespace",
+			credentials: []BrokerCredential{{
+				Prefix:     "xbk_partner",
+				SecretHash: HashBrokerSecret("secret"),
+				Subject:    "urn:xb:user:partner",
+				Tenant:     "urn:xb:tenant:partner",
+			}},
+			wantError: true,
+		},
+		{
+			name: "subject has empty identifier",
+			credentials: []BrokerCredential{{
+				Prefix:     "xbk_partner",
+				SecretHash: HashBrokerSecret("secret"),
+				Subject:    "urn:xb:apikey:",
+				Tenant:     "urn:xb:tenant:partner",
+			}},
+			wantError: true,
+		},
+		{
+			name: "tenant has wrong namespace",
+			credentials: []BrokerCredential{{
+				Prefix:     "xbk_partner",
+				SecretHash: HashBrokerSecret("secret"),
+				Subject:    "urn:xb:apikey:partner",
+				Tenant:     "urn:xb:account:partner",
+			}},
+			wantError: true,
+		},
+		{
+			name: "tenant has empty identifier",
+			credentials: []BrokerCredential{{
+				Prefix:     "xbk_partner",
+				SecretHash: HashBrokerSecret("secret"),
+				Subject:    "urn:xb:apikey:partner",
+				Tenant:     "urn:xb:tenant:",
+			}},
+			wantError: true,
+		},
+		{
+			name: "subject contains scope separator",
+			credentials: []BrokerCredential{{
+				Prefix:     "xbk_partner",
+				SecretHash: HashBrokerSecret("secret"),
+				Subject:    "urn:xb:apikey:partner\x1fother",
+				Tenant:     "urn:xb:tenant:partner",
+			}},
+			wantError: true,
+		},
+		{
+			name: "tenant exceeds durable bound",
+			credentials: []BrokerCredential{{
+				Prefix:     "xbk_partner",
+				SecretHash: HashBrokerSecret("secret"),
+				Subject:    "urn:xb:apikey:partner",
+				Tenant:     "urn:xb:tenant:" + strings.Repeat("x", 512),
+			}},
+			wantError: true,
+		},
+		{
+			name: "duplicate subject across prefixes and tenants",
+			credentials: []BrokerCredential{
+				valid,
+				{
+					Prefix:     "xbk_reseller",
+					SecretHash: HashBrokerSecret("other-secret"),
+					Subject:    valid.Subject,
+					Tenant:     "urn:xb:tenant:reseller",
+				},
+			},
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := NewHMACAuthenticator(HMACAuthenticatorConfig{
+				ClientTokenSecret: []byte("0123456789abcdef0123456789abcdef"),
+				BrokerCredentials: test.credentials,
+			})
+			if test.wantError && err == nil {
+				t.Fatal("configuration accepted")
+			}
+			if !test.wantError && err != nil {
+				t.Fatalf("valid configuration rejected: %v", err)
+			}
+		})
+	}
 }
 
 // Ported from:

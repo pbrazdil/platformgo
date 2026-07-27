@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/netip"
@@ -29,6 +30,7 @@ type Server struct {
 	openAPI        map[string][]byte
 	allowOrigin    string
 	trustedProxies []netip.Prefix
+	requestID      func() string
 }
 
 // ServerConfig contains only externally observable edge configuration.
@@ -42,6 +44,7 @@ type ServerConfig struct {
 	OpenAPI        map[string][]byte
 	AllowOrigin    string
 	TrustedProxies []netip.Prefix
+	RequestID      func() string
 }
 
 // NewServer builds a standard-library HTTP handler.
@@ -49,6 +52,10 @@ func NewServer(config ServerConfig) *Server {
 	origin := config.AllowOrigin
 	if origin == "" {
 		origin = "*"
+	}
+	requestID := config.RequestID
+	if requestID == nil {
+		requestID = newRequestID
 	}
 	return &Server{
 		auth:           config.Authenticator,
@@ -60,6 +67,7 @@ func NewServer(config ServerConfig) *Server {
 		openAPI:        config.OpenAPI,
 		allowOrigin:    origin,
 		trustedProxies: append([]netip.Prefix(nil), config.TrustedProxies...),
+		requestID:      requestID,
 	}
 }
 
@@ -426,9 +434,9 @@ func (server *Server) handleBrokerCreateUser(
 		writeError(writer, request, http.StatusBadRequest, "invalid_request", "invalid user request")
 		return
 	}
-	key := strings.TrimSpace(request.Header.Get("idempotency-key"))
-	if key == "" {
-		key = newRequestID()
+	key, ok := server.brokerIdempotencyKey(writer, request)
+	if !ok {
+		return
 	}
 	response, err := server.identity.CreateBrokerUser(
 		request.Context(), principal, key, body,
@@ -466,9 +474,9 @@ func (server *Server) handleBrokerCreateAccount(
 		writeError(writer, request, http.StatusBadRequest, "invalid_request", "invalid account request")
 		return
 	}
-	key := strings.TrimSpace(request.Header.Get("idempotency-key"))
-	if key == "" {
-		key = newRequestID()
+	key, ok := server.brokerIdempotencyKey(writer, request)
+	if !ok {
+		return
 	}
 	response, err := server.identity.CreateBrokerAccount(
 		request.Context(),
@@ -534,7 +542,10 @@ func (server *Server) harden(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requestID := strings.TrimSpace(request.Header.Get("x-request-id"))
 		if requestID == "" {
-			requestID = newRequestID()
+			requestID = strings.TrimSpace(server.requestID())
+			if requestID == "" {
+				requestID = "request-unavailable"
+			}
 		}
 		request.Header.Set("x-request-id", requestID)
 		writer.Header().Set("x-request-id", requestID)
@@ -656,22 +667,36 @@ func (server *Server) handleBrokerEcho(writer http.ResponseWriter, request *http
 		writeError(writer, request, http.StatusForbidden, "forbidden", "forbidden")
 		return
 	}
-	key := strings.TrimSpace(request.Header.Get("idempotency-key"))
-	if key == "" {
-		key = newRequestID()
+	key, ok := server.brokerIdempotencyKey(writer, request)
+	if !ok {
+		return
 	}
 	if server.identity == nil {
 		writeError(writer, request, http.StatusServiceUnavailable, "unavailable", "identity unavailable")
 		return
 	}
-	id, err := server.identity.BrokerEcho(request.Context(), principal, key)
+	response, err := server.identity.BrokerEcho(
+		request.Context(),
+		principal,
+		key,
+	)
 	switch {
 	case errors.Is(err, ErrIdempotencyConflict):
 		writeError(writer, request, http.StatusConflict, "idempotency_conflict", err.Error())
+	case errors.Is(err, ErrRateLimited):
+		var rateLimit RateLimitError
+		if errors.As(err, &rateLimit) {
+			slog.Info(
+				"broker echo capacity limited",
+				"capacity_scope", rateLimit.CapacityScope,
+				"retry_after_seconds", rateLimit.RetryAfterSeconds,
+			)
+		}
+		writeClientRateLimit(writer, request, err)
 	case err != nil:
 		writeError(writer, request, http.StatusServiceUnavailable, "unavailable", "identity unavailable")
 	default:
-		writeJSON(writer, http.StatusOK, map[string]string{"id": id})
+		writeStoredResponse(writer, response)
 	}
 }
 
@@ -711,6 +736,28 @@ func (server *Server) clientPrincipal(
 		return Principal{}, false
 	}
 	return principal, true
+}
+
+func (server *Server) brokerIdempotencyKey(
+	writer http.ResponseWriter,
+	request *http.Request,
+) (string, bool) {
+	key := strings.TrimSpace(request.Header.Get("idempotency-key"))
+	if key != "" {
+		return key, true
+	}
+	key = strings.TrimSpace(server.requestID())
+	if key == "" {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"request identity unavailable",
+		)
+		return "", false
+	}
+	return key, true
 }
 
 func (server *Server) authenticatedClientPrincipal(
@@ -918,7 +965,7 @@ func addressInPrefixes(address netip.Addr, prefixes []netip.Prefix) bool {
 func newRequestID() string {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		return "request-unavailable"
+		return ""
 	}
 	return hex.EncodeToString(raw[:])
 }

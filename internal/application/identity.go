@@ -154,11 +154,10 @@ type IdentityStore interface {
 	BrokerEcho(
 		context.Context,
 		string,
-		string,
 		[sha256.Size]byte,
-		string,
-		time.Time,
-	) (string, error)
+		[sha256.Size]byte,
+		edge.StoredResponse,
+	) (edge.StoredResponse, error)
 	ReplayBrokerAccount(
 		context.Context,
 		string,
@@ -770,24 +769,38 @@ func (identity *Identity) BrokerEcho(
 	ctx context.Context,
 	principal edge.Principal,
 	idempotencyKey string,
-) (string, error) {
+) (edge.StoredResponse, error) {
 	if principal.Subject == "" || idempotencyKey == "" {
-		return "", edge.ErrInvalidRequest
+		return edge.StoredResponse{}, edge.ErrInvalidRequest
 	}
 	requestHash := sha256.Sum256([]byte("{}"))
+	idempotencyHash := sha256.Sum256([]byte(idempotencyKey))
 	resultID := stableID(
 		"platformgo.identity.broker-echo.v1",
 		principal.Subject,
 		idempotencyKey,
 		requestHash,
 	).String()
+	responseBody, err := json.Marshal(struct {
+		ID string `json:"id"`
+	}{ID: resultID})
+	if err != nil {
+		return edge.StoredResponse{}, fmt.Errorf(
+			"identity broker echo: encode response: %w",
+			err,
+		)
+	}
+	response := edge.StoredResponse{
+		Status:  200,
+		Headers: []byte(`{"Content-Type":["application/json"]}`),
+		Body:    append(responseBody, '\n'),
+	}
 	return identity.store.BrokerEcho(
 		ctx,
 		principal.Subject,
-		idempotencyKey,
+		idempotencyHash,
 		requestHash,
-		resultID,
-		identity.clock.Now().UTC().Add(brokerIdempotencyTTL),
+		response,
 	)
 }
 

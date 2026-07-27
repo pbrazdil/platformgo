@@ -167,6 +167,47 @@ mutation. The result remains stable after API-pool and server reconstruction
 under least-privilege database roles. Its direct committed-outbox delivery
 evidence does not claim NATS-real or full-process restart coverage.
 
+The current broker API-key echo slice now preserves the pinned authentication
+and idempotency behavior through the production HTTP handler and PostgreSQL 19
+Beta 2. Missing and invalid keys fail before durable work; repeated keys replay
+the exact committed status, logical headers, and body bytes, including after a
+renderer change, API reconstruction, concurrent cross-instance delivery, and a
+lost post-commit HTTP outcome. PostgreSQL statement time owns the 24-hour
+lifetime, raw external keys are reduced to fixed SHA-256 digests before
+persistence, and the dedicated least-privilege authority permits only targeted
+expired-key replacement or bounded expired-row purge. The API runtime owns that
+retention path at startup and on one cancellation-owned periodic loop. An
+immutable PostgreSQL policy caps the physical authority at 1,000 total rows and
+100 rows per principal. Exact replay and deterministic hash conflict resolve
+before capacity admission; genuinely new work at capacity receives typed
+`429` with a PostgreSQL-derived `Retry-After`, while expired same-key
+replacement remains net-zero. One policy-driven cleanup cycle drains at most
+ten ordered 100-row batches under an overall deadline, and startup fails before
+serving when authoritative coverage still contains expired, malformed, or
+overlong live rows. A versioned time-authority discriminator preserves every
+legacy creation and expiry timestamp while requiring all new
+PostgreSQL-authoritative claims to retain for exactly 24 hours. A post-backfill
+insert guard commits atomically with the discriminator so no intermediate tip
+allows new rows to claim the legacy exemption, and a statement trigger prevents
+owner `TRUNCATE`. The validated constraint and
+aggregate integrity counters catch malformed responses, non-exact
+current-authority lifetimes, and future-dated rows before readiness; older data
+is restored only through an isolated full upgrade and reconciliation. PostgreSQL
+19 Beta 2 proves a single cycle drains
+`100 + 100 + 5` expired rows while live exact responses remain byte-identical,
+including through the real `Serve` composition, injected periodic work,
+integrity rejection, cleanup failure shutdown, and cancellation. Its four
+forward migrations form an explicit no-overlap cutover with hard live-data and
+physical-relation bounds, exact legacy and intermediate authority validation,
+bounded documented `SHARE`, `ACCESS EXCLUSIVE`, and
+`SHARE UPDATE EXCLUSIVE` locks, complete hostile-default-ACL normalization, an
+immutable policy/ACL boundary, exact catalog classification, and atomic
+intermediate-tip rollback/retry evidence.
+This implementation still requires final independent review, hosted CI, merge,
+and separate source-port ledger acceptance. PostgreSQL 19 Beta 2 remains
+development/CI-only; production remains NO-GO until PostgreSQL 19 GA and the
+full upgrade, restore, recovery, and reconciliation gate.
+
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,

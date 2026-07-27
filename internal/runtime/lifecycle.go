@@ -37,7 +37,6 @@ const (
 	realtimeMaxAttempts      = uint32(10)
 	realtimeFinalizeTimeout  = 5 * time.Second
 	apiKeyReplayCleanupBatch = 100
-	apiKeyReplayCleanupEvery = time.Minute
 	runtimeSchemaRevision    = "20260725001100_phase3_committed_realtime_outbox"
 )
 
@@ -106,6 +105,25 @@ func Doctor(ctx context.Context, config Config) error {
 // Serve runs REST and gRPC over separate listeners with shared durable command
 // admission and graceful cancellation.
 func Serve(ctx context.Context, config Config) error {
+	return serve(
+		ctx,
+		config,
+		func(interval time.Duration) (<-chan time.Time, func()) {
+			ticker := time.NewTicker(interval)
+			return ticker.C, ticker.Stop
+		},
+	)
+}
+
+type replayCleanupScheduleFactory func(
+	time.Duration,
+) (<-chan time.Time, func())
+
+func serve(
+	ctx context.Context,
+	config Config,
+	newReplayCleanupSchedule replayCleanupScheduleFactory,
+) error {
 	if err := config.ValidateFor("serve"); err != nil {
 		return err
 	}
@@ -182,17 +200,126 @@ func Serve(ctx context.Context, config Config) error {
 		}
 		return nil
 	}
+	verifyBrokerEchoReplayCoverage := func(
+		checkContext context.Context,
+		logCoverage bool,
+		requireDrained bool,
+		allowStaleExpired bool,
+	) (platformpostgres.BrokerEchoReplayCoverage, error) {
+		coverage, coverageErr :=
+			compatibilityStore.BrokerEchoReplayCoverage(checkContext)
+		if coverageErr != nil {
+			return platformpostgres.BrokerEchoReplayCoverage{}, coverageErr
+		}
+		if validationErr := validateBrokerEchoReplayCoverage(
+			coverage,
+			requireDrained,
+			allowStaleExpired,
+		); validationErr != nil {
+			return platformpostgres.BrokerEchoReplayCoverage{}, validationErr
+		}
+		if logCoverage {
+			slog.Info(
+				"broker-echo replay coverage",
+				"total_rows", coverage.TotalRows,
+				"live_rows", coverage.LiveRows,
+				"invalid_live_rows", coverage.InvalidLiveRows,
+				"overlong_live_rows", coverage.OverlongLiveRows,
+				"expired_rows", coverage.ExpiredRows,
+				"maximum_principal_rows", coverage.MaximumPrincipalRows,
+				"oldest_live_expires_at", coverage.OldestLiveExpiresAt,
+				"oldest_expired_at", coverage.OldestExpiredAt,
+				"oldest_expired_age_seconds",
+				coverage.OldestExpiredAgeSeconds,
+				"max_total_rows", coverage.MaxTotalRows,
+				"max_rows_per_principal", coverage.MaxRowsPerPrincipal,
+				"purge_batch_size", coverage.PurgeBatchSize,
+				"max_batches_per_cycle", coverage.MaxBatchesPerCycle,
+				"cleanup_interval_seconds",
+				coverage.CleanupIntervalSeconds,
+				"cleanup_cycle_timeout_seconds",
+				coverage.CleanupCycleTimeoutSeconds,
+				"expired_readiness_slo_seconds",
+				coverage.ExpiredReadinessSLOSeconds,
+			)
+		}
+		return coverage, nil
+	}
+	purgeExpiredAPIKeyReplays := func(
+		cleanupContext context.Context,
+	) (int64, error) {
+		return compatibilityStore.PurgeExpiredAPIKeyReplays(
+			cleanupContext,
+			apiKeyReplayCleanupBatch,
+		)
+	}
+	brokerEchoPolicy, policyErr := verifyBrokerEchoReplayCoverage(
+		ctx,
+		true,
+		false,
+		true,
+	)
+	if policyErr != nil {
+		return fmt.Errorf("serve: broker-echo replay policy: %w", policyErr)
+	}
+	purgeExpiredBrokerEchoReplays := func(
+		cleanupContext context.Context,
+	) (int64, error) {
+		startedAt := time.Now()
+		cycleContext, cancelCycle := context.WithTimeout(
+			cleanupContext,
+			time.Duration(
+				brokerEchoPolicy.CleanupCycleTimeoutSeconds,
+			)*time.Second,
+		)
+		defer cancelCycle()
+		deleted, cleanupErr := drainExpiredBrokerEchoReplays(
+			cycleContext,
+			compatibilityStore.PurgeExpiredBrokerEchoReplays,
+			brokerEchoPolicy.PurgeBatchSize,
+			brokerEchoPolicy.MaxBatchesPerCycle,
+		)
+		slog.Info(
+			"broker-echo replay cleanup cycle completed",
+			"deleted", deleted,
+			"duration", time.Since(startedAt),
+			"error", cleanupErr,
+		)
+		return deleted, cleanupErr
+	}
+	verifyReplayCoverage := func(
+		coverageContext context.Context,
+		logCoverage bool,
+		requireBrokerEchoDrained bool,
+	) error {
+		if coverageErr := verifyAPIKeyReplayCoverage(
+			coverageContext,
+			logCoverage,
+		); coverageErr != nil {
+			return fmt.Errorf("API-key replay coverage: %w", coverageErr)
+		}
+		if _, coverageErr := verifyBrokerEchoReplayCoverage(
+			coverageContext,
+			logCoverage,
+			requireBrokerEchoDrained,
+			false,
+		); coverageErr != nil {
+			return fmt.Errorf("broker-echo replay coverage: %w", coverageErr)
+		}
+		return nil
+	}
 	if verifyErr := verifyAPIKeyPolicy(ctx); verifyErr != nil {
 		return fmt.Errorf("serve: %w", verifyErr)
 	}
-	if _, purgeErr := compatibilityStore.PurgeExpiredAPIKeyReplays(
+	if cleanupErr := runReplayCleanupBatch(
 		ctx,
-		apiKeyReplayCleanupBatch,
-	); purgeErr != nil {
-		return fmt.Errorf("serve: %w", purgeErr)
-	}
-	if coverageErr := verifyAPIKeyReplayCoverage(ctx, true); coverageErr != nil {
-		return fmt.Errorf("serve: %w", coverageErr)
+		purgeExpiredAPIKeyReplays,
+		purgeExpiredBrokerEchoReplays,
+		func(coverageContext context.Context) error {
+			return verifyReplayCoverage(coverageContext, true, true)
+		},
+	); cleanupErr != nil {
+		return fmt.Errorf("serve: %w", cleanupErr)
 	}
 	postgresReady := func(checkContext context.Context) error {
 		if pingErr := pool.Ping(checkContext); pingErr != nil {
@@ -207,7 +334,7 @@ func Serve(ctx context.Context, config Config) error {
 		if policyErr := verifyAPIKeyPolicy(checkContext); policyErr != nil {
 			return policyErr
 		}
-		return verifyAPIKeyReplayCoverage(checkContext, false)
+		return verifyReplayCoverage(checkContext, false, false)
 	}
 	natsReady := func(checkContext context.Context) error {
 		if flushErr := flushNATS(checkContext, natsConnection); flushErr != nil {
@@ -297,9 +424,8 @@ func Serve(ctx context.Context, config Config) error {
 		grpcServer,
 		edge.NewGRPCServer(authenticator, submission),
 	)
-	errorsChannel := make(chan error, 3)
+	errorsChannel := make(chan error, 2)
 	cleanupContext, cancelCleanup := context.WithCancel(ctx)
-	defer cancelCleanup()
 	go func() {
 		if serveErr := httpServer.Serve(restListener); !errors.Is(serveErr, http.ErrServerClosed) {
 			errorsChannel <- fmt.Errorf("serve REST: %w", serveErr)
@@ -310,41 +436,54 @@ func Serve(ctx context.Context, config Config) error {
 			errorsChannel <- fmt.Errorf("serve gRPC: %w", serveErr)
 		}
 	}()
+	ticks, stopReplayCleanupSchedule := newReplayCleanupSchedule(
+		time.Duration(brokerEchoPolicy.CleanupIntervalSeconds) * time.Second,
+	)
+	cleanupResult := make(chan error, 1)
 	go func() {
-		ticker := time.NewTicker(apiKeyReplayCleanupEvery)
-		defer ticker.Stop()
-		cleanupErr := runAPIKeyReplayCleanup(
+		defer stopReplayCleanupSchedule()
+		cleanupErr := runReplayCleanup(
 			cleanupContext,
-			ticker.C,
-			func(cleanupCallContext context.Context) (int64, error) {
-				return compatibilityStore.PurgeExpiredAPIKeyReplays(
-					cleanupCallContext,
-					apiKeyReplayCleanupBatch,
-				)
-			},
+			ticks,
+			purgeExpiredAPIKeyReplays,
+			purgeExpiredBrokerEchoReplays,
 			func(coverageContext context.Context) error {
-				return verifyAPIKeyReplayCoverage(coverageContext, true)
+				return verifyReplayCoverage(coverageContext, true, false)
 			},
 		)
-		if cleanupErr != nil {
-			errorsChannel <- cleanupErr
-		}
+		cleanupResult <- cleanupErr
 	}()
 
+	var resultErr error
+	cleanupStopped := false
 	select {
 	case <-ctx.Done():
 	case serveErr := <-errorsChannel:
-		shutdownServers(ctx, httpServer, grpcServer)
-		return serveErr
+		resultErr = serveErr
+	case cleanupErr := <-cleanupResult:
+		cleanupStopped = true
+		if cleanupErr != nil {
+			resultErr = cleanupErr
+		} else if ctx.Err() == nil {
+			resultErr = errors.New("serve: replay cleanup owner stopped")
+		}
 	}
+	cancelCleanup()
 	shutdownServers(ctx, httpServer, grpcServer)
-	return nil
+	if !cleanupStopped {
+		cleanupErr := <-cleanupResult
+		if cleanupErr != nil && resultErr == nil && ctx.Err() == nil {
+			resultErr = cleanupErr
+		}
+	}
+	return resultErr
 }
 
-func runAPIKeyReplayCleanup(
+func runReplayCleanup(
 	ctx context.Context,
 	ticks <-chan time.Time,
-	purge func(context.Context) (int64, error),
+	purgeAPIKeyReplays func(context.Context) (int64, error),
+	purgeBrokerEchoReplays func(context.Context) (int64, error),
 	verifyCoverage func(context.Context) error,
 ) error {
 	for {
@@ -355,19 +494,163 @@ func runAPIKeyReplayCleanup(
 			if !ok {
 				return nil
 			}
-			deleted, err := purge(ctx)
-			if err != nil {
-				return fmt.Errorf("API-key replay cleanup: %w", err)
-			}
-			slog.Info(
-				"expired API-key replay cleanup completed",
-				"deleted", deleted,
-			)
-			if err := verifyCoverage(ctx); err != nil {
-				return fmt.Errorf("API-key replay coverage: %w", err)
+			if err := runReplayCleanupBatch(
+				ctx,
+				purgeAPIKeyReplays,
+				purgeBrokerEchoReplays,
+				verifyCoverage,
+			); err != nil {
+				return err
 			}
 		}
 	}
+}
+
+func runReplayCleanupBatch(
+	ctx context.Context,
+	purgeAPIKeyReplays func(context.Context) (int64, error),
+	purgeBrokerEchoReplays func(context.Context) (int64, error),
+	verifyCoverage func(context.Context) error,
+) error {
+	apiKeyDeleted, err := purgeAPIKeyReplays(ctx)
+	if err != nil {
+		return fmt.Errorf("API-key replay cleanup: %w", err)
+	}
+	slog.Info(
+		"expired API-key replay cleanup completed",
+		"deleted", apiKeyDeleted,
+	)
+	brokerEchoDeleted, err := purgeBrokerEchoReplays(ctx)
+	if err != nil {
+		return fmt.Errorf("broker-echo replay cleanup: %w", err)
+	}
+	slog.Info(
+		"expired broker-echo replay cleanup completed",
+		"deleted", brokerEchoDeleted,
+	)
+	if err := verifyCoverage(ctx); err != nil {
+		return fmt.Errorf("replay coverage: %w", err)
+	}
+	return nil
+}
+
+func drainExpiredBrokerEchoReplays(
+	ctx context.Context,
+	purge func(context.Context, int) (int64, error),
+	batchSize int,
+	maxBatches int,
+) (int64, error) {
+	if batchSize < 1 || maxBatches < 1 {
+		return 0, errors.New("invalid broker-echo replay cleanup policy")
+	}
+	var totalDeleted int64
+	for batch := 1; batch <= maxBatches; batch++ {
+		if err := ctx.Err(); err != nil {
+			return totalDeleted, err
+		}
+		deleted, err := purge(ctx, batchSize)
+		if err != nil {
+			return totalDeleted, err
+		}
+		if deleted < 0 || deleted > int64(batchSize) {
+			return totalDeleted, fmt.Errorf(
+				"broker-echo replay purge returned invalid count %d",
+				deleted,
+			)
+		}
+		totalDeleted += deleted
+		slog.Info(
+			"expired broker-echo replay cleanup batch completed",
+			"batch", batch,
+			"deleted", deleted,
+			"total_deleted", totalDeleted,
+		)
+		if deleted < int64(batchSize) {
+			break
+		}
+	}
+	return totalDeleted, nil
+}
+
+func validateBrokerEchoReplayCoverage(
+	coverage platformpostgres.BrokerEchoReplayCoverage,
+	requireDrained bool,
+	allowStaleExpired bool,
+) error {
+	if coverage.MaxTotalRows < 1 ||
+		coverage.MaxRowsPerPrincipal < 1 ||
+		coverage.PurgeBatchSize < 1 ||
+		coverage.MaxBatchesPerCycle < 1 ||
+		coverage.CleanupIntervalSeconds < 1 ||
+		coverage.CleanupCycleTimeoutSeconds < 1 ||
+		coverage.ExpiredReadinessSLOSeconds < 1 ||
+		coverage.MaxRetryAfterSeconds < 1 ||
+		int64(coverage.PurgeBatchSize)*
+			int64(coverage.MaxBatchesPerCycle) <
+			int64(coverage.MaxTotalRows) ||
+		coverage.MaxRowsPerPrincipal > coverage.MaxTotalRows {
+		return errors.New("invalid broker-echo replay policy")
+	}
+	if coverage.TotalRows < 0 ||
+		coverage.LiveRows < 0 ||
+		coverage.InvalidLiveRows < 0 ||
+		coverage.OverlongLiveRows < 0 ||
+		coverage.ExpiredRows < 0 ||
+		coverage.MaximumPrincipalRows < 0 ||
+		coverage.TotalRows != coverage.LiveRows+coverage.ExpiredRows ||
+		coverage.InvalidLiveRows > coverage.LiveRows ||
+		coverage.OverlongLiveRows > coverage.LiveRows ||
+		coverage.TotalRows > int64(coverage.MaxTotalRows) ||
+		coverage.MaximumPrincipalRows >
+			int64(coverage.MaxRowsPerPrincipal) ||
+		coverage.MaximumPrincipalRows > coverage.TotalRows {
+		return errors.New("invalid broker-echo replay coverage")
+	}
+	if coverage.InvalidLiveRows != 0 {
+		return fmt.Errorf(
+			"broker-echo replay authority contains %d invalid live responses",
+			coverage.InvalidLiveRows,
+		)
+	}
+	if coverage.OverlongLiveRows != 0 {
+		return fmt.Errorf(
+			"broker-echo replay authority contains %d live responses beyond the maximum remaining lifetime",
+			coverage.OverlongLiveRows,
+		)
+	}
+	if coverage.ExpiredRows == 0 {
+		if coverage.OldestExpiredAt != "" ||
+			coverage.OldestExpiredAgeSeconds != 0 {
+			return errors.New("inconsistent empty broker-echo expired coverage")
+		}
+	} else {
+		if coverage.OldestExpiredAt == "" ||
+			coverage.OldestExpiredAgeSeconds < 0 {
+			return errors.New("inconsistent broker-echo expired coverage")
+		}
+		if requireDrained {
+			return fmt.Errorf(
+				"broker-echo startup cleanup left %d expired rows",
+				coverage.ExpiredRows,
+			)
+		}
+		if !allowStaleExpired &&
+			coverage.OldestExpiredAgeSeconds >
+				int64(coverage.ExpiredReadinessSLOSeconds) {
+			return fmt.Errorf(
+				"broker-echo expired backlog age %d exceeds readiness SLO %d",
+				coverage.OldestExpiredAgeSeconds,
+				coverage.ExpiredReadinessSLOSeconds,
+			)
+		}
+	}
+	if coverage.LiveRows == 0 && coverage.OldestLiveExpiresAt != "" {
+		return errors.New("inconsistent empty broker-echo live coverage")
+	}
+	if coverage.LiveRows > 0 && coverage.OldestLiveExpiresAt == "" {
+		return errors.New("inconsistent broker-echo live coverage")
+	}
+	return nil
 }
 
 func applicationReplayKeys(
