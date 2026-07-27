@@ -66,6 +66,7 @@
   },
   "templates": {
     "task": "docs/AGENT_TASK_TEMPLATE.md",
+    "adversarial_preflight": "docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md",
     "critical_review": "docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md"
   },
   "evaluation": {

@@ -15,13 +15,18 @@ Changes to `AGENTS.md`, nested agent instructions, `.codex`, `policy/openai-agen
 
 ## Development sequence
 
-Use `docs/AGENT_TASK_TEMPLATE.md` for agent assignments. Do not repeat the standing rules from `AGENTS.md` and `MODEL_POLICY.md` in each task.
+Use `docs/AGENT_TASK_TEMPLATE.md` for agent assignments and
+`docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md` for high-risk work. Do not
+repeat the standing rules from `AGENTS.md` and `MODEL_POLICY.md` in each task.
 
 1. Read root and applicable nested `AGENTS.md` files plus the relevant architecture documents; assign agent work with `docs/AGENT_TASK_TEMPLATE.md`.
-2. Create or port failing native Go tests.
-3. Implement the smallest vertical slice.
-4. Run targeted checks, then the required full verification.
-5. Submit the PR using the template.
+2. Scope the slice and run parallel adversarial preflight when protected boundaries require it.
+3. Create or port representative failing native Go tests and review their failure boundary.
+4. Implement the smallest vertical slice while advisory reviewers report blockers immediately.
+5. Reach focused green and close advisory blockers with their originating reviewers.
+6. Stabilize a clean candidate, run one full local validation pass, and record its exact SHA/tree/base.
+7. Run parallel specialist review and one independent final read-only release review.
+8. Push that exact SHA, require hosted CI on it, recheck the base, and merge.
 
 ## Commit guidance
 

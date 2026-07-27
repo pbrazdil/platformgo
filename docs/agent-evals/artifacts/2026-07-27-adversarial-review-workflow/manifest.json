@@ -1,0 +1,515 @@
+{
+  "codex_cli_version": "codex-cli 0.145.0",
+  "contexts": {
+    "baseline": {
+      "head": "f912cbf80607878fea7b426df02e42cb975f3a7f",
+      "prompt_surface_sha256": "d35941b35598a11ed4f1b2a04b55e4e41554c51b35a8ab83db9aed3face69e50",
+      "tree": "70922b8b149c3a45c3480988bfa740563c062f61"
+    },
+    "candidate": {
+      "head": "4868530c79ce8bf03d7a80bca02a196390e1d09a",
+      "prompt_surface_sha256": "6c386fda877a7e62b4e7791d863af46bfde02ed669b1dc365dc48f6cce80d1f1",
+      "tree": "9a284e3750f58009247a0b056146ce5441f4b972",
+      "working_diff_sha256": "227a32b534c6122b0f81671916844030c6f256c02e55068826c64aec46002f08"
+    }
+  },
+  "corpus_sha256": "bc24163189e87b61ed721578dc77a777ef247e89125a588ea8817009e27a258d",
+  "fallback_allowed": false,
+  "generated_at": "2026-07-27T12:22:34.280818+00:00",
+  "library": "scripts/agent_eval_lib.py",
+  "library_sha256": "777549fb9e548970e16f2671f1a32b101d7b4cf5ebe51eb0085817ff3862ced3",
+  "max_concurrency": 4,
+  "model": "gpt-5.6-sol",
+  "prompt_surface_paths": [
+    ".codex/agents/determinism-reviewer.toml",
+    ".codex/agents/implementation-worker.toml",
+    ".codex/agents/inventory.toml",
+    ".codex/agents/migration-reviewer.toml",
+    ".codex/agents/money-reviewer.toml",
+    ".codex/agents/release-reviewer.toml",
+    ".codex/agents/test-porter.toml",
+    ".codex/config.toml",
+    "AGENTS.md",
+    "AGENT_EVALS.md",
+    "API_COMPATIBILITY.md",
+    "ARCHITECTURE.md",
+    "DATABASE.md",
+    "DECIMAL.md",
+    "INVARIANTS.md",
+    "MESSAGING.md",
+    "MODEL_POLICY.md",
+    "PROJECT_CHARTER.md",
+    "RECONCILIATION.md",
+    "TESTING.md",
+    "contracts/AGENTS.md",
+    "docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md",
+    "docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md",
+    "docs/AGENT_TASK_TEMPLATE.md",
+    "docs/TEST_PORTING_PLAYBOOK.md",
+    "internal/adapters/centrifugo/AGENTS.md",
+    "internal/adapters/hyperliquid/AGENTS.md",
+    "internal/adapters/nats/AGENTS.md",
+    "internal/adapters/postgres/AGENTS.md",
+    "internal/domain/AGENTS.md",
+    "internal/edge/AGENTS.md",
+    "internal/engine/AGENTS.md",
+    "migrations/AGENTS.md",
+    "policy/openai-agent-policy.json",
+    "ports/AGENTS.md",
+    "testkit/AGENTS.md"
+  ],
+  "report": "docs/agent-evals/2026-07-27-adversarial-review-workflow.md",
+  "runner": "scripts/run-agent-evals.py",
+  "runner_sha256": "ed3b77aea974fcd001ab926b90963a74c60d578411ee0cdc4e98302da00b3085",
+  "runs": [
+    {
+      "artifact": "baseline/001.json",
+      "artifact_sha256": "90329eea4e2e9912fd41a0e091fb86d73b57be5cc2ca29e480c30188521c2e41",
+      "event_errors": [],
+      "events": "baseline/001.events.jsonl",
+      "events_sha256": "08a264494570a90a947224627584ec4162aba73c2e0dacc653af3416af82dfc4",
+      "final_response_present": true,
+      "fixture": "001-exact-decimal-port.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 76.567,
+      "prompt_sha256": "a62dedb23afc5e224b0868b69ae5c2f6a92c58c955a4ef67ae3c2e3cd790367f",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "baseline/001.session.json",
+      "session_sha256": "599324e5a3365312c9828a8cc28e34db3c001c5a1136b8ad5989d126da5ed698",
+      "side": "baseline",
+      "thread_id": "019fa37e-c5a5-73c1-b71a-c39b877ee8c9",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 13056,
+        "input_tokens": 35828,
+        "output_tokens": 4567,
+        "reasoning_output_tokens": 3502
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "baseline/002.json",
+      "artifact_sha256": "9abe431989c7503ff5ea00b11d5e1d00a473abbf5741916f49f4f7eb5fe935f0",
+      "event_errors": [],
+      "events": "baseline/002.events.jsonl",
+      "events_sha256": "33cb5ebc9796d4a2732fe092b4c81481178354651df8ea91060bb6e0d71bd2c3",
+      "final_response_present": true,
+      "fixture": "002-idempotent-command.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 138.569,
+      "prompt_sha256": "ae919da356491dd1986d358ab37f7f748fb5816118bdf624938769419bbc6509",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "baseline/002.session.json",
+      "session_sha256": "4db0f76e95a6593c4112f0151bdfcdb58f0203f85316d72d5db8fa689f3877de",
+      "side": "baseline",
+      "thread_id": "019fa37e-c6f3-7011-89f8-886eb95cac04",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 13056,
+        "input_tokens": 30867,
+        "output_tokens": 9228,
+        "reasoning_output_tokens": 4245
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "baseline/003.json",
+      "artifact_sha256": "e6c4971b29d990d62a7c9eccd070dba3d08cee9b7a13458c4e7e423fabbf9757",
+      "event_errors": [],
+      "events": "baseline/003.events.jsonl",
+      "events_sha256": "2a9448b72fdbad0bdc86e875314231aca8ccadc11ffd039cdb20415c7860f051",
+      "final_response_present": true,
+      "fixture": "003-migration-review.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 104.937,
+      "prompt_sha256": "bcd8eea9a7c7187e31f080712bff728afc41e84506f092dc87242e45cceee9d0",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "baseline/003.session.json",
+      "session_sha256": "10e42ca35273a08edfa22cf2951c1a287aaff4f847c0ce1e7c79f6da9c43e501",
+      "side": "baseline",
+      "thread_id": "019fa37e-c61f-7cb2-aba7-ca4dc6f28393",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 13056,
+        "input_tokens": 29906,
+        "output_tokens": 6314,
+        "reasoning_output_tokens": 3810
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "baseline/004.json",
+      "artifact_sha256": "e0e8abdadbb86c50c270c2f2af4993455142a3080d393fd0d9f7bb63e355fe39",
+      "event_errors": [],
+      "events": "baseline/004.events.jsonl",
+      "events_sha256": "93f2a13cb3b6bbf5995b4a7cb44fe332e05c4f66d69df7ee12fc074830397509",
+      "final_response_present": true,
+      "fixture": "004-determinism-review.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 95.724,
+      "prompt_sha256": "d253c6b1914a5ca0598ccb0d5b4d26430278c624621ef9cb619cdfbf99942a9c",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "baseline/004.session.json",
+      "session_sha256": "60a441444e83ecf48a975fe442c36c2cf17622bc4cf2155f496dd2978983f95f",
+      "side": "baseline",
+      "thread_id": "019fa37e-c606-72f3-b598-81fdb59af987",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 13056,
+        "input_tokens": 29707,
+        "output_tokens": 5329,
+        "reasoning_output_tokens": 2070
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "baseline/005.json",
+      "artifact_sha256": "91a0284e630a35aa8a8bf8587891c1596dd3917b63c0748d17c09ee643d0dfe2",
+      "event_errors": [],
+      "events": "baseline/005.events.jsonl",
+      "events_sha256": "5bb51959640e99698b2d6f2081f05c9e004bc4d32482ecabe85b9f2cff39a0df",
+      "final_response_present": true,
+      "fixture": "005-http-contract-port.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 95.769,
+      "prompt_sha256": "5468c5aaf80f937cacd1deb78f3b0057b240e4b7e0993e1a689ef9c6aa4fa3f5",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "baseline/005.session.json",
+      "session_sha256": "3e272b5c6784e9112c524f95bc0ad0e0f5dc52ada7a1f2ff32ee3c43ffdb82b5",
+      "side": "baseline",
+      "thread_id": "019fa37f-f1cf-7603-bf2d-ca0f4483bbe9",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 0,
+        "input_tokens": 35964,
+        "output_tokens": 5489,
+        "reasoning_output_tokens": 3584
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "baseline/006.json",
+      "artifact_sha256": "33d2e8d226c06b2ea2919f52195c2d22aa07a0de9237939f4e8f48f0337536df",
+      "event_errors": [],
+      "events": "baseline/006.events.jsonl",
+      "events_sha256": "4d2f8865c5bfe55a54493f35dc3bced661adc00dfb8bc90f05c90310742bad27",
+      "final_response_present": true,
+      "fixture": "006-normative-conflict.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 73.633,
+      "prompt_sha256": "0e2fc55a0b2cf0114dbbf1a2b17e0fe2dfe16c76d8895f4e6c41592615b80c5e",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "baseline/006.session.json",
+      "session_sha256": "b51e58881643ba9628c5addb0101ec253e80716fd8d2dc684d7c3efa1cedac7c",
+      "side": "baseline",
+      "thread_id": "019fa380-3943-7153-abbd-5e6cb2eee6c5",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 0,
+        "input_tokens": 35395,
+        "output_tokens": 3863,
+        "reasoning_output_tokens": 1822
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "baseline/007.json",
+      "artifact_sha256": "20bb9c167d379c3a071101e7fc5f623d27b6dccdabde759e8aa2067f334a8d12",
+      "event_errors": [],
+      "events": "baseline/007.events.jsonl",
+      "events_sha256": "511769eb40b892a96229daa04ca797d1403ab06561173f42dba8b6aeed932759",
+      "final_response_present": true,
+      "fixture": "007-nats-ack-review.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 87.387,
+      "prompt_sha256": "e1c50cfa1ee88da2bfafa00f1f3f4fb6f882056bdc1227e4f3a433bd47436eb2",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "baseline/007.session.json",
+      "session_sha256": "0ab0a2b3f51af32be07801ae075b8a798c2d68cc132e72db2ef12a2842941eae",
+      "side": "baseline",
+      "thread_id": "019fa380-5d36-78e0-9237-2800cf5229bb",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 13056,
+        "input_tokens": 28850,
+        "output_tokens": 5052,
+        "reasoning_output_tokens": 2070
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "baseline/008.json",
+      "artifact_sha256": "5d02eb81dfb932d7d6312fa7bb3d4996e2c45bbc79208b613ec1d6254b3631ba",
+      "event_errors": [],
+      "events": "baseline/008.events.jsonl",
+      "events_sha256": "c992eee179ed58c14574f413e7878348b6867efbeebc4ab7080940b0527e354e",
+      "final_response_present": true,
+      "fixture": "008-realtime-gap-review.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 77.595,
+      "prompt_sha256": "569250fa061edd5a3f985597e0acc6db4fe784ebc334ae7c91635e5684653e55",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "baseline/008.session.json",
+      "session_sha256": "2ca467f37ac6129dfa1309f4ed463827823ed00339f0aeb92785066c5a8d37b5",
+      "side": "baseline",
+      "thread_id": "019fa380-e0ad-7472-aacc-27e662473887",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 0,
+        "input_tokens": 28418,
+        "output_tokens": 4209,
+        "reasoning_output_tokens": 1552
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "candidate/001.json",
+      "artifact_sha256": "fd38238ee2aec3bea34ea44bb309bc04a44048a1f466be0c4a43807cfba7ff36",
+      "event_errors": [],
+      "events": "candidate/001.events.jsonl",
+      "events_sha256": "c00d1dfeca7f2d80dbd88a49a86d399cb332e4d44beda7ac5a8ba3b8cbc739dc",
+      "final_response_present": true,
+      "fixture": "001-exact-decimal-port.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 77.807,
+      "prompt_sha256": "979b5126064832741efd186a8bb8e93a1dedd01eb25d732b360e489086fc5ff8",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "candidate/001.session.json",
+      "session_sha256": "38cd70663d71eb7eb084ae64656791f0a8868d7f4129cacd9a38c26ded6cfded",
+      "side": "candidate",
+      "thread_id": "019fa381-58f4-74d2-b37d-f4debc6258c8",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 0,
+        "input_tokens": 36930,
+        "output_tokens": 4590,
+        "reasoning_output_tokens": 3363
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "candidate/002.json",
+      "artifact_sha256": "5b8179b888dda38d398830737bc685957b8cdff8d11a13ed4520326b58fd65c0",
+      "event_errors": [],
+      "events": "candidate/002.events.jsonl",
+      "events_sha256": "ddb941951edb4ccdd3785abf7c7ec20ef28db8204aa918e765bbe295419d6813",
+      "final_response_present": true,
+      "fixture": "002-idempotent-command.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 98.954,
+      "prompt_sha256": "e0b1898c42cee95a08f1a631d0ac73049563a9158478df12f77d15635c1be6c8",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "candidate/002.session.json",
+      "session_sha256": "ed3265bd96bc3ced6ce87600697c911da9bc4e5fd028170791d89556d1bd9630",
+      "side": "candidate",
+      "thread_id": "019fa381-6493-7511-ac9e-0e7e3a43ec0b",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 13056,
+        "input_tokens": 32409,
+        "output_tokens": 5927,
+        "reasoning_output_tokens": 2685
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "candidate/003.json",
+      "artifact_sha256": "e47858a03a1e3420f1f066268577dadd81283c82983bc18489d4c43d5a3704ae",
+      "event_errors": [],
+      "events": "candidate/003.events.jsonl",
+      "events_sha256": "ab0206dbf9c643af855b3abf9bd2d855869bd5ed8aa7062870c6aa4704de659f",
+      "final_response_present": true,
+      "fixture": "003-migration-review.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 190.012,
+      "prompt_sha256": "589d49df6bedf799c70aa718132abdc67be45a2a7b78f6c38c655cadc604ac72",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "candidate/003.session.json",
+      "session_sha256": "6f44534058b28ae7ce46aaae013754b8812516170adb604d99007deb334bf607",
+      "side": "candidate",
+      "thread_id": "019fa381-b2a6-73c3-b13d-d376f0c4e163",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 0,
+        "input_tokens": 31836,
+        "output_tokens": 9513,
+        "reasoning_output_tokens": 5950
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "candidate/004.json",
+      "artifact_sha256": "9fc78bfebb1eddd6434349ea993d77964c09658584a4db6c29697a569cfae6d9",
+      "event_errors": [],
+      "events": "candidate/004.events.jsonl",
+      "events_sha256": "889743a64c3b985ca3aee275f9737ead43b3d2458c34cb7e55028ec7a48adaf0",
+      "final_response_present": true,
+      "fixture": "004-determinism-review.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 99.311,
+      "prompt_sha256": "c62c62ce36cd2d9779d2c50d46c90b3a41147b3a54acc219b2b196f142698515",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "candidate/004.session.json",
+      "session_sha256": "5c99ec0cee2d99c14eaa876891098f96fcfc8151b6559d3cf3f00cc27334f4b0",
+      "side": "candidate",
+      "thread_id": "019fa382-0fda-7e63-948f-f918cbad632e",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 13056,
+        "input_tokens": 31327,
+        "output_tokens": 5331,
+        "reasoning_output_tokens": 1034
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "candidate/005.json",
+      "artifact_sha256": "0fc9af5fdc3d3d087cf8408b71d853e8961ac663faeb8251a8c418cd7231ce94",
+      "event_errors": [],
+      "events": "candidate/005.events.jsonl",
+      "events_sha256": "0d289063fba3d3126c62b3bc0ddcc6b43e603c3df0cd4965601bce233ce1e4ec",
+      "final_response_present": true,
+      "fixture": "005-http-contract-port.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 112.275,
+      "prompt_sha256": "eaf1438e088d77355836961120281371d6ae23014369a70875461ac2ca894f09",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "candidate/005.session.json",
+      "session_sha256": "ef0f602c182ecf7e2ffbb687fb83e094e54fb86da52bad456d2b05ceaa0ee2d0",
+      "side": "candidate",
+      "thread_id": "019fa382-8a6c-7ff3-b0c1-53b0865a66b6",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 13056,
+        "input_tokens": 37066,
+        "output_tokens": 6810,
+        "reasoning_output_tokens": 4656
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "candidate/006.json",
+      "artifact_sha256": "cc28f75d27c89db7c4b71cc8f72fbf192bcdd4fb61f6eb0a3aad0586848a16d4",
+      "event_errors": [],
+      "events": "candidate/006.events.jsonl",
+      "events_sha256": "ef819a1e3f25d89a4eb783b5a1ddacaf473dbd788fc22f8fe8a117319e8f1dcc",
+      "final_response_present": true,
+      "fixture": "006-normative-conflict.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 58.788,
+      "prompt_sha256": "5d4c0f90d75fdbaddb873d27f2fd60361a6e56466f3f3c064b378a7ae1eca531",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "candidate/006.session.json",
+      "session_sha256": "13f116414bb3765b4573176a66e37b28d44d7e159b9be4f3e6bb2f3a0be06fb7",
+      "side": "candidate",
+      "thread_id": "019fa382-e72b-7a11-a9c3-151146db5339",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 13056,
+        "input_tokens": 36710,
+        "output_tokens": 3419,
+        "reasoning_output_tokens": 1552
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "candidate/007.json",
+      "artifact_sha256": "44f128e7f6d285d965e840767db66b24032d2f723e877c9566ceabd8fd859317",
+      "event_errors": [],
+      "events": "candidate/007.events.jsonl",
+      "events_sha256": "cd068ab58edf5249542dd412cdef45ad655fc5e808b6b9bc02252a27016fd5cb",
+      "final_response_present": true,
+      "fixture": "007-nats-ack-review.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 65.374,
+      "prompt_sha256": "15dc976eec9b195530e735bea9f5090ef1eefed330e75256e228881821426b3c",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "candidate/007.session.json",
+      "session_sha256": "a4e42415f4821919682d60a013006e51c457ed6fc29502f22881adbea9982f14",
+      "side": "candidate",
+      "thread_id": "019fa383-93cd-7b41-852d-5693d8821bc7",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 0,
+        "input_tokens": 30497,
+        "output_tokens": 3858,
+        "reasoning_output_tokens": 1034
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    },
+    {
+      "artifact": "candidate/008.json",
+      "artifact_sha256": "af5e5bb880d00cac71ee7451d9a69f570e08306c3a9cc37a6f7e1a3f2cab1cf0",
+      "event_errors": [],
+      "events": "candidate/008.events.jsonl",
+      "events_sha256": "8353dbacc77b7560f64abe1b2978f841c10f1a4819ca5283f9ecb2d2d0a465a1",
+      "final_response_present": true,
+      "fixture": "008-realtime-gap-review.md",
+      "item_counts": {
+        "agent_message": 1
+      },
+      "latency_seconds": 76.791,
+      "prompt_sha256": "7f684059ea1b101605396af8c952ff87afc4fca843ab2832c38f4c5ce2280faf",
+      "requested_model": "gpt-5.6-sol",
+      "return_code": 0,
+      "session": "candidate/008.session.json",
+      "session_sha256": "09083487b34a42a9251958b694b7c244e41f5b0b3a346f20dabe7f9c7758c04e",
+      "side": "candidate",
+      "thread_id": "019fa383-cce3-79f1-a6be-e948187267ab",
+      "usage": {
+        "cache_write_input_tokens": 0,
+        "cached_input_tokens": 13056,
+        "input_tokens": 30065,
+        "output_tokens": 4540,
+        "reasoning_output_tokens": 1552
+      },
+      "verified_session_model": "gpt-5.6-sol"
+    }
+  ],
+  "schema_version": 2
+}

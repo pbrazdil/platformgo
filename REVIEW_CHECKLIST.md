@@ -1,5 +1,11 @@
 # Review Checklist
 
+## Scope and preflight
+
+- [ ] High-risk boundaries completed adversarial preflight; low-risk exemption is justified.
+- [ ] Scope/design/failure matrix and representative failing tests were reviewed before implementation.
+- [ ] Advisory blockers are explicitly closed by the originating specialist.
+
 ## Behavior and specification
 
 - [ ] Tests were added/ported before production behavior.
@@ -48,8 +54,9 @@
 
 ## Database
 
-- [ ] New forward migration only.
-- [ ] No existing migration changed.
+- [ ] Frozen protected-branch or shared/persistent migration history is unchanged.
+- [ ] Any unfrozen candidate was used only in an explicitly disposable database.
+- [ ] Frozen schema corrections use a new forward migration.
 - [ ] Constraints/indexes and upgrade path are tested.
 - [ ] Economic SQL uses no floating point or `SELECT *`.
 
@@ -69,3 +76,4 @@
 - [ ] `make test-race`
 - [ ] `make test-repeat`
 - [ ] Relevant integration/contract tests
+- [ ] Exact candidate SHA/tree/base recorded; evidence belongs to that tree only

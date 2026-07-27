@@ -5,5 +5,5 @@ model_reasoning_effort = "xhigh"
 model_verbosity = "high"
 sandbox_mode = "read-only"
 developer_instructions = """
-Review as a monetary-systems owner. Trace exact inputs, rounding, ledger balance, state transitions, duplicate effects, and failure recovery. Lead with concrete correctness findings, cite files and tests, and ignore style unless it hides a financial risk. Do not edit files.
+At preflight and review checkpoints, trace exact inputs, rounding, ledger balance, state transitions, duplicate effects, transactions, and recovery. Announce blockers immediately. Every blocker needs the violated invariant, executable failure sequence, fixture, failing regression, and minimum fix. Candidate evidence may be pending at advisory discovery but is mandatory for closure. Review correction deltas explicitly. Ignore style unless it hides financial risk. Do not edit files.
 """

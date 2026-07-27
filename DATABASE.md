@@ -196,7 +196,12 @@ Immutable transaction and entry tables with constraints ensuring stable IDs and 
 - Applied migration filenames and SHA-256 checksums are stored in the database.
 - The migrator takes a global advisory lock.
 - Running services verify the expected schema version but never apply DDL.
-- Existing migration files are immutable.
+- A migration path and its exact bytes become immutable when first merged to a
+  protected branch or applied to a shared or persistent database, whichever
+  occurs first. Disposable local/test application does not freeze an
+  unpublished, unshared candidate. Before freeze it may be edited, renamed,
+  reordered, deleted, amended, or squashed; after freeze every correction is a
+  new forward migration.
 - Destructive changes use expand/backfill/contract across releases.
 - New code remains compatible with the prior release during rolling components where overlap is permitted.
 - The singleton engine uses no-overlap deployment; schema still follows forward-compatible practice.

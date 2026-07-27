@@ -43,6 +43,7 @@ WORD_BUDGETS = {
     "AGENTS.md": 1800,
     "MODEL_POLICY.md": 1300,
     "docs/AGENT_TASK_TEMPLATE.md": 400,
+    "docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md": 450,
     "docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md": 450,
 }
 
@@ -169,6 +170,7 @@ def validate_api_policy() -> None:
 
     if policy.get("templates") != {
         "task": "docs/AGENT_TASK_TEMPLATE.md",
+        "adversarial_preflight": "docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md",
         "critical_review": "docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md",
     }:
         fail("canonical prompt template paths are not pinned")
@@ -313,6 +315,7 @@ EXECUTABLE_CONFIG_SUFFIXES = {
 OPENAI_MODEL_LITERAL = re.compile(
     r"[\"'](gpt-[A-Za-z0-9._-]+|o[1-9](?:-[A-Za-z0-9._-]+)?|codex-[A-Za-z0-9._-]+)[\"']"
 )
+NON_MODEL_TOOL_LITERALS = {"codex-cli"}
 
 
 def validate_executable_model_literals() -> None:
@@ -326,6 +329,10 @@ def validate_executable_model_literals() -> None:
         text = path.read_text(encoding="utf-8", errors="ignore")
         for match in OPENAI_MODEL_LITERAL.finditer(text):
             slug = match.group(1)
+            # This is the installed runtime binary identity recorded by agent
+            # evaluations, not an OpenAI model assignment or model slug.
+            if slug in NON_MODEL_TOOL_LITERALS:
+                continue
             if slug != PINNED_MODEL:
                 fail(
                     f"unapproved OpenAI model literal {slug!r} "
@@ -346,6 +353,7 @@ def validate_docs() -> None:
             '"danger-full-access"',
             "Programmatic Tool Calling",
             "docs/AGENT_TASK_TEMPLATE.md",
+            "docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md",
             "docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md",
             "AGENT_EVALS.md",
             "https://developers.openai.com/api/docs/guides/latest-model",
@@ -355,6 +363,7 @@ def validate_docs() -> None:
             PINNED_MODEL,
             "MODEL_POLICY.md",
             "docs/AGENT_TASK_TEMPLATE.md",
+            "docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md",
             "docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md",
         ],
         "docs/AGENT_TASK_TEMPLATE.md": [
@@ -366,10 +375,27 @@ def validate_docs() -> None:
             "Validation:",
             "Deliverables:",
         ],
+        "docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md": [
+            "durable PostgreSQL",
+            "Authority and transaction boundary:",
+            "Lock order and writer ownership:",
+            "Duplicate delivery and lost acknowledgment:",
+            "Representative current-main upgrade:",
+            "Rollback and unknown commit:",
+            "Hostile default privileges",
+            "Tests that must fail first:",
+            "Stop conditions and owner decisions:",
+            "docs-only",
+        ],
         "docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md": [
             PINNED_MODEL,
             "Required evidence:",
-            "Failure sequence",
+            "Executable failure sequence",
+            "P0/P1",
+            "P2",
+            "P3",
+            "Minimum fix property",
+            "Exact candidate evidence",
             "go/no-go",
             "Read-only",
         ],
@@ -401,6 +427,7 @@ def validate_docs() -> None:
         ROOT / "MODEL_POLICY.md",
         ROOT / "README_POLICY_PACK.md",
         ROOT / "docs" / "AGENT_TASK_TEMPLATE.md",
+        ROOT / "docs" / "AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md",
         ROOT / "docs" / "AGENT_CRITICAL_REVIEW_TEMPLATE.md",
     ]
     for path in runtime_policy_docs:

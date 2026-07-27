@@ -1,5 +1,13 @@
 ## Behavior implemented
 
+## Risk and adversarial preflight
+
+- Risk classification:
+- Preflight required/exempt and why:
+- Preflight artifact:
+- Migration/determinism/money reviewers:
+- Blockers found before implementation:
+
 ## Source tests ported
 
 - Source repository/revision/path/line/function:
@@ -32,7 +40,8 @@
 ## Database and messaging
 
 - Migration added:
-- Existing migrations unchanged:
+- Frozen protected/shared migration history unchanged:
+- Shared/persistent migration application: none, or exact path/SHA-256/source commit/environment
 - NATS subjects/streams/consumers changed:
 
 ## Dependencies
@@ -53,6 +62,34 @@
 - If yes, separate governance PR: yes/no
 - Agent-eval report: <path or not applicable>
 - All agents remained pinned to `gpt-5.6-sol`: yes/no
+
+## Review checkpoints and exact evidence
+
+- Scope/design/failure-matrix review:
+- Failing-test review:
+- Implementation-boundary review:
+- Advisory closure tree:
+- Full-validation SHA:
+- Candidate SHA: <full 40-character commit>
+- Candidate tree: <full 40-character tree>
+- Base SHA: <full 40-character commit>
+- Specialist review SHA:
+- Final review SHA:
+- Hosted CI SHA:
+
+Before full validation, implementation deltas may use focused affected checks.
+Evidence and GO never transfer to a changed tree or SHA. After full validation,
+a changed tree or SHA invalidates advisory closure, validation, specialist
+evidence, and final approval; rerun the complete required full-validation set
+and obtain fresh exact-SHA specialist and independent final reviews.
+
+## Workflow metrics
+
+- Blockers found before implementation:
+- Blockers found after full validation:
+- Exact-SHA candidate count:
+- Implementation time:
+- Review/test wait time:
 
 ## Commands run
 

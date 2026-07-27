@@ -97,7 +97,8 @@ for path in "${changed[@]}"; do
     CONTRIBUTING.md|REVIEW_CHECKLIST.md|README_POLICY_PACK.md|\
     go-native-test-porting-agent-playbook.md|\
     policy/*|policy/**/*|\
-    docs/AGENT_TASK_TEMPLATE.md|docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md|\
+    docs/AGENT_TASK_TEMPLATE.md|docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md|\
+    docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md|\
     docs/agent-evals/*|docs/agent-evals/**/*|testdata/agent-evals/*|\
     testdata/agent-evals/**/*|docs/TEST_PORTING_PLAYBOOK.md|docs/adr/*|\
     docs/adr/**/*|.codex/*|.codex/**/*|.agents/*|.agents/**/*|\
@@ -106,7 +107,9 @@ for path in "${changed[@]}"; do
     ports/test-port-map.csv|ports/decisions/*|ports/decisions/**/*|\
     scripts/policy-check.sh|scripts/check-*.py|\
     scripts/check-*.sh|scripts/check-*.go|scripts/test-check-*.py|\
-    scripts/test-check-*.sh|\
+    scripts/test-check-*.sh|scripts/test-agent-workflow-policy.py|\
+    scripts/agent_eval_lib.py|scripts/run-agent-evals.py|\
+    scripts/check-agent-eval-evidence.py|\
     tools/policycheck/*|tools/policycheck/**/*|tools/testinventory/*|\
     tools/testinventory/**/*)
       protected_governance=1

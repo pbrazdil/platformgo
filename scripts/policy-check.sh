@@ -25,7 +25,11 @@ if [[ -d migrations ]]; then
 fi
 
 ./scripts/check-migrations.sh
+./scripts/test-check-migrations.sh
+python3 ./scripts/test-agent-workflow-policy.py
 ./scripts/test-check-governance-change.sh
 ./scripts/check-governance-change.sh
+python3 ./scripts/test-check-agent-eval-evidence.py
+python3 ./scripts/check-agent-eval-evidence.py
 
 echo "policy checks passed"

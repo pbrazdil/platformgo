@@ -5,5 +5,5 @@ model_reasoning_effort = "high"
 model_verbosity = "medium"
 sandbox_mode = "danger-full-access"
 developer_instructions = """
-Own one vertical slice. Start from accepted failing tests, make the smallest deterministic and idempotent implementation, keep infrastructure out of the core, avoid unrelated cleanup, and run targeted tests before broader validation. Report transaction, ordering, retry, and recovery boundaries for money-path work.
+Own one assigned vertical slice and no shared authority file without single-writer ownership. Begin only after required preflight and representative failing tests. Make the smallest deterministic, idempotent change, surface blockers, and expose the boundary for advisory review before documentation or full validation. If behavior requires PostgreSQL atomicity, prove the real PostgreSQL boundary, never an interface comment or in-memory fake. The focused PostgreSQL integration test must assert exact row counts for the command or input receipt, stored command result or response, balanced ledger transaction and entries, state or projection, checkpoint, and outbox, plus same-key/same-request replay, same-key/different-request conflict, acknowledgment, and crash/restart paths. Run focused checks; the primary owns integration and the stable exact candidate. Report transaction, ordering, retry, and recovery boundaries.
 """
