@@ -35,8 +35,8 @@ type scopeGateWriterResult struct {
 
 type scopeGateIdentityProbe struct {
 	edge.IdentityService
+	observerPool             *pgxpool.Pool
 	createBrokerAccountCalls atomic.Uint64
-	engineCommitted          *atomic.Bool
 	returnedBeforeCommit     atomic.Bool
 }
 
@@ -53,10 +53,65 @@ func (probe *scopeGateIdentityProbe) CreateBrokerAccount(
 		idempotencyKey,
 		request,
 	)
-	if !probe.engineCommitted.Load() {
-		probe.returnedBeforeCommit.Store(true)
+	if err == nil {
+		var committed bool
+		queryErr := probe.observerPool.QueryRow(ctx, `
+			SELECT
+				command.status = 'accepted'
+				AND idempotency.state = 'completed'
+				AND EXISTS (
+					SELECT 1
+					  FROM trading.accounts AS trading_account
+					  JOIN identity.user_accounts AS ownership
+					    ON ownership.account_id = trading_account.account_id
+					   AND ownership.user_id = $4
+					   AND ownership.broker_subject = $5
+					  JOIN identity.account_profiles AS profile
+					    ON profile.account_id = trading_account.account_id
+					 WHERE trading_account.account_id = $3
+				)
+			  FROM trading.idempotency_records AS idempotency
+			  JOIN trading.commands AS command
+			    ON command.command_id = idempotency.command_id
+			 WHERE idempotency.scope = $1
+			   AND idempotency.idempotency_key = $2`,
+			"broker-account\x1f"+principal.Subject,
+			idempotencyKey,
+			admission.ID,
+			admission.UserID,
+			principal.Tenant,
+		).Scan(&committed)
+		if queryErr != nil || !committed {
+			probe.returnedBeforeCommit.Store(true)
+		}
 	}
 	return admission, err
+}
+
+type scopeGateBodyProbe struct {
+	handler   http.Handler
+	bodyReads atomic.Uint64
+}
+
+func (probe *scopeGateBodyProbe) ServeHTTP(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	request.Body = &scopeGateReadCloser{
+		ReadCloser: request.Body,
+		bodyReads:  &probe.bodyReads,
+	}
+	probe.handler.ServeHTTP(writer, request)
+}
+
+type scopeGateReadCloser struct {
+	io.ReadCloser
+	bodyReads *atomic.Uint64
+}
+
+func (body *scopeGateReadCloser) Read(buffer []byte) (int, error) {
+	body.bodyReads.Add(1)
+	return body.ReadCloser.Read(buffer)
 }
 
 // Ported from:
@@ -143,12 +198,10 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	defer enginePool.Close()
 
 	now := time.Date(2026, time.July, 27, 18, 0, 0, 123456789, time.UTC)
-	var engineCommitted atomic.Bool
-	server, identityProbe := newScopeGateServer(
+	server, identityProbe, bodyProbe := newScopeGateServer(
 		t,
 		apiPool,
 		now,
-		&engineCommitted,
 	)
 	requestBody := `{"userId":"` + userID + `"}`
 	writerDone := make(chan scopeGateWriterResult, 1)
@@ -225,8 +278,6 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 			decision.CommandResult.Status,
 		)
 	}
-	engineCommitted.Store(true)
-
 	writer := <-writerDone
 	if writer.err != nil {
 		t.Fatal(writer.err)
@@ -252,6 +303,10 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	}
 	if identityProbe.returnedBeforeCommit.Load() {
 		t.Fatal("writer application returned before the engine commit completed")
+	}
+	writerBodyReads := bodyProbe.bodyReads.Load()
+	if writerBodyReads == 0 {
+		t.Fatal("writer request body was not read")
 	}
 
 	before := readScopeGateSnapshot(
@@ -291,6 +346,13 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	if got := identityProbe.createBrokerAccountCalls.Load(); got != 1 {
 		t.Fatalf("reader crossed authorization boundary: application calls = %d", got)
 	}
+	if got := bodyProbe.bodyReads.Load(); got != writerBodyReads {
+		t.Fatalf(
+			"reader crossed authorization boundary: body reads = %d, want %d",
+			got,
+			writerBodyReads,
+		)
+	}
 	after := readScopeGateSnapshot(
 		t,
 		admin,
@@ -309,11 +371,10 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restartedAPIPool.Close()
-	restartedServer, restartedIdentityProbe := newScopeGateServer(
+	restartedServer, restartedIdentityProbe, restartedBodyProbe := newScopeGateServer(
 		t,
 		restartedAPIPool,
 		now,
-		&engineCommitted,
 	)
 	assertScopeGateDenied(
 		t,
@@ -337,6 +398,12 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 			got,
 		)
 	}
+	if got := restartedBodyProbe.bodyReads.Load(); got != 0 {
+		t.Fatalf(
+			"reader crossed restarted authorization boundary: body reads = %d",
+			got,
+		)
+	}
 	restarted := readScopeGateSnapshot(
 		t,
 		admin,
@@ -357,12 +424,8 @@ func newScopeGateServer(
 	t *testing.T,
 	apiPool *pgxpool.Pool,
 	now time.Time,
-	engineCommitted *atomic.Bool,
-) (*httptest.Server, *scopeGateIdentityProbe) {
+) (*httptest.Server, *scopeGateIdentityProbe, *scopeGateBodyProbe) {
 	t.Helper()
-	if engineCommitted == nil {
-		t.Fatal("scope-gate server requires an engine commit observer")
-	}
 	authenticator, err := edge.NewHMACAuthenticator(edge.HMACAuthenticatorConfig{
 		ClientTokenSecret: []byte("phase3-scope-gate-client-secret!"),
 		BrokerCredentials: []edge.BrokerCredential{
@@ -401,14 +464,15 @@ func newScopeGateServer(
 	}
 	identityProbe := &scopeGateIdentityProbe{
 		IdentityService: identity,
-		engineCommitted: engineCommitted,
+		observerPool:    apiPool,
 	}
-	server := httptest.NewServer(edge.NewServer(edge.ServerConfig{
+	bodyProbe := &scopeGateBodyProbe{handler: edge.NewServer(edge.ServerConfig{
 		Authenticator: authenticator,
 		Identity:      identityProbe,
-	}).Handler())
+	}).Handler()}
+	server := httptest.NewServer(bodyProbe)
 	t.Cleanup(server.Close)
-	return server, identityProbe
+	return server, identityProbe, bodyProbe
 }
 
 func waitForScopeGateCommand(
