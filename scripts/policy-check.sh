@@ -25,6 +25,7 @@ if [[ -d migrations ]]; then
 fi
 
 ./scripts/check-migrations.sh
+./scripts/test-check-governance-change.sh
 ./scripts/check-governance-change.sh
 
 echo "policy checks passed"

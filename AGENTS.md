@@ -61,7 +61,12 @@ Use this order when deciding behavior:
 
 Do not silently resolve a conflict between normative sources. Record it under `ports/decisions/`, mark affected rows in `ports/test-port-map.csv` as `conflict`, and request an owner decision.
 
-Changing an accepted economic behavior requires a separate ADR, updated tests, a compatibility impact statement, and owner approval. Governance or invariant changes must not be mixed with the implementation change that benefits from weakening them.
+Faithful updates to implementation companion documentation, including
+`DATABASE.md` and `OPERATIONS.md`, belong atomically with the implementation
+they describe. This does not authorize changing an accepted economic behavior:
+that still requires a separate ADR, updated tests, a compatibility impact
+statement, and owner approval. Protected governance or invariant changes must
+not be mixed with the implementation change that benefits from weakening them.
 
 ## Autonomy and authority boundary
 
