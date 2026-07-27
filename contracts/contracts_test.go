@@ -60,6 +60,9 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 	if !contains(manifest.EnvironmentKeys, "UZO_ENGINE_SHARD_ID") {
 		t.Fatal("UZO_ENGINE_SHARD_ID missing from compatibility manifest")
 	}
+	if !contains(manifest.EnvironmentKeys, "UZO_HTTP_HEALTH_ADDR") {
+		t.Fatal("UZO_HTTP_HEALTH_ADDR missing from compatibility manifest")
+	}
 	if !contains(manifest.EnvironmentKeys, "UZO_TRUSTED_PROXY_CIDRS") {
 		t.Fatal("UZO_TRUSTED_PROXY_CIDRS missing from compatibility manifest")
 	}
