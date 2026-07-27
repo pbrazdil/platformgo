@@ -445,6 +445,16 @@ func newScopeGateServer(
 	now time.Time,
 ) (*httptest.Server, *scopeGateIdentityProbe, *scopeGateBodyProbe) {
 	t.Helper()
+	return newScopeGateServerWithRequestID(t, apiPool, now, nil)
+}
+
+func newScopeGateServerWithRequestID(
+	t *testing.T,
+	apiPool *pgxpool.Pool,
+	now time.Time,
+	requestID func() string,
+) (*httptest.Server, *scopeGateIdentityProbe, *scopeGateBodyProbe) {
+	t.Helper()
 	authenticator, err := edge.NewHMACAuthenticator(edge.HMACAuthenticatorConfig{
 		ClientTokenSecret: []byte("phase3-scope-gate-client-secret!"),
 		BrokerCredentials: []edge.BrokerCredential{
@@ -461,6 +471,13 @@ func newScopeGateServer(
 				Subject:    "urn:xb:apikey:scope-gate-reader",
 				Tenant:     "urn:xb:tenant:scope-gate",
 				Scopes:     []string{"accounts:read"},
+			},
+			{
+				Prefix:     "xbk_scope_wildcard",
+				SecretHash: edge.HashBrokerSecret("wildcard-secret"),
+				Subject:    "urn:xb:apikey:scope-gate-wildcard",
+				Tenant:     "urn:xb:tenant:scope-gate",
+				Scopes:     []string{"*"},
 			},
 		},
 		Clock: scopeGateClock{value: now},
@@ -488,6 +505,7 @@ func newScopeGateServer(
 	bodyProbe := &scopeGateBodyProbe{handler: edge.NewServer(edge.ServerConfig{
 		Authenticator: authenticator,
 		Identity:      identityProbe,
+		RequestID:     requestID,
 	}).Handler()}
 	server := httptest.NewServer(bodyProbe)
 	t.Cleanup(server.Close)
