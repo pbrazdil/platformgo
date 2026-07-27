@@ -135,7 +135,10 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("PLATFORMGO_TEST_POSTGRES_DSN is not configured")
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	t.Cleanup(httpClient.CloseIdleConnections)
 	admin, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +222,7 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 		request.Header.Set("content-type", "application/json")
 		request.Header.Set("x-api-key", "xbk_scope_writer.writer-secret")
 		request.Header.Set("idempotency-key", idempotency)
-		response, requestErr := http.DefaultClient.Do(request)
+		response, requestErr := httpClient.Do(request)
 		if requestErr != nil {
 			writerDone <- scopeGateWriterResult{err: requestErr}
 			return
@@ -311,6 +314,7 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 
 	before := readScopeGateSnapshot(
 		t,
+		ctx,
 		admin,
 		writerScope,
 		"broker-account\x1furn:xb:apikey:scope-gate-reader",
@@ -329,6 +333,8 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 
 	assertScopeGateDenied(
 		t,
+		ctx,
+		httpClient,
 		server.URL,
 		requestBody,
 		idempotency,
@@ -337,6 +343,8 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	)
 	assertScopeGateDenied(
 		t,
+		ctx,
+		httpClient,
 		server.URL,
 		`{`,
 		idempotency,
@@ -355,6 +363,7 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	}
 	after := readScopeGateSnapshot(
 		t,
+		ctx,
 		admin,
 		writerScope,
 		"broker-account\x1furn:xb:apikey:scope-gate-reader",
@@ -378,6 +387,8 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	)
 	assertScopeGateDenied(
 		t,
+		ctx,
+		httpClient,
 		restartedServer.URL,
 		requestBody,
 		idempotency,
@@ -386,6 +397,8 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	)
 	assertScopeGateDenied(
 		t,
+		ctx,
+		httpClient,
 		restartedServer.URL,
 		`{`,
 		idempotency,
@@ -406,6 +419,7 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	}
 	restarted := readScopeGateSnapshot(
 		t,
+		ctx,
 		admin,
 		writerScope,
 		"broker-account\x1furn:xb:apikey:scope-gate-reader",
@@ -523,6 +537,8 @@ func waitForScopeGateCommand(
 
 func assertScopeGateDenied(
 	t *testing.T,
+	ctx context.Context,
+	httpClient *http.Client,
 	serverURL string,
 	requestBody string,
 	idempotencyKey string,
@@ -530,16 +546,22 @@ func assertScopeGateDenied(
 	accountID string,
 ) {
 	t.Helper()
-	response := requestJSON(
-		t,
+	request, err := http.NewRequestWithContext(
+		ctx,
 		http.MethodPost,
 		serverURL+"/broker/v1/accounts",
-		requestBody,
-		map[string]string{
-			"x-api-key":       "xbk_scope_reader.reader-secret",
-			"idempotency-key": idempotencyKey,
-		},
+		bytes.NewBufferString(requestBody),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("content-type", "application/json")
+	request.Header.Set("x-api-key", "xbk_scope_reader.reader-secret")
+	request.Header.Set("idempotency-key", idempotencyKey)
+	response, err := httpClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
 	body, err := io.ReadAll(response.Body)
 	closeErr := response.Body.Close()
 	if err != nil || closeErr != nil {
@@ -587,6 +609,7 @@ type scopeGateSnapshot struct {
 
 func readScopeGateSnapshot(
 	t *testing.T,
+	ctx context.Context,
 	admin *pgxpool.Pool,
 	writerScope string,
 	readerScope string,
@@ -594,7 +617,7 @@ func readScopeGateSnapshot(
 ) scopeGateSnapshot {
 	t.Helper()
 	var snapshot scopeGateSnapshot
-	if err := admin.QueryRow(context.Background(), `
+	if err := admin.QueryRow(ctx, `
 		SELECT
 			command_id::text,
 			request_hash,
