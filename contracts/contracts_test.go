@@ -81,6 +81,7 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 		}
 	}
 	requiredDeviations := []string{
+		"broker-account-identifiers-preserve-current-go-urns",
 		"client-api-key-creation-requires-idempotency-key",
 		"fill-trade-type-is-always-classified",
 	}
