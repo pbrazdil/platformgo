@@ -67,19 +67,6 @@ func TestIPAllowlistRejectsNonMatchingSource(t *testing.T) {
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/identity/e2e_broker.rs:307
-//	test: expired_key_is_rejected
-func TestExpiredKeyIsRejected(t *testing.T) {
-	fixture := brokerTraderNewFixture()
-	token := fixture.createBrokerKey("short-lived", []string{"*"}, nil, 1, "")
-	brokerTraderRequireStatus(t, fixture.brokerPing(token, ""), brokerTraderStatusOK)
-	fixture.now += 2
-	brokerTraderRequireStatus(t, fixture.brokerPing(token, ""), brokerTraderStatusUnauthorized)
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/identity/e2e_tenant_isolation.rs:40
 //	test: broker_access_is_scoped_to_its_tenant
 func TestBrokerAccessIsScopedToItsTenant(t *testing.T) {

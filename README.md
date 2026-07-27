@@ -247,6 +247,15 @@ account, ownership, profile, command, and provisioning graph. The accepted
 identifier deviation is stated below. This source acceptance does not add
 replay, restart, concurrency, cross-tenant, or network-delivery claims.
 
+Broker credential expiry is separately accepted through the production
+configured-HMAC authority and HTTP edge. The same explicitly configured key is
+valid before its one-second expiry and receives `401` after two seconds without
+using a wall-clock sleep. The current Go fail-closed equality boundary is also
+covered: a key is unauthorized at the exact expiry instant. This acceptance
+does not claim dynamic broker-key creation, PostgreSQL broker-key authority,
+revocation, restart, multi-replica clock consistency, or monotonic expiry
+across a backward system-clock correction.
+
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
@@ -256,8 +265,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 71
-independently reviewed green source tests; 2,580 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 72
+independently reviewed green source tests; 2,579 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
