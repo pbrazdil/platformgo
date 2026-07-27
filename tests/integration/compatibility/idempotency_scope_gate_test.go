@@ -256,7 +256,12 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
-		if closeErr := ownership.Close(context.Background()); closeErr != nil {
+		cleanupContext, cancelCleanup := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			2*time.Second,
+		)
+		defer cancelCleanup()
+		if closeErr := ownership.Close(cleanupContext); closeErr != nil {
 			t.Errorf("close engine ownership: %v", closeErr)
 		}
 	}()
