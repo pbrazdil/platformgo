@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "session_meta": {
+    "cli_version": "0.145.0",
+    "id": "019fa35a-3d59-7771-afae-a4ef3fc7f29f",
+    "model_provider": "openai",
+    "session_id": "019fa35a-3d59-7771-afae-a4ef3fc7f29f",
+    "source": "exec"
+  },
+  "source_rollout_sha256": "78f7630a9a230237724922bc81be129b908cf02eef209f77e98451348abf735f",
+  "thread_id": "019fa35a-3d59-7771-afae-a4ef3fc7f29f",
+  "turn_context": {
+    "approval_policy": "never",
+    "effort": "xhigh",
+    "model": "gpt-5.6-sol",
+    "sandbox_policy": {
+      "type": "read-only"
+    },
+    "turn_id": "019fa35a-3ddb-7541-b572-e1eb9dd98b9d"
+  }
+}

@@ -179,6 +179,15 @@ git -C "$repo" add internal/service.go scripts/check-dependencies.py
 git -C "$repo" commit -qm "implementation with policy checker"
 expect_protected_failure "implementation + policy checker"
 
+# The workflow-policy regression is itself protected governance. Otherwise an
+# implementation could weaken the test that guards its own review policy.
+new_repo "implementation-workflow-policy-test"
+append_line "internal/service.go" "const workflowPolicyConflict = true"
+write_file "scripts/test-agent-workflow-policy.py" "print('weakened workflow policy')"
+git -C "$repo" add internal/service.go scripts/test-agent-workflow-policy.py
+git -C "$repo" commit -qm "implementation with workflow policy regression"
+expect_protected_failure "implementation + workflow policy regression"
+
 # 8. Protected governance changes without implementation.
 new_repo "governance-only"
 append_line "INVARIANTS.md" "Governance-only change."
@@ -395,6 +404,10 @@ protected_paths=(
   .agents/reviewer.toml
   prompts/review.md
   .github/pull_request_template.md
+  scripts/test-agent-workflow-policy.py
+  scripts/agent_eval_lib.py
+  scripts/run-agent-evals.py
+  scripts/check-agent-eval-evidence.py
 )
 protected_index=0
 for protected_path in "${protected_paths[@]}"; do

@@ -315,6 +315,7 @@ EXECUTABLE_CONFIG_SUFFIXES = {
 OPENAI_MODEL_LITERAL = re.compile(
     r"[\"'](gpt-[A-Za-z0-9._-]+|o[1-9](?:-[A-Za-z0-9._-]+)?|codex-[A-Za-z0-9._-]+)[\"']"
 )
+NON_MODEL_TOOL_LITERALS = {"codex-cli"}
 
 
 def validate_executable_model_literals() -> None:
@@ -328,6 +329,10 @@ def validate_executable_model_literals() -> None:
         text = path.read_text(encoding="utf-8", errors="ignore")
         for match in OPENAI_MODEL_LITERAL.finditer(text):
             slug = match.group(1)
+            # This is the installed runtime binary identity recorded by agent
+            # evaluations, not an OpenAI model assignment or model slug.
+            if slug in NON_MODEL_TOOL_LITERALS:
+                continue
             if slug != PINNED_MODEL:
                 fail(
                     f"unapproved OpenAI model literal {slug!r} "

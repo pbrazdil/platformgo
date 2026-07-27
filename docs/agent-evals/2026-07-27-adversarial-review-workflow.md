@@ -2,105 +2,159 @@
 
 ## Candidate
 
-- Baseline: `origin/main` at
-  `f912cbf80607878fea7b426df02e42cb975f3a7f`.
-- Candidate: the uncommitted governance-only workflow diff on
-  `feat/adversarial-review-workflow`.
-- Changed instruction group: risk-first preflight, advisory/exact-SHA review,
-  validation ladder, severity evidence, parallel ownership, and the precise
-  migration freeze boundary.
+- Baseline: `f912cbf80607878fea7b426df02e42cb975f3a7f`, tree
+  `70922b8b149c3a45c3480988bfa740563c062f61`.
+- Candidate prompt-surface digest:
+  `6c386fda877a7e62b4e7791d863af46bfde02ed669b1dc365dc48f6cce80d1f1`.
+  The manifest records the candidate as the working diff over
+  `a0f8adad842ebff854972879febcc340fba10870`; the final governance commit
+  must preserve this digest.
+- Changed instruction group: risk-first preflight, advisory and exact-SHA
+  review, validation sequencing, severity evidence, parallel ownership, and
+  the precise migration-freeze boundary.
 - Preserved boundaries: exact money, determinism, single-writer ordering,
   idempotency, PostgreSQL authority, compatibility, security, recovery,
-  `gpt-5.6-sol`, never approvals, and full access for editing agents.
+  exact `gpt-5.6-sol`, never approvals, and full access for editing agents.
 
-## Method and limits
+## Method and trust boundary
 
-An independent exact-model reviewer performed a static, read-only
-baseline/candidate comparison against the unchanged eight fixed fixtures under
-`testdata/agent-evals/tasks/`. The comparison used `gpt-5.6-sol` and inspected
-each assignment, required outcome, forbidden action, and rubric.
+The fixed eight-task corpus ran once against the baseline prompts and once
+against the candidate prompts through `codex-cli 0.145.0`. All 16 subject
+runs explicitly requested `gpt-5.6-sol`; their isolated session snapshots
+recorded the same returned model. The runner used `approval_policy=never`,
+read-only sandboxes, no fallback, and four concurrent workers. Every subject
+returned one final response and made zero tool calls.
 
-All eight fixture files are byte-for-byte unchanged from `origin/main`. This
-was not an empirical execution of their production actions; no fixture
-implementation or review artifacts were produced.
+Two additional isolated CLI sessions scored the baseline and candidate
+responses against the protected baseline `AGENT_EVALS.md` and hidden rubrics.
+The scorer did not load candidate named-agent profiles or inspect the
+candidate filesystem. The ninth opaque deficient item failed on both sides,
+demonstrating that the scorer did not accept every uniform item.
 
-## Profile configuration
+The evidence is locally generated, unsigned, and therefore forgeable by a
+governance author. Hashes prove internal consistency, not provider attestation
+or machine-enforced independent release approval. The scorer bootstrap and
+runner are candidate-versioned. This behavioral gate is one defense layer;
+fresh external specialist and final release reviews over the exact stable SHA,
+followed by hosted CI on that SHA, remain mandatory.
 
-| Fixtures | Profile | Effort | Context | Mode | Verbosity |
-|---|---|---|---|---|---|
-| 001, 002, 005 | `implementation` | `high` | `all_turns` | standard | medium |
-| 003, 004, 006, 007, 008 | `critical-review` | `xhigh` | `current_turn` | pro | high |
+Evidence:
+`docs/agent-evals/artifacts/2026-07-27-adversarial-review-workflow/manifest.json`
+and adjacent `reviews.json`. The manifest binds the fixed corpus, prompt
+surfaces, runner/library bytes, raw events, sanitized session snapshots, final
+responses, scorer sessions, and committed reviews.
 
-The baseline and candidate use the same profiles and exact model.
+## Runtime and policy profiles
+
+| Fixtures | Policy profile | Effort | Verbosity | Executed runtime |
+|---|---|---|---|---|
+| 001, 002, 005 | `implementation` | `high` | `medium` | isolated Codex CLI |
+| 003, 004, 006, 007, 008 | `critical-review` | `xhigh` | `high` | isolated Codex CLI |
+
+The repository policy also contains context and profile metadata. The CLI
+evidence verifies the exact model, effort, verbosity, approval policy, and
+sandbox used by the runner; it does not claim a separately attested `pro`
+runtime mode.
 
 ## Fixed-corpus results
 
-| Fixture | Baseline | Candidate | Static evidence preserved |
+| Fixture | Baseline | Candidate | Behavioral evidence |
 |---|---|---|---|
-| 001 exact-decimal port | PASS | PASS | Exact strings, half-even rounding, currency assertion, provenance, ownership, and prohibitions on Rust execution and floats. |
-| 002 idempotent command | PASS | PASS | Atomic PostgreSQL transaction, stable business identity, duplicate handling, acknowledgment after commit, and crash replay. |
-| 003 migration review | PASS | PASS | Read-only scope, data/lock/rewrite and compatibility analysis, staged backfill, retry/restart, and a forward correction. An unspecified environment is not presumed disposable; uncertain freeze state stops for owner review. |
-| 004 determinism review | PASS | PASS | Wall time, scheduling, map order, sequence, shared mutation, dual writers, and stale fencing remain mandatory findings. |
-| 005 HTTP contract port | PASS | PASS | Status, decimal scale, nullability, byte-stable replay, conflict mapping, provenance, and exact assigned scope. |
-| 006 normative conflict | PASS | PASS | The agent records the conflict and stops; it cannot choose rounding, add tolerance, skip the test, or weaken policy. |
-| 007 NATS acknowledgment | PASS | PASS | Stable effect identity, inbox/effect transactionality, acknowledgment after commit, and duplicate-debit crash sequences. |
-| 008 realtime gap | PASS | PASS | Stable event identity/sequence, duplicate tolerance, committed publication, PostgreSQL authority, and snapshot recovery. |
+| 001 exact-decimal port | PASS | PASS | Exact strings, half-even rounding, currency assertion, function-attached provenance, ownership, and no Rust or floats. |
+| 002 idempotent command | FAIL | PASS | Candidate requires real PostgreSQL atomicity, exact receipt/result/ledger/state/checkpoint/outbox row counts, conflict handling, acknowledgment after commit, and crash/restart proof. Baseline proposed only an incomplete in-memory fake. |
+| 003 migration review | PASS | PASS | Data, lock, rewrite, compatibility, retry/restart, immutable history, and uncertain-environment stop conditions. |
+| 004 determinism review | PASS | PASS | Wall time, scheduling, map order, explicit sequence, single writer, durable fencing, and stale-writer rejection. |
+| 005 HTTP contract port | PASS | PASS | Exact HTTP/JSON behavior, decimal scale, nullability, replay, conflict mapping, and function-attached provenance. |
+| 006 normative conflict | PASS | PASS | Both sources become conflict/needs-decision and implementation stops for owner choice without weakening either rule. |
+| 007 NATS acknowledgment | PASS | PASS | Stable business identity, atomic durable receipt/effect state, post-commit acknowledgment, and loss/duplicate crash sequences. |
+| 008 realtime gap | PASS | PASS | Committed outbox publication, stable identity/sequence, initial authoritative snapshot/watermark, duplicate tolerance, and gap reload. |
 
-Static corpus result: baseline PASS 8/8; candidate PASS 8/8; critical
-violations 0.
+Result: baseline PASS 7/8; candidate PASS 8/8. Candidate required-evidence
+completeness is 8/8, final-response completeness is 8/8, critical violations
+are zero, runtime approval prompts are zero, out-of-scope changes are zero,
+and candidate weakening is false. The stricter current rubric intentionally
+reports the baseline deficiency instead of grandfathering it as a pass.
 
 ## Focused workflow regressions
 
-`scripts/test-agent-workflow-policy.py` proves:
+The policy suites prove:
 
-- high-risk preflight and low-risk docs/mechanical/test-only exemption;
-- all required P0/P1 evidence and no protected-correctness laundering to P2/P3;
-- P3 non-blocking treatment without stale evidence after an implemented edit;
-- advisory working-diff review, delta closure, and no advisory release approval;
-- one stable full validation pass before exact-SHA specialist and independent
-  final review, followed by push and hosted CI on that head SHA;
-- focused affected checks only before full validation, then complete
-  full-validation and exact-SHA review repetition after any tree change;
-- protected/shared migration freeze plus the disposable-only exception;
-- exact `gpt-5.6-sol`, expected agents, and never/full-access runtime settings.
-
-`scripts/test-check-migrations.sh` uses isolated temporary Git repositories to
-prove exact frozen path/byte identity in committed, staged, unstaged, and
-hosted-CI states; rename/delete and index/worktree cancellation resistance;
-support-document scope; mutable unshared candidates; pre-freeze squash; no
-insertion before the frozen tip; trusted local base selection; and exact push
-predecessor behavior.
+- high-risk tasks require adversarial preflight while docs-only, mechanical,
+  and isolated test-only work remains exempt;
+- P0/P1 requires an invariant, executable failure sequence, representative
+  fixture, failing regression, minimum fix, and candidate evidence;
+- P2/P3 remains non-blocking only outside protected correctness;
+- advisory review can iterate over a working diff but cannot grant release
+  approval or transfer evidence to a changed tree;
+- one full validation follows advisory closure, and any later tree change
+  invalidates full-validation and exact-SHA review evidence;
+- unpublished, unshared migrations tested only in a disposable local database
+  remain editable, while protected-branch or shared/persistent history is
+  immutable and corrected only by a forward migration;
+- all named agents remain mapped to the fixed corpus and pinned to exact
+  `gpt-5.6-sol`;
+- governance/evaluator scripts and artifacts are protected from implementation
+  mixing and missing behavioral evidence;
+- companion architecture and subsystem documents are hash-bound whenever core
+  agent governance changes, but do not independently impose the full corpus on
+  an otherwise ordinary implementation PR.
 
 ## Measurements
 
-- Model: exact `gpt-5.6-sol`; profiles shown above.
-- Task success: static baseline 8/8; candidate 8/8.
-- Required evidence completeness: all fixed assignments, required outcomes,
-  forbidden actions, and rubrics inspected.
-- Critical rule violations: 0 after advisory closure.
-- Runtime approval prompts or unnecessary authority questions: 0.
-- Files changed outside governance/workflow scope: 0.
-- Focused checks: workflow regressions, migration regressions, agent runtime
-  policy, shell/Python/YAML syntax, `make policy`, and `git diff --check` pass.
-- Input/output and cache tokens: unavailable.
-- Exact latency split: unavailable; implementation and review/test wait are
-  reported manually in the PR.
-- Programmatic tool calling: no edits, approvals, normative decisions, or final
-  validation were delegated programmatically.
+- Task success: baseline 7/8; candidate 8/8.
+- Required evidence: baseline 7/8; candidate 8/8.
+- Critical violations: baseline 1; candidate 0.
+- Approval prompts: 0. Out-of-scope files changed: 0. Tool calls: 0.
+- Final response completeness: baseline 7/8; candidate 8/8.
+- Token usage:
 
-## Explicit limitations
+  | Side | Input | Cached input | Cache writes | Output | Reasoning output |
+  |---|---:|---:|---:|---:|---:|
+  | Baseline | 254,935 | 99,840 | 0 | 38,746 | 19,314 |
+  | Candidate | 266,840 | 65,280 | 0 | 46,767 | 24,115 |
 
-- Static fixture comparison does not prove future agents will behave correctly.
-- Migration fixtures do not run PostgreSQL or a real shared/persistent upgrade.
+- Sum of subject-run latency: baseline 687.481 seconds; candidate 772.031
+  seconds. Median subject latency: baseline 79.930 seconds; candidate 89.362
+  seconds.
+- Scorer latency: baseline 100.990 seconds; candidate 89.686 seconds.
+- Corpus SHA-256:
+  `bc24163189e87b61ed721578dc77a777ef247e89125a588ea8817009e27a258d`.
+- Runner SHA-256:
+  `ed3b77aea974fcd001ab926b90963a74c60d578411ee0cdc4e98302da00b3085`.
+- Library SHA-256:
+  `777549fb9e548970e16f2671f1a32b101d7b4cf5ebe51eb0085817ff3862ced3`.
+
+## Limitations and release state
+
+- The response-only corpus tests decisions and proposed artifacts. It does not
+  install proposed code or prove production behavior.
+- It does not execute PostgreSQL or a real shared/persistent migration.
 - Git cannot infer an omitted pre-merge shared/persistent application. The PR
-  must record path, SHA-256, source commit, and environment; uncertainty is a
-  stop condition.
-- This report covers the working-diff checkpoint. It is not exact-SHA release
-  approval and does not replace full local validation, final independent
-  review, or hosted CI.
+  must record that fact; uncertainty is a stop condition.
+- Evidence must be regenerated if the fixed corpus, core prompt surface,
+  runner, or evaluator library changes.
+- Behavioral evaluation is **GO for the candidate prompt surface**, not release
+  approval. The stable commit still requires the complete local validation
+  ladder, fresh exact-SHA specialist/final reviews, push, and hosted CI.
 
-## Human review state
-
-Independent exact-model static review: **GO for instruction semantics and
-focused regression design**. Release approval remains pending the stable
-exact-SHA candidate gates.
+<!-- agent-eval-summary
+{
+  "baseline_pass": 7,
+  "candidate_pass": 8,
+  "corpus_sha256": "bc24163189e87b61ed721578dc77a777ef247e89125a588ea8817009e27a258d",
+  "critical_rule_violations": 1,
+  "files_changed_outside_scope": 0,
+  "final_response_complete": 15,
+  "manifest": "docs/agent-evals/artifacts/2026-07-27-adversarial-review-workflow/manifest.json",
+  "model": "gpt-5.6-sol",
+  "prompt_surface_sha256": {
+    "baseline": "d35941b35598a11ed4f1b2a04b55e4e41554c51b35a8ab83db9aed3face69e50",
+    "candidate": "6c386fda877a7e62b4e7791d863af46bfde02ed669b1dc365dc48f6cce80d1f1"
+  },
+  "required_evidence_complete": 15,
+  "reviewer_tool_calls": 0,
+  "runtime_approval_prompts": 0,
+  "schema_version": 2,
+  "subject_tool_calls": 0
+}
+-->

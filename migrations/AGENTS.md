@@ -8,6 +8,11 @@ These rules apply to every file under `migrations/` and add to the repository-ro
 - Application only to an explicitly disposable local/test database does not
   freeze an unpublished, unshared candidate. Reset or recreate that database
   before testing changed bytes.
+- Never infer that an unclassified environment is disposable. If a task says a
+  migration was applied but does not prove that the environment was disposable,
+  local/test-only, unpublished, and unshared, do not recommend reset or
+  recreation; stop for owner classification and treat the freeze state as
+  uncertain.
 - Before freeze an unpublished, unshared candidate may be edited, renamed,
   reordered, deleted, amended, or squashed. No branch parking or cherry-pick
   ceremony is required merely because the candidate was locally committed.

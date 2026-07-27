@@ -107,7 +107,9 @@ for path in "${changed[@]}"; do
     ports/test-port-map.csv|ports/decisions/*|ports/decisions/**/*|\
     scripts/policy-check.sh|scripts/check-*.py|\
     scripts/check-*.sh|scripts/check-*.go|scripts/test-check-*.py|\
-    scripts/test-check-*.sh|\
+    scripts/test-check-*.sh|scripts/test-agent-workflow-policy.py|\
+    scripts/agent_eval_lib.py|scripts/run-agent-evals.py|\
+    scripts/check-agent-eval-evidence.py|\
     tools/policycheck/*|tools/policycheck/**/*|tools/testinventory/*|\
     tools/testinventory/**/*)
       protected_governance=1

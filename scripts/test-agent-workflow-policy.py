@@ -117,6 +117,31 @@ require_regex(
     "advisory candidate evidence pending until mandatory closure",
 )
 
+# Named agents retain the concrete evidence boundaries exercised by the
+# behavioral corpus rather than relying on generic review wording.
+require(
+    ".codex/agents/test-porter.toml",
+    "immediately preceding and attached to the target FuncDecl",
+    "inside the function body is not function-attached evidence",
+)
+require(
+    ".codex/agents/implementation-worker.toml",
+    "exact row counts",
+    "stored command result or response",
+    "balanced ledger transaction and entries",
+    "checkpoint",
+    "outbox",
+    "same-key/different-request conflict",
+)
+require(
+    ".codex/agents/determinism-reviewer.toml",
+    "committed PostgreSQL outbox records",
+    "after the economic transaction commits",
+    "initial authoritative snapshot",
+    "durable watermark",
+    "every unprovable gap",
+)
+
 # Advisory review is iterative and non-approving; exact-SHA evidence is bound
 # to one tree and old GO decisions cannot move to a changed tree.
 require(
