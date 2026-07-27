@@ -237,6 +237,16 @@ creation time, and expiry. This acceptance reuses the landed broker-echo
 authority and does not broaden its existing capacity, restart, or
 unknown-outcome claims.
 
+Broker account scope gating is separately accepted through production HMAC
+authentication, HTTP, least-privilege API and engine roles, and PostgreSQL 19
+Beta 2. A valid `accounts:read` credential may use scope-free broker ping but
+receives `403` before account-request business work, while a distinct
+wildcard-only credential uses internally generated request identity and
+receives one complete current-Go `201` response backed by the committed
+account, ownership, profile, command, and provisioning graph. The accepted
+identifier deviation is stated below. This source acceptance does not add
+replay, restart, concurrency, cross-tenant, or network-delivery claims.
+
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
@@ -246,11 +256,19 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 70
-independently reviewed green source tests; 2,581 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 71
+independently reviewed green source tests; 2,580 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
+
+The broker scope-gate acceptance preserves the pinned authorization sequence:
+an `accounts:read` credential may probe ping but cannot create an account, while
+a distinct wildcard credential can create one committed account. Its response
+uses the owner-approved current Go UUID account URN and current user URN,
+matched field-for-field to PostgreSQL intent, ownership, and profile state.
+This is an explicit deviation from the pinned Rust base62 identifier
+deserializers, not a claim of source-typed `AccountView` compatibility.
 
 This repository is not yet a production-capable replacement.
 

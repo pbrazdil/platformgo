@@ -38,24 +38,6 @@ func TestAPIKeyAuthPlusIdempotencyReplay(t *testing.T) {
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/identity/e2e_broker.rs:155
-//	test: scope_gate_403s_write_route_but_admits_probe
-func TestScopeGate403sWriteRouteButAdmitsProbe(t *testing.T) {
-	fixture := brokerTraderNewFixture()
-	user := fixture.createUserForTenant("", "scoped-user", "scoped-user@test", "")
-	readOnly := fixture.createBrokerKey("read-only", []string{"accounts:read"}, nil, 0, "")
-	brokerTraderRequireStatus(t, fixture.brokerPing(readOnly, ""), brokerTraderStatusOK)
-	_, status := fixture.brokerCreateAccount(readOnly, user.ID, "")
-	brokerTraderRequireStatus(t, status, brokerTraderStatusForbidden)
-
-	wildcard := fixture.createBrokerKey("wildcard", []string{"*"}, nil, 0, "")
-	_, status = fixture.brokerCreateAccount(wildcard, user.ID, "")
-	brokerTraderRequireStatus(t, status, brokerTraderStatusCreated)
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/identity/e2e_broker.rs:204
 //	test: idempotency_replay_does_not_bypass_scope_gate
 func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
