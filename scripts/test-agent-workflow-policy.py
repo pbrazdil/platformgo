@@ -192,8 +192,18 @@ require_regex(
 )
 require_regex(
     "AGENTS.md",
-    r"(changed|different).{0,80}(candidate|tree).{0,180}(invalidates|repeat|rerun).{0,160}(validation|evidence)",
-    "new full validation for a changed candidate tree",
+    r"(changed|different).{0,80}(candidate|tree).{0,180}(invalidates).{0,120}(all).{0,120}(evidence).{0,160}(repeat|rerun).{0,120}(every|required|complete).{0,120}full-validation.{0,160}(specialist|final)",
+    "complete full validation and exact-SHA review repetition for a changed candidate tree",
+)
+require_regex(
+    ".github/pull_request_template.md",
+    r"Before full validation.{0,160}focused affected checks.{0,220}After full validation.{0,220}(changed tree|tree or SHA).{0,160}invalidates.{0,160}advisory.{0,100}validation.{0,100}specialist.{0,100}final.{0,160}(complete|required).{0,80}full-validation.{0,180}fresh exact-SHA",
+    "focused pre-candidate checks cannot replace complete post-validation reruns",
+)
+require_regex(
+    "docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md",
+    r"After full validation.{0,220}(changed tree|tree).{0,180}(complete|required).{0,80}full-validation.{0,180}fresh.{0,80}exact-SHA",
+    "critical review requires fresh full evidence after a stable-tree change",
 )
 require_regex(
     "AGENTS.md",

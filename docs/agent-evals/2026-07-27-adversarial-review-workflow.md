@@ -59,7 +59,8 @@ violations 0.
 - advisory working-diff review, delta closure, and no advisory release approval;
 - one stable full validation pass before exact-SHA specialist and independent
   final review, followed by push and hosted CI on that head SHA;
-- evidence non-transfer after any tree change;
+- focused affected checks only before full validation, then complete
+  full-validation and exact-SHA review repetition after any tree change;
 - protected/shared migration freeze plus the disposable-only exception;
 - exact `gpt-5.6-sol`, expected agents, and never/full-access runtime settings.
 

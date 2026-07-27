@@ -151,18 +151,17 @@ scope
 → merge
 ```
 
-Preflight is required for money, ledger, fills, margin,
+Preflight covers money, ledger, fills, margin,
 funding, balances, durable PostgreSQL state, migrations, ordering,
 single-writer ownership, concurrency, idempotency, duplicate delivery,
 acknowledgment, restart, recovery, reconciliation, rollback, HTTP/gRPC/realtime
 compatibility, authentication, authorization, ACL/security, or production
 lifecycle, readiness, and shutdown. Use
 `docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md`; applicable migration,
-determinism, and money reviewers inspect in parallel before implementation.
-docs-only, mechanical, and isolated test-only work
-does not require preflight.
+determinism, and money reviewers inspect first.
+docs-only, mechanical, and isolated test-only work is exempt.
 
-Checkpoints are **Scope, design, and failure matrix**; **Failing tests**;
+Checkpoints: **Scope, design, and failure matrix**; **Failing tests**;
 **Implementation boundary** before docs/full suite; and
 **Exact-SHA release candidate**. Advisory review inspects working diffs and
 cannot grant release approval; blockers are immediate. Originating specialists
@@ -218,10 +217,12 @@ make test-race
 make test-repeat
 ```
 
-Run PostgreSQL, NATS, Centrifugo, compatibility, migration, recovery,
-and vulnerability gates. Record full candidate/tree/base SHAs. Validation,
+Run applicable PostgreSQL, NATS, Centrifugo, compatibility, migration, recovery,
+and vulnerability gates. Record candidate/tree/base SHAs. Validation,
 closure, and GO apply only to that tree and never transfer. A changed tree
-invalidates evidence and repeats affected gates. Hosted CI tests the exact SHA;
+after full validation invalidates all evidence; repeat every required
+full-validation gate and exact-SHA specialist/final review. Hosted CI tests
+that SHA;
 base drift invalidates approval. A final-review design blocker becomes a
 preflight failure and checklist update.
 

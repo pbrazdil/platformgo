@@ -77,11 +77,11 @@
 - Final review SHA:
 - Hosted CI SHA:
 
-Advisory closure, full-validation evidence, specialist review, final GO, and
-hosted CI belong only to the recorded tree. Evidence and GO must not transfer
-to a changed tree. A changed tree or SHA invalidates advisory closure,
-validation, specialist evidence, and final approval; rerun the affected
-exact-candidate gates.
+Before full validation, implementation deltas may use focused affected checks.
+Evidence and GO never transfer to a changed tree or SHA. After full validation,
+a changed tree or SHA invalidates advisory closure, validation, specialist
+evidence, and final approval; rerun the complete required full-validation set
+and obtain fresh exact-SHA specialist and independent final reviews.
 
 ## Workflow metrics
 

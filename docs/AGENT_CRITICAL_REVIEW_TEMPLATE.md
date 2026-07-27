@@ -52,7 +52,9 @@ End with a clear go/no-go recommendation and list any validation that was unavai
 Advisory review may inspect a working diff but cannot grant release approval;
 announce potential blockers immediately, then re-review the correction delta.
 Final release review is one independent read-only audit of the stable exact
-candidate. Evidence and GO must not transfer to a changed tree.
+candidate. After full validation, evidence and GO must not transfer to a
+changed tree; rerun the complete required full-validation set and obtain fresh
+exact-SHA specialist and independent final reviews.
 
 Authority boundary:
 Read-only. Do not edit files, mutate external systems, or approve a release.
