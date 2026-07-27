@@ -228,6 +228,15 @@ broker converge case-insensitive email to one tenant-owned identity, a requested
 This slice does not claim broker-user exact-response replay, token-expiry
 behavior, or account-claim propagation beyond the pinned source assertions.
 
+Principal-scoped broker idempotency is separately accepted through production
+HMAC authentication, the HTTP broker echo edge, the least-privilege API role,
+and PostgreSQL 19 Beta 2. Two broker subjects in the same tenant may use one
+identical idempotency key without cross-principal replay, while the first
+subject's retry preserves its own exact durable status, logical headers, body,
+creation time, and expiry. This acceptance reuses the landed broker-echo
+authority and does not broaden its existing capacity, restart, or
+unknown-outcome claims.
+
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
@@ -237,8 +246,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 69
-independently reviewed green source tests; 2,582 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 70
+independently reviewed green source tests; 2,581 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.

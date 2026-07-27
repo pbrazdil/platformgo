@@ -38,26 +38,6 @@ func TestAPIKeyAuthPlusIdempotencyReplay(t *testing.T) {
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/identity/e2e_broker.rs:93
-//	test: idempotency_key_is_scoped_per_principal
-func TestIdempotencyKeyIsScopedPerPrincipal(t *testing.T) {
-	fixture := brokerTraderNewFixture()
-	keyA := fixture.createBrokerKey("partner-a", []string{"*"}, nil, 0, "")
-	keyB := fixture.createBrokerKey("partner-b", []string{"*"}, nil, 0, "")
-	firstA := fixture.brokerEcho(keyA, "shared-idem-key")
-	firstB := fixture.brokerEcho(keyB, "shared-idem-key")
-	if firstA.ID == firstB.ID {
-		t.Fatalf("principals shared an idempotent response: A=%#v B=%#v", firstA, firstB)
-	}
-	secondA := fixture.brokerEcho(keyA, "shared-idem-key")
-	if firstA.ID != secondA.ID {
-		t.Fatalf("principal did not replay its response: first=%#v second=%#v", firstA, secondA)
-	}
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/identity/e2e_broker.rs:155
 //	test: scope_gate_403s_write_route_but_admits_probe
 func TestScopeGate403sWriteRouteButAdmitsProbe(t *testing.T) {
