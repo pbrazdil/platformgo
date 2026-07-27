@@ -999,8 +999,13 @@ func (store *CompatibilityStore) LatestFillExecution(
 	accountID string,
 ) (edge.FillExecutionView, error) {
 	var (
-		view        edge.FillExecutionView
-		logicalTime int64
+		view                 edge.FillExecutionView
+		logicalTime          int64
+		orderAccountID       *string
+		bracketLeg           *string
+		intentID             *string
+		intentAccountID      *string
+		intentCommandAccount *string
 	)
 	if err := store.pool.QueryRow(ctx, `
 		SELECT
@@ -1012,8 +1017,19 @@ func (store *CompatibilityStore) LatestFillExecution(
 			trim_scale(fill.realized_pnl)::text,
 			fill.settlement_currency,
 			trim_scale(fill.effective_leverage)::text,
-			fill.logical_time
+			fill.logical_time,
+			orders.account_id,
+			orders.bracket_leg,
+			intent.intent_id,
+			intent.account_id,
+			intent_command.account_id
 		  FROM trading.fills AS fill
+		  LEFT JOIN trading.orders AS orders
+		    ON orders.order_id = fill.order_id
+		  LEFT JOIN trading.order_intents AS intent
+		    ON intent.order_id = fill.order_id
+		  LEFT JOIN trading.commands AS intent_command
+		    ON intent_command.command_id = intent.command_id
 		 WHERE fill.account_id = $1
 		 ORDER BY fill.logical_time DESC, fill.fill_id DESC
 		 LIMIT 1`,
@@ -1028,6 +1044,11 @@ func (store *CompatibilityStore) LatestFillExecution(
 		&view.SettlementCurrency,
 		&view.Leverage,
 		&logicalTime,
+		&orderAccountID,
+		&bracketLeg,
+		&intentID,
+		&intentAccountID,
+		&intentCommandAccount,
 	); err != nil {
 		return edge.FillExecutionView{}, fmt.Errorf("read latest fill execution: %w", err)
 	}
@@ -1042,6 +1063,21 @@ func (store *CompatibilityStore) LatestFillExecution(
 			"read latest fill execution: incomplete realized PnL",
 		)
 	}
+	reason, err := fillExecutionReason(
+		accountID,
+		orderAccountID,
+		bracketLeg,
+		intentID,
+		intentAccountID,
+		intentCommandAccount,
+	)
+	if err != nil {
+		return edge.FillExecutionView{}, fmt.Errorf(
+			"read latest fill execution: %w",
+			err,
+		)
+	}
+	view.Reason = reason
 	view.OrderID = "urn:xb:order:" + view.OrderID
 	view.FilledAt = time.Unix(0, logicalTime).UTC().Format(time.RFC3339Nano)
 	return view, nil
@@ -1145,9 +1181,20 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			page.settlement_currency,
 			trim_scale(page.effective_leverage)::text,
 			page.logical_time,
+			orders.account_id,
+			orders.bracket_leg,
+			intent.intent_id,
+			intent.account_id,
+			intent_command.account_id,
 			filtered_total.total
 		  FROM filtered_total
 		  LEFT JOIN page ON true
+		  LEFT JOIN trading.orders AS orders
+		    ON orders.order_id = page.order_id
+		  LEFT JOIN trading.order_intents AS intent
+		    ON intent.order_id = page.order_id
+		  LEFT JOIN trading.commands AS intent_command
+		    ON intent_command.command_id = intent.command_id
 		 ORDER BY page.logical_time DESC NULLS LAST,
 		          page.fill_id DESC NULLS LAST`
 	args := []any{
@@ -1194,9 +1241,20 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				page.settlement_currency,
 				trim_scale(page.effective_leverage)::text,
 				page.logical_time,
+				orders.account_id,
+				orders.bracket_leg,
+				intent.intent_id,
+				intent.account_id,
+				intent_command.account_id,
 				filtered_total.total
 			  FROM filtered_total
 			  LEFT JOIN page ON true
+			  LEFT JOIN trading.orders AS orders
+			    ON orders.order_id = page.order_id
+			  LEFT JOIN trading.order_intents AS intent
+			    ON intent.order_id = page.order_id
+			  LEFT JOIN trading.commands AS intent_command
+			    ON intent_command.command_id = intent.command_id
 			 ORDER BY page.logical_time DESC NULLS LAST,
 			          page.fill_id DESC NULLS LAST`
 		if !forward {
@@ -1237,9 +1295,20 @@ func (store *CompatibilityStore) FilterFillExecutions(
 					page.settlement_currency,
 					trim_scale(page.effective_leverage)::text,
 					page.logical_time,
+					orders.account_id,
+					orders.bracket_leg,
+					intent.intent_id,
+					intent.account_id,
+					intent_command.account_id,
 					filtered_total.total
 				  FROM filtered_total
 				  LEFT JOIN page ON true
+				  LEFT JOIN trading.orders AS orders
+				    ON orders.order_id = page.order_id
+				  LEFT JOIN trading.order_intents AS intent
+				    ON intent.order_id = page.order_id
+				  LEFT JOIN trading.commands AS intent_command
+				    ON intent_command.command_id = intent.command_id
 				 ORDER BY page.logical_time ASC NULLS LAST,
 				          page.fill_id ASC NULLS LAST`
 		}
@@ -1271,6 +1340,11 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			settlement     *string
 			leverage       *string
 			logicalTime    *int64
+			orderAccount   *string
+			bracketLeg     *string
+			intentID       *string
+			intentAccount  *string
+			commandAccount *string
 		)
 		if err := rows.Scan(
 			&fillID,
@@ -1282,6 +1356,11 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			&settlement,
 			&leverage,
 			&logicalTime,
+			&orderAccount,
+			&bracketLeg,
+			&intentID,
+			&intentAccount,
+			&commandAccount,
 			&total,
 		); err != nil {
 			return edge.FillExecutionPage{}, fmt.Errorf(
@@ -1317,6 +1396,20 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			)
 		}
 		if err := validateFillTradeType(row.view.TradeType); err != nil {
+			return edge.FillExecutionPage{}, fmt.Errorf(
+				"scan filtered fill execution: %w",
+				err,
+			)
+		}
+		row.view.Reason, err = fillExecutionReason(
+			accountID,
+			orderAccount,
+			bracketLeg,
+			intentID,
+			intentAccount,
+			commandAccount,
+		)
+		if err != nil {
 			return edge.FillExecutionPage{}, fmt.Errorf(
 				"scan filtered fill execution: %w",
 				err,
@@ -1395,6 +1488,62 @@ func decodeFillHistoryCursor(encoded string) (*fillHistoryCursor, error) {
 		logicalTime: nanoseconds,
 		fillID:      parts[1],
 	}, nil
+}
+
+func fillExecutionReason(
+	fillAccountID string,
+	orderAccountID *string,
+	bracketLeg *string,
+	intentID *string,
+	intentAccountID *string,
+	intentCommandAccountID *string,
+) (string, error) {
+	if orderAccountID == nil || *orderAccountID != fillAccountID {
+		return "", fmt.Errorf(
+			"fill/order account authority mismatch",
+		)
+	}
+	hasIntentAuthority := intentID != nil ||
+		intentAccountID != nil ||
+		intentCommandAccountID != nil
+	if hasIntentAuthority {
+		if intentID == nil ||
+			intentAccountID == nil ||
+			intentCommandAccountID == nil {
+			return "", fmt.Errorf(
+				"incomplete fill intent authority",
+			)
+		}
+		if *intentAccountID != fillAccountID ||
+			*intentCommandAccountID != fillAccountID {
+			return "", fmt.Errorf(
+				"fill intent account authority mismatch",
+			)
+		}
+	}
+
+	switch {
+	case bracketLeg == nil:
+	case *bracketLeg == string(engine.BracketLegEntry):
+	case *bracketLeg == string(engine.BracketLegStopLoss):
+		return "stop_loss", nil
+	case *bracketLeg == string(engine.BracketLegTakeProfit):
+		return "take_profit", nil
+	default:
+		return "", fmt.Errorf(
+			"unknown durable bracket leg %q",
+			*bracketLeg,
+		)
+	}
+	if intentID != nil {
+		switch {
+		case strings.HasPrefix(*intentID, "stopout:"):
+			return "liquidation", nil
+		case strings.HasPrefix(*intentID, "flatten:"):
+			return "flatten", nil
+		}
+	}
+	return "manual", nil
 }
 
 func validateFillTradeType(tradeType string) error {
