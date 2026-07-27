@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +31,26 @@ type scopeGateWriterResult struct {
 	headers http.Header
 	body    []byte
 	err     error
+}
+
+type scopeGateIdentityProbe struct {
+	edge.IdentityService
+	createBrokerAccountCalls atomic.Uint64
+}
+
+func (probe *scopeGateIdentityProbe) CreateBrokerAccount(
+	ctx context.Context,
+	principal edge.Principal,
+	idempotencyKey string,
+	request edge.BrokerAccountRequest,
+) (edge.BrokerAccountAdmission, error) {
+	probe.createBrokerAccountCalls.Add(1)
+	return probe.IdentityService.CreateBrokerAccount(
+		ctx,
+		principal,
+		idempotencyKey,
+		request,
+	)
 }
 
 // Ported from:
@@ -116,7 +137,7 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	defer enginePool.Close()
 
 	now := time.Date(2026, time.July, 27, 18, 0, 0, 123456789, time.UTC)
-	server := newScopeGateServer(t, apiPool, now)
+	server, identityProbe := newScopeGateServer(t, apiPool, now)
 	requestBody := `{"userId":"` + userID + `"}`
 	writerDone := make(chan scopeGateWriterResult, 1)
 	go func() {
@@ -213,6 +234,9 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	if account.ID == "" || account.UserID != userID {
 		t.Fatalf("writer account = %#v", account)
 	}
+	if got := identityProbe.createBrokerAccountCalls.Load(); got != 1 {
+		t.Fatalf("writer application calls = %d, want 1", got)
+	}
 
 	before := readScopeGateSnapshot(
 		t,
@@ -237,7 +261,12 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 		server.URL,
 		requestBody,
 		idempotency,
+		writer.body,
+		account.ID,
 	)
+	if got := identityProbe.createBrokerAccountCalls.Load(); got != 1 {
+		t.Fatalf("reader crossed authorization boundary: application calls = %d", got)
+	}
 	after := readScopeGateSnapshot(
 		t,
 		admin,
@@ -256,13 +285,25 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restartedAPIPool.Close()
-	restartedServer := newScopeGateServer(t, restartedAPIPool, now)
+	restartedServer, restartedIdentityProbe := newScopeGateServer(
+		t,
+		restartedAPIPool,
+		now,
+	)
 	assertScopeGateDenied(
 		t,
 		restartedServer.URL,
 		requestBody,
 		idempotency,
+		writer.body,
+		account.ID,
 	)
+	if got := restartedIdentityProbe.createBrokerAccountCalls.Load(); got != 0 {
+		t.Fatalf(
+			"reader crossed restarted authorization boundary: application calls = %d",
+			got,
+		)
+	}
 	restarted := readScopeGateSnapshot(
 		t,
 		admin,
@@ -283,7 +324,7 @@ func newScopeGateServer(
 	t *testing.T,
 	apiPool *pgxpool.Pool,
 	now time.Time,
-) *httptest.Server {
+) (*httptest.Server, *scopeGateIdentityProbe) {
 	t.Helper()
 	authenticator, err := edge.NewHMACAuthenticator(edge.HMACAuthenticatorConfig{
 		ClientTokenSecret: []byte("phase3-scope-gate-client-secret!"),
@@ -321,12 +362,13 @@ func newScopeGateServer(
 	if err != nil {
 		t.Fatal(err)
 	}
+	identityProbe := &scopeGateIdentityProbe{IdentityService: identity}
 	server := httptest.NewServer(edge.NewServer(edge.ServerConfig{
 		Authenticator: authenticator,
-		Identity:      identity,
+		Identity:      identityProbe,
 	}).Handler())
 	t.Cleanup(server.Close)
-	return server
+	return server, identityProbe
 }
 
 func waitForScopeGateCommand(
@@ -375,6 +417,8 @@ func assertScopeGateDenied(
 	serverURL string,
 	requestBody string,
 	idempotencyKey string,
+	writerBody []byte,
+	accountID string,
 ) {
 	t.Helper()
 	response := requestJSON(
@@ -387,15 +431,34 @@ func assertScopeGateDenied(
 			"idempotency-key": idempotencyKey,
 		},
 	)
-	var denial struct {
-		Code string `json:"code"`
+	body, err := io.ReadAll(response.Body)
+	closeErr := response.Body.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("read reader denial: read=%v close=%v", err, closeErr)
 	}
-	decodeAndClose(t, response, &denial)
-	if response.StatusCode != http.StatusForbidden || denial.Code != "forbidden" {
+	var denial struct {
+		Code      string `json:"code"`
+		Message   string `json:"message"`
+		RequestID string `json:"requestId,omitempty"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&denial); err != nil {
+		t.Fatalf("decode reader denial %q: %v", body, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		t.Fatalf("reader denial has trailing JSON %q: %v", body, err)
+	}
+	if response.StatusCode != http.StatusForbidden ||
+		denial.Code != "forbidden" ||
+		denial.Message != "forbidden" ||
+		bytes.Equal(body, writerBody) ||
+		bytes.Contains(body, []byte(accountID)) {
 		t.Fatalf(
-			"reader response status=%d body=%#v, want 403 forbidden",
+			"reader response status=%d body=%s, want isolated 403 forbidden",
 			response.StatusCode,
-			denial,
+			body,
 		)
 	}
 }
