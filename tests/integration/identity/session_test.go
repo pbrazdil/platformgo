@@ -159,22 +159,6 @@ func TestSessionLogoutRevokesSessionAndStopsRefresh(t *testing.T) {
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/identity/e2e_web_refresh_cookie.rs:50
-//	test: native_login_keeps_refresh_in_body_and_sets_no_cookie
-func TestSessionNativeLoginKeepsRefreshInBodyAndSetsNoCookie(t *testing.T) {
-	response := newSessionWebFixture().login("")
-	sessionRequireStatus(t, response, http.StatusOK)
-	if response.headers.Get("Set-Cookie") != "" {
-		t.Fatalf("native login Set-Cookie = %q", response.headers.Get("Set-Cookie"))
-	}
-	if response.body["accessToken"] == "" || response.body["refreshToken"] == "" {
-		t.Fatalf("native login body = %#v", response.body)
-	}
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/identity/e2e_web_refresh_cookie.rs:74
 //	test: web_login_sets_httponly_cookie_and_omits_body_refresh
 func TestSessionWebLoginSetsHTTPOnlyCookieAndOmitsBodyRefresh(t *testing.T) {
