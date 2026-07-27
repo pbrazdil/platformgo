@@ -371,6 +371,7 @@ type FillExecutionView struct {
 	PositionID         string  `json:"positionId"`
 	Side               string  `json:"side"`
 	TradeType          string  `json:"tradeType"`
+	Reason             string  `json:"reason"`
 	RealizedPnL        *string `json:"realizedPnl"`
 	SettlementCurrency *string `json:"settlementCurrency"`
 	Leverage           *string `json:"leverage,omitempty"`
