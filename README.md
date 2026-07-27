@@ -9,7 +9,7 @@ major-upgrade, backup-restore, recovery, and reconciliation rehearsal.
 
 ## Current status
 
-Last updated: 2026-07-27
+Last updated: 2026-07-28
 
 Current delivery stage: **Phase 3 — compatibility edges, in progress**.
 
@@ -268,6 +268,19 @@ does not claim KYC or durable status lifecycle, successful admin login, admin
 credential/session authority, password-creation policy, refresh rotation or
 revocation, restart, retry, or lost-acknowledgment behavior.
 
+Native token placement is separately accepted through the production client
+`POST /v1/auth/login` boundary, deterministic Argon2id verification, HMAC
+access-token issuance, the least-privilege API role, and PostgreSQL 19 Beta 2.
+A successful login returns the exact current Go `200`, emits no `Set-Cookie`
+header, and places nonempty access and refresh tokens in the response body;
+exactly one session stores only the SHA-256 refresh-token hash. The
+owner-approved decision adapts the source's absent admin route and principal to
+the existing client route without simulating an admin plane. This acceptance
+does not claim successful admin login, admin credentials or sessions,
+access-token validation, web-origin behavior, positive cookie behavior, CORS,
+password-creation compatibility, refresh redemption or rotation, token-family
+replay, logout or revocation, restart, retry, or lost-acknowledgment behavior.
+
 Cross-account order ownership is separately accepted through production
 password login, HMAC-authenticated HTTP, the least-privilege API role, and
 PostgreSQL 19 Beta 2. A token whose PostgreSQL-derived account claims do not
@@ -290,8 +303,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 74
-independently reviewed green source tests; 2,577 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 75
+independently reviewed green source tests; 2,576 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
