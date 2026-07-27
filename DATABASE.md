@@ -274,32 +274,155 @@ stopped.
 
 ### Phase 3 broker-echo exact-replay migration boundary
 
-Migration `20260727000100_phase3_broker_echo_exact_replay.up.sql` is a
-forward-only, no-overlap API cutover. It creates the dedicated
-`identity.broker_echo_replays` authority and claims one `(principal, key hash)`
-with PostgreSQL 19's `INSERT ... ON CONFLICT DO SELECT FOR UPDATE`. The row
-stores the exact HTTP status, logical required headers, and body bytes; replay
-does not re-render them. The external idempotency key is SHA-256 hashed before
-persistence, and the raw key is never stored in this table.
+The broker-echo change is a forward-only, no-overlap sequence. Migration
+`20260727000100_phase3_broker_echo_exact_replay.up.sql` is an intermediate,
+stopped-runtime tip. It takes `SHARE` on
+`identity.idempotency_responses`, with a five-second lock timeout and a
+fifteen-second statement timeout, before validating and copying the live
+broker-echo subset. The legacy relation, including indexes and TOAST, must be
+at most 64 MiB (67,108,864 bytes); the live subset must contain at most 1,000
+rows and at most 46,000 bytes of canonical JSON text. Every live row must be
+reconstructable as the exact status, logical required headers, and body bytes.
+An excess or invalid row aborts the migration atomically. The copy preserves
+both legacy timestamps exactly. Those rows were created by the prior Go
+application clock for expiry and PostgreSQL for creation, so their finite,
+increasing lifetime is not required to equal exactly 24 hours.
 
-PostgreSQL `statement_timestamp()` is the only creation and expiry authority.
-Each claim has a 24-hour lifetime. Rows are immutable while live; only expired
-rows may be deleted, through
-`identity.purge_expired_broker_echo_replays(integer)` or the targeted
-expired-key replacement inside the claim function. Unrelated cleanup is not in
-the claim's correctness path. Runtime roles receive no direct table access.
-`platformgo_api` may execute only the definer claim and bounded purge functions,
-and loses access to the legacy broker-echo claim and legacy replay table.
+Migration 00100 creates `identity.broker_echo_replays`, keyed by
+`(scope, idempotency_key_hash)`, plus
+`broker_echo_replays_expiry_idx` and the enabled
+`broker_echo_replays_guard_mutation` trigger. PostgreSQL
+`statement_timestamp()` is the creation and expiry authority and a new claim
+retains the response for exactly 24 hours. The raw external idempotency key is
+never stored; only its 32-byte SHA-256 digest is persisted. A live exact
+response cannot be updated or deleted. Only an expired row can be removed by
+the definer purge function or by the locked same-key replacement in the claim
+function. At this intermediate tip, purge accepts a limit from 1 through 1,000
+and `identity.claim_broker_echo_response(text, bytea, bytea, integer, jsonb,
+bytea)` returns exactly `(response_status integer, response_headers jsonb,
+response_body bytea)`.
 
-The migration locks `identity.idempotency_responses` in
-`SHARE` mode before validating and copying its live broker-echo
-subset. Its fixed live-row and response-byte bounds are part of the reviewed
-migration. A fixed total-relation-size ceiling also bounds the physical work of
-the legacy scan. Before cutover, operations records all measured values and
-proves they are within those exact bounds; an excess or a response that cannot
-be reconstructed byte-for-byte aborts atomically. Old and new API binaries
-must never overlap this migration. The stop, backup, journal/catalog
-classification, schema verification, start, and rollback protocol is in
+Migration `20260727000200_phase3_broker_echo_capacity_authority.up.sql` is the
+forward capacity companion. It again requires every runtime to remain stopped,
+takes `SHARE` on `identity.broker_echo_replays`, and uses the same five-second
+lock and fifteen-second statement bounds. Before adding catalog authority it
+rejects a replay relation larger than 64 MiB, purges up to 1,000 rows already
+expired by PostgreSQL time, and rejects any remaining state with:
+
+- an invalid exact response according to
+  `identity.valid_broker_echo_response(bytea, integer, jsonb, bytea,
+  timestamptz, timestamptz)`;
+- more than 1,000 rows in total or more than 100 rows for one `scope`; or
+- any `expires_at` later than `statement_timestamp() + interval '24 hours'`.
+
+The immutable singleton `identity.broker_echo_replay_policy` is the only
+capacity and cleanup configuration authority. Its one row and equality checks
+fix `max_total_rows=1000`, `max_rows_per_principal=100`,
+`purge_batch_size=100`, `max_batches_per_cycle=10`,
+`cleanup_interval_seconds=60`, `cleanup_cycle_timeout_seconds=10`,
+`expired_readiness_slo_seconds=120`, and
+`max_retry_after_seconds=86460`. Its cross-column checks require one cleanup
+cycle to cover the total capacity, principal capacity not to exceed total
+capacity, and maximum retry-after to cover 24 hours plus the cleanup interval.
+The `broker_echo_replay_policy_is_immutable` row trigger rejects update and
+delete; `broker_echo_replay_policy_rejects_truncate` rejects truncate.
+
+Migration 00200 reduces the purge call limit to 1 through 100. It drops and
+recreates, rather than replaces in place, the claim function because the
+function result row type changes. The six result columns and their order are
+exactly:
+
+```text
+outcome text
+retry_after_seconds bigint
+capacity_scope text
+response_status integer
+response_headers jsonb
+response_body bytea
+```
+
+`outcome` is `stored` for a newly stored or exactly replayed response and
+`capacity_limited` for a rejected new key. A capacity result names
+`principal`, `global`, or `both` and supplies a bounded retry-after. A live
+same-key replay or conflict is resolved before capacity admission; an expired
+same-key replacement is net-zero capacity.
+
+`identity.broker_echo_replay_coverage()` is the aggregate, least-privilege
+catalog surface. At migration 00200 it returns, in order, the eight policy
+values above followed by `total_rows bigint`, `live_rows bigint`,
+`expired_rows bigint`, `maximum_principal_rows bigint`,
+`oldest_live_expires_at text`, `oldest_expired_at text`, and
+`oldest_expired_age_seconds bigint`. Migration 00200 is itself an
+intermediate, stopped-runtime capacity tip: that coverage result does not
+report invalid live rows or live rows whose remaining lifetime exceeds the
+capacity retry bound.
+
+Migration `20260727000300_phase3_broker_echo_coverage_integrity.up.sql` is the
+forward integrity companion and remains an intermediate, stopped-runtime tip.
+With every runtime still stopped, it first takes `SHARE` on the replay table,
+then its column/default/constraint DDL requires `ACCESS EXCLUSIVE` and
+constraint validation requires `SHARE UPDATE EXCLUSIVE`; every acquisition is
+bounded by the same five-second lock and fifteen-second statement timeouts. The
+constant boolean default does not rewrite the heap, and the validated scan is
+bounded by the 1,000-row authority cap. It adds the immutable row discriminator
+`postgres_time_authority`.
+Rows already present at the start of 00300 receive `false`, preserving their
+original legacy creation and expiry timestamps; the column default is then
+changed to `true` for every later PostgreSQL-authoritative claim. In that same
+transaction, 00300 installs an enabled insert guard that rejects any new
+`false` marker with SQLSTATE `55000`, regardless of caller-supplied timestamps.
+It aborts if any row fails response validation, including the valid JSON
+object, UUID-v4 `id`, final newline, finite and increasing timestamps, or if
+any row expires later than PostgreSQL statement time plus 24 hours. It adds
+and validates `broker_echo_replays_have_valid_exact_response`, which
+additionally requires `expires_at = created_at + interval '24 hours'` exactly
+when `postgres_time_authority` is true, and then drops and recreates coverage
+because its result row type changes. The final result order is the eight
+policy columns, `total_rows bigint`, `live_rows bigint`,
+`invalid_live_rows bigint`, `overlong_live_rows bigint`, `expired_rows bigint`,
+`maximum_principal_rows bigint`, `oldest_live_expires_at text`,
+`oldest_expired_at text`, and `oldest_expired_age_seconds bigint`. Invalid live
+rows include malformed responses and current-authority rows with a non-exact
+24-hour lifetime. Startup and readiness fail closed unless both integrity
+counts are zero. Legacy rows retain their original bounded expiry and
+disappear only through the normal expired-only purge.
+
+Migration `20260727000400_phase3_broker_echo_replay_guards.up.sql` is the only
+tip compatible with the current runtime. It takes `ACCESS EXCLUSIVE` up front
+under the same timeout bounds and performs no heap rewrite or backfill. Before
+catalog work, it verifies the exact language, signature, return and execution
+attributes, configuration, source body, function OID wiring, trigger mode, and
+enabled state of the 00300 insert fence. The exact trigger definition must have
+no `WHEN` predicate, arguments, or transition tables, and the complete
+non-internal trigger catalog must contain only the expected immutable
+update/delete guard and insert fence. A same-named no-op function, selectively
+conditional trigger, or sidecar trigger is a fail-closed divergent tip.
+It then rejects the additional anomaly of a false-marked row whose `created_at`
+is later than the committed 00300 journal time. It installs the statement
+trigger that rejects every `TRUNCATE`;
+update/delete immutability, the pre-existing insert fence, and expired-only
+bounded purge remain unchanged. A normal data-only import cannot create legacy
+exemptions at either committed tip. Older data is restored only into an
+isolated database, advanced through the ordered migrations, and reconciled
+before promotion.
+
+The claim and purge functions are `SECURITY DEFINER` with
+`search_path=pg_catalog` and `lock_timeout=5s`; coverage is
+`SECURITY DEFINER` with `search_path=pg_catalog` from 00200 onward. The
+validator is an immutable invoker function with `search_path=pg_catalog`.
+At each intermediate and final tip, migrations inspect complete raw function
+and table ACLs, revoke every explicit non-owner grantee plus `PUBLIC`, and then
+grant the exact intended function allowlist. This neutralizes hostile default
+privileges for known and unlisted roles.
+`platformgo_api` has execute privilege on exactly claim, purge, and coverage,
+but not the validator; it has no direct privilege on either replay or policy
+table, no select privilege on the legacy replay table, and no execute privilege
+on the legacy claim. Other runtime roles have neither table access nor execute
+privilege on these broker-echo functions.
+
+No intermediate tip is permission to overlap binaries or guess a runtime from
+partial catalog state. The stop, preflight, exact journal/checksum and catalog
+classification, final-tip binary selection, and recovery protocol is in
 `OPERATIONS.md`.
 
 ## 11. Retention and partitioning
@@ -317,7 +440,9 @@ The periodic API-key replay cleanup reports every bounded batch and exposes a
 least-privilege per-encryption-key live count plus oldest expiry through
 `identity.api_key_replay_coverage()`. Missing live decryption keys make
 readiness false; zero-count evidence is required before key removal.
-Broker-echo exact responses retain for 24 hours from PostgreSQL statement time.
+New broker-echo exact responses retain for 24 hours from PostgreSQL statement
+time. Rows migrated from the prior application-clock contract preserve their
+original finite expiry and are never extended or shortened during migration.
 Cleanup deletes expired rows only, in bounded batches, and reports its deleted
 count; it must not update or delete a live replay.
 

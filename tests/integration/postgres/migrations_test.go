@@ -60,6 +60,8 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 		"identity.user_accounts",
 		"identity.sessions",
 		"identity.idempotency_responses",
+		"identity.broker_echo_replays",
+		"identity.broker_echo_replay_policy",
 		"identity.account_profiles",
 		"trading.order_intents",
 		"realtime.channel_sequences",
@@ -4906,9 +4908,10 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 22 ||
+	if count != 26 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last != "20260726001000_phase3_validate_fill_effective_leverage.up.sql" {
+		last !=
+			"20260727000400_phase3_broker_echo_replay_guards.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,
@@ -5358,6 +5361,18 @@ func assertAPIRoleIdentityBoundary(
 				'forged', 'forged', decode(repeat('00', 32), 'hex'),
 				200, '{}', clock_timestamp() + interval '1 day'
 			)`},
+		{name: "direct legacy response read", statement: `
+			SELECT * FROM identity.idempotency_responses`},
+		{name: "direct exact response read", statement: `
+			SELECT * FROM identity.broker_echo_replays`},
+		{name: "replaced broker echo claim", statement: `
+			SELECT identity.claim_broker_echo(
+				'urn:xb:apikey:permission-test',
+				'permission-test',
+				decode(repeat('01', 32), 'hex'),
+				'permission-result',
+				clock_timestamp() + interval '1 day'
+			)`},
 		{name: "bare account provisioning", statement: `
 			SELECT identity.provision_broker_account(
 				'urn:xb:account:forged',
@@ -5417,20 +5432,36 @@ func assertAPIRoleIdentityBoundary(
 	if !created || userID != "urn:xb:user:permission-test" {
 		t.Fatalf("narrow broker-user result = %q created=%t", userID, created)
 	}
-	var echoID string
+	var echoStatus int
+	var echoHeaders []byte
+	var echoBody []byte
 	if err := tx.QueryRow(context.Background(), `
-		SELECT identity.claim_broker_echo(
+		SELECT response_status, response_headers, response_body
+		  FROM identity.claim_broker_echo_response(
 			'urn:xb:apikey:permission-test',
-			'permission-test',
+			decode(repeat('02', 32), 'hex'),
 			decode(repeat('01', 32), 'hex'),
-			'permission-result',
-			clock_timestamp() + interval '1 day'
+			200,
+			'{"Content-Type":["application/json"]}'::jsonb,
+			convert_to(
+				'{"id":"019fa562-2c4f-4b7e-8db3-ec1fc8d53931"}' ||
+					chr(10),
+				'UTF8'
+			)
 		)`,
-	).Scan(&echoID); err != nil {
+	).Scan(&echoStatus, &echoHeaders, &echoBody); err != nil {
 		t.Fatalf("execute narrow broker-echo function: %v", err)
 	}
-	if echoID != "permission-result" {
-		t.Fatalf("narrow broker-echo result = %q", echoID)
+	if echoStatus != 200 ||
+		string(echoHeaders) != `{"Content-Type": ["application/json"]}` ||
+		string(echoBody) !=
+			"{\"id\":\"019fa562-2c4f-4b7e-8db3-ec1fc8d53931\"}\n" {
+		t.Fatalf(
+			"narrow broker-echo result = status %d headers %s body %q",
+			echoStatus,
+			echoHeaders,
+			echoBody,
+		)
 	}
 	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatal(err)

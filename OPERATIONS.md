@@ -55,43 +55,205 @@ restore selectively.
 
 ### Phase 3 broker-echo exact-replay upgrade
 
-Migration `20260727000100_phase3_broker_echo_exact_replay.up.sql` is a
-no-overlap cutover from the legacy broker-echo replay function to the dedicated
-exact-response store:
+Migrations `20260727000100_phase3_broker_echo_exact_replay.up.sql`,
+`20260727000200_phase3_broker_echo_capacity_authority.up.sql`,
+`20260727000300_phase3_broker_echo_coverage_integrity.up.sql`, and
+`20260727000400_phase3_broker_echo_replay_guards.up.sql` form one no-overlap
+operational cutover even though each migration and checksum journal record
+commits in its own transaction:
 
-1. Withdraw broker traffic. Stop and drain every old API instance and replay
-   cleanup loop, then prove its leases, PostgreSQL sessions, and transactions
-   have ended. No old process may overlap the migration or the new binary.
-2. Measure and record the live legacy broker-echo row count, total response
-   bytes, and complete legacy relation size including indexes and TOAST.
-   Compare all three with the exact fixed bounds in the migration and retain
-   the query output as release evidence. An excess or an unreconstructable live
-   response blocks the cutover.
-3. Record the candidate artifact digest and take a complete, restore-verified
-   database backup/PITR boundary containing the legacy replay data and
+1. Withdraw broker traffic. Stop and drain every API process, including every
+   claim caller and replay-cleanup owner. Prove from PostgreSQL and the process
+   supervisor that their pools, sessions, transactions, waits, and cleanup
+   schedules have ended. Keep them stopped through all migrations and catalog
+   classification; no old and new binary, cleanup process, session, or
+   transaction may overlap.
+2. Record the old and candidate artifact digests. Take a complete,
+   restore-verified backup/PITR boundary containing both replay authorities and
    `engine.schema_migrations`.
-4. Run the new-image migrator. Under bounded lock and statement timeouts it
-   takes `SHARE` on `identity.idempotency_responses`, validates
-   the live subset, and backfills the dedicated table atomically. A definite
-   pre-commit error leaves the previous tip authoritative; drain the blocker or
-   correct the source data through a reviewed process before retrying.
-5. Treat connection loss, client deadline, failover, or missing `COMMIT`
-   acknowledgment as an unknown outcome. Keep all API processes stopped.
-   Compare the exact migration filename and checksum in
-   `engine.schema_migrations` with catalog evidence for
-   `identity.broker_echo_replays`, its primary key, expiry index, immutability
-   trigger, claim/purge functions, and grants. Classify one exact tip before
-   retrying or selecting a binary; a journal/catalog disagreement requires a
-   reviewed forward fix.
-6. After commit, run strict schema verification and permission probes. Prove
-   that `platformgo_api` can execute the new claim and bounded purge functions,
-   cannot directly read or mutate the dedicated table, and cannot use the
-   legacy claim or replay table.
-7. Start only the new API artifact. Verify same-key replay returns the exact
-   stored status, logical required headers, and body bytes; different-request
-   conflict, concurrent duplicate claim, lost HTTP acknowledgment, 24-hour
-   PostgreSQL-time expiry, and expired-only bounded purge must all pass before
-   restoring traffic.
+3. Before 00100, measure and retain:
+   `pg_total_relation_size('identity.idempotency_responses')`, the count of
+   live scopes prefixed by `broker-echo` plus byte `0x1f`, and the sum of their
+   `octet_length(response_body::text)`. The relation must be at most
+   67,108,864 bytes, the live subset at most 1,000 rows and 46,000 bytes, and
+   every live row must pass the migration's exact scope, 32-byte request-hash,
+   status-200, one-id UUID-v4 JSON, finite-time, and increasing-time
+   reconstruction predicate. Any excess or unreconstructable response blocks
+   the cutover.
+4. Apply 00100. It takes `SHARE` on
+   `identity.idempotency_responses` with `lock_timeout=5s` and
+   `statement_timeout=15s`, validates and copies only live broker-echo rows,
+   and installs the dedicated exact-response catalog atomically. Do not start a
+   binary at this intermediate tip.
+5. Before 00200, record
+   `pg_total_relation_size('identity.broker_echo_replays')`, total rows,
+   rows grouped by scope, exact-response validity, and maximum remaining
+   lifetime using PostgreSQL `statement_timestamp()`. The relation must be at
+   most 67,108,864 bytes. After rows already expired by PostgreSQL time are
+   removed, every response must pass the exact validator predicate, total rows
+   must be at most 1,000, each scope at most 100, and no expiry may exceed
+   statement time plus 24 hours. Preserve the query output as release
+   evidence; do not delete or shorten a live response to make preflight pass.
+   A legitimate legacy expiry derived from an application clock ahead of
+   PostgreSQL can temporarily exceed this bound. Keep traffic stopped and wait
+   until PostgreSQL statement time reaches the accepted boundary, then rerun
+   the unchanged preflight; never rewrite that row or its expiry.
+6. Apply 00200 while all API and cleanup processes remain stopped. It takes
+   `SHARE` on the dedicated replay table with the same 5-second/15-second
+   bounds, performs one transitional expired-only purge of up to 1,000 rows,
+   validates the remaining authority, and installs the immutable capacity
+   policy, validator, reduced purge, six-column claim, and aggregate coverage
+   surface atomically.
+7. Verify the immutable singleton row exactly:
+   `max_total_rows=1000`, `max_rows_per_principal=100`,
+   `purge_batch_size=100`, `max_batches_per_cycle=10`,
+   `cleanup_interval_seconds=60`, `cleanup_cycle_timeout_seconds=10`,
+   `expired_readiness_slo_seconds=120`, and
+   `max_retry_after_seconds=86460`. Verify the equality and cross-column
+   checks, the enabled update/delete and truncate guard triggers, and rejection
+   of all three mutation forms.
+8. Verify the claim result with `pg_get_function_result`: its columns are
+   exactly `(outcome text, retry_after_seconds bigint, capacity_scope text,
+   response_status integer, response_headers jsonb, response_body bytea)` in
+   that order. This must be the dropped-and-recreated six-column result, not
+   00100's three-column result. Verify purge accepts only 1 through 100.
+9. Verify catalog security. Claim and purge are `SECURITY DEFINER`,
+   `search_path=pg_catalog`, `lock_timeout=5s`; coverage is
+   `SECURITY DEFINER`, `search_path=pg_catalog`; the validator is immutable with
+   `search_path=pg_catalog`. Inspect complete `aclexplode(proacl)` and
+   `aclexplode(relacl)` output. Every explicit non-owner grantee and `PUBLIC`
+   must have been revoked from each broker-echo function and both new tables,
+   including unlisted roles introduced through hostile default privileges.
+   `platformgo_api` can execute exactly claim, purge, and
+   `identity.broker_echo_replay_coverage()` and cannot directly read or mutate
+   either replay or policy table. Other runtime roles have no broker-echo table
+   or function access. The legacy claim and API select on
+   `identity.idempotency_responses` remain revoked.
+10. Verify coverage's exact intermediate migration-00200 result order: the
+    eight policy columns, then `total_rows bigint`, `live_rows bigint`,
+    `expired_rows bigint`, `maximum_principal_rows bigint`,
+    `oldest_live_expires_at text`, `oldest_expired_at text`, and
+    `oldest_expired_age_seconds bigint`. Do not start the current runtime at
+    this intermediate tip.
+11. Before 00300, prove every row passes the response predicate, including a
+    valid JSON object, UUID-v4 `id`, final newline, and finite increasing
+    timestamps. Do not require exact 24-hour lifetime from these rows: they
+    include legacy expiry selected by the prior Go application clock. Repeat
+    the maximum remaining-lifetime preflight using PostgreSQL statement time;
+    no expiry may exceed statement time plus 24 hours. Apply 00300 while every
+    API and cleanup process remains stopped. It first obtains `SHARE`; the
+    constant-default column, default, and constraint DDL then require
+    `ACCESS EXCLUSIVE`, and validation requires `SHARE UPDATE EXCLUSIVE`, all
+    under the 5-second/15-second bounds. The constant default does not rewrite
+    the capped heap. It adds `postgres_time_authority=false` to all existing
+    rows, changes the default to `true` for future claims, and atomically
+    installs the enabled insert fence that rejects any later `false` marker
+    regardless of its caller-supplied timestamps. It rejects any invalid
+    response or overlong expiry, adds and validates the conditional
+    `broker_echo_replays_have_valid_exact_response`, then atomically replaces
+    the aggregate coverage function. The validator remains the immutable
+    finite/increasing response validator installed by 00200. A reader holding
+    `ACCESS SHARE` can block the DDL escalation; a timeout must leave the exact
+    00200 journal, data, catalog, and ACL state for a clean retry.
+12. Verify coverage's 00300 result order exactly: the eight policy columns,
+    `total_rows bigint`, `live_rows bigint`, `invalid_live_rows bigint`,
+    `overlong_live_rows bigint`, `expired_rows bigint`,
+    `maximum_principal_rows bigint`, `oldest_live_expires_at text`,
+    `oldest_expired_at text`, and `oldest_expired_age_seconds bigint`. It
+    remains `STABLE SECURITY DEFINER`, with `search_path=pg_catalog`, no
+    `PUBLIC` execute grant, and an execute grant to `platformgo_api`. Verify
+    `broker_echo_replays_have_valid_exact_response` is validated, uses the
+    immutable response validator, and requires exact 24-hour lifetime only for
+    rows with `postgres_time_authority=true`. Verify the discriminator is
+    `NOT NULL`, every migrated row is `false`, and the column default is
+    `true`. Verify backdated, equal-cutover, and future-dated owner inserts with
+    `postgres_time_authority=false` all fail with SQLSTATE `55000`, while real
+    migrated rows remain byte- and timestamp-identical. Do not start a runtime
+    at this intermediate tip.
+13. Apply 00400 while every runtime and non-migrator database session remains
+    stopped. It takes `ACCESS EXCLUSIVE` before catalog work, performs no
+    rewrite/backfill, verifies the 00300 insert fence's exact language,
+    signature, return and execution attributes, configuration, source body,
+    owner, function OID wiring, exact trigger definition, mode, and enabled
+    state. The trigger must have no `WHEN` predicate, arguments, or transition
+    tables, and the complete non-internal trigger catalog must contain only the
+    expected immutable update/delete guard and insert fence. A same-named no-op
+    function, selectively conditional trigger, or alphabetically later sidecar
+    trigger must fail with SQLSTATE `55000` without changing the journal, data,
+    or divergent catalog. It also fails if a false-marked row has the
+    additional anomaly of a `created_at` later than the committed 00300 journal
+    time. Verify the enabled statement-level truncate guard rejects owner
+    `TRUNCATE` with SQLSTATE `55000` and preserves every row. Recheck complete
+    raw ACLs, including an unlisted hostile default grantee.
+14. Run the strict schema verifier against 00400. Exercise a fresh API-role
+    claim and prove it stores `postgres_time_authority=true` with exact
+    PostgreSQL-derived 24-hour lifetime. Prove bounded purge still removes only
+    expired rows, coverage integrity counts are zero, and exact replay remains
+    unchanged before selecting the current artifact.
+
+The exact journal identity is the filename plus SHA-256 of the immutable file
+bytes. For this sequence it is:
+
+```text
+20260727000100_phase3_broker_echo_exact_replay.up.sql
+700a5581f30f32e9d3846d6c9c0d26227a96287d988ac839a3af806e364b493e
+20260727000200_phase3_broker_echo_capacity_authority.up.sql
+3da4abb62234d5ef2e1f0364390b90e9aba0f4523f5ef9e52f3b8b428ab1f0c7
+20260727000300_phase3_broker_echo_coverage_integrity.up.sql
+3335758c901a0667896ed6ed304c8c99338f0d749f4a67e24e9286f3231c78d4
+20260727000400_phase3_broker_echo_replay_guards.up.sql
+1ba1a4495213baee0773f677e6d36eef41f25f639501a355fc23e7e63957952e
+```
+
+Compare those values to `filename` and `encode(checksum, 'hex')` in
+`engine.schema_migrations`; a filename alone is not evidence. Resolve a
+connection loss, client deadline, failover, or missing `COMMIT`
+acknowledgment using both the journal and the complete expected catalog:
+
+- Before 00100: neither journal row nor any dedicated replay catalog exists.
+  Only the pre-cutover binary matches, and all processes remain stopped before
+  retrying 00100.
+- Exact 00100 intermediate: the 00100 journal/checksum exists, 00200 is absent;
+  the dedicated table, primary key, expiry index, live-row guard, definer
+  claim/purge and ACL revocations exist; claim has the three-column result;
+  policy, validator, and coverage do not exist. Do not run the capacity-aware
+  binary. Keep runtimes stopped and advance with 00200.
+- Exact 00200 intermediate capacity catalog: the 00100 and 00200
+  journal/checksums exist and 00300 is absent; the policy row, all checks and
+  guards, validator, reduced purge, six-column claim, 15-column coverage,
+  function settings, table ACLs, and execute grants match every item above.
+  Do not run the current integrity-aware binary. Keep runtimes stopped and
+  advance with 00300.
+- Exact 00300 intermediate integrity catalog: the first three
+  journal/checksums exist and 00400 is absent; every 00200
+  object still matches, `postgres_time_authority` is non-null with default
+  true, the validated conditional exact-response constraint exists, the
+  post-cutover insert fence exists and is enabled, and coverage has exactly the
+  final 17-column result, security settings, and grants above. The validator
+  remains the 00200 finite/increasing response predicate. Keep runtimes stopped
+  and advance with 00400.
+- Exact 00400 final catalog: all four journal/checksums exist; the exact 00300
+  data, catalog, and post-cutover insert fence remain, the statement-level
+  truncate guard exists and is enabled, full raw ACLs contain only owner plus
+  the exact API function allowlist, and no post-00300 false-marker anomaly
+  exists. Only this tip is compatible with the current artifact.
+- Partial or divergent: any journal row with a wrong checksum, expected
+  journal row with missing or mismatched catalog, catalog without its exact
+  journal row, mixed three-/six-column claim state, a 00200/00300 coverage
+  row-type mismatch, missing 00300 insert fence, missing 00400 truncate guard,
+  a post-cutover false marker, extra grants, mutable or altered policy, or any
+  otherwise unclassifiable state is not a retryable known tip. Keep all
+  runtimes stopped and recover with a reviewed forward fix or a complete valid
+  restore; never guess, edit the journal, selectively restore objects, or run
+  any binary. Restore older data only into an isolated database, apply the
+  ordered migrations, verify and reconcile there, then promote the complete
+  database.
+
+At the selected runtime tip, verify same-key replay returns exact stored status,
+logical required headers, and body bytes. Verify different-request conflict,
+concurrent duplicate claim, lost HTTP acknowledgment, 24-hour PostgreSQL-time
+expiry, capacity limits and retry-after, bounded expired-only cleanup, coverage
+readiness, and cleanup-owner shutdown before restoring traffic.
 
 Before any new traffic is accepted, an owner-authorized rollback is a complete
 restore of the verified pre-migration boundary followed by the prior binary and

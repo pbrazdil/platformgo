@@ -182,12 +182,11 @@ func (store *memoryIdentityStore) CreateUserAPIKey(
 func (store *memoryIdentityStore) BrokerEcho(
 	_ context.Context,
 	_ string,
-	_ string,
 	_ [sha256.Size]byte,
-	resultID string,
-	_ time.Time,
-) (string, error) {
-	return resultID, nil
+	_ [sha256.Size]byte,
+	response edge.StoredResponse,
+) (edge.StoredResponse, error) {
+	return response, nil
 }
 
 func (store *memoryIdentityStore) ReplayBrokerAccount(
@@ -364,8 +363,11 @@ func TestIdentityPasswordLoginProfileAndBrokerDelegation(t *testing.T) {
 		},
 		"echo-1",
 	)
-	if err != nil || echo == "" {
-		t.Fatalf("echo=%q err=%v", echo, err)
+	if err != nil ||
+		echo.Status != 200 ||
+		len(echo.Headers) == 0 ||
+		len(echo.Body) == 0 {
+		t.Fatalf("echo=%#v err=%v", echo, err)
 	}
 	account, err := identity.CreateBrokerAccount(
 		context.Background(),
