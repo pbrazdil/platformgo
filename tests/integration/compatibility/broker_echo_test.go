@@ -767,6 +767,189 @@ func runBrokerEchoEntropyFailure(
 	}
 }
 
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/identity/e2e_broker.rs:93
+//	test: idempotency_key_is_scoped_per_principal
+//
+// Adaptations:
+//   - Source-created broker keys are represented by two production configured
+//     HMAC credentials with distinct subjects and the source's shared tenant.
+//   - The Rust runtime is replaced by the production Go HTTP edge, identity
+//     application service, least-privilege API role, and real PostgreSQL.
+//
+// Assertions preserved:
+//   - Two principals may use the same idempotency key without sharing a cached
+//     response.
+//   - The first principal reusing that key receives its own original response.
+//
+// Invariant strengthening:
+//   - Both principal scopes own exactly one durable PostgreSQL row.
+//   - The first principal's replay preserves exact status, logical headers,
+//     body bytes, creation time, and expiry.
+func TestIdempotencyKeyIsScopedPerPrincipal(t *testing.T) {
+	databaseURL := os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN")
+	if databaseURL == "" {
+		t.Skip("PLATFORMGO_TEST_POSTGRES_DSN is not configured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	t.Cleanup(httpClient.CloseIdleConnections)
+	admin, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	if err := resetCompatibilityDatabase(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	if err := platformpostgres.NewMigrator(
+		admin,
+		migrations.Files,
+	).MigrateAndProvision(ctx, 73); err != nil {
+		t.Fatal(err)
+	}
+	apiDatabaseURL := provisionRuntimeLogin(
+		t,
+		ctx,
+		admin,
+		databaseURL,
+		"platformgo_api",
+	)
+	apiPool, err := pgxpool.New(ctx, apiDatabaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer apiPool.Close()
+
+	var databaseNow time.Time
+	if err := admin.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(
+		&databaseNow,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var requestSequence atomic.Uint64
+	server := newBrokerEchoServerWithCredentials(
+		t,
+		apiPool,
+		databaseNow.UTC().Truncate(time.Microsecond),
+		func() string {
+			return fmt.Sprintf(
+				"principal-scope-%d",
+				requestSequence.Add(1),
+			)
+		},
+		[]edge.BrokerCredential{
+			{
+				Prefix:     "xbk_echo_a",
+				SecretHash: edge.HashBrokerSecret("echo-secret-a"),
+				Subject:    "urn:xb:apikey:echo-a",
+				Tenant:     "urn:xb:tenant:echo-shared",
+				Scopes:     []string{"*"},
+			},
+			{
+				Prefix:     "xbk_echo_b",
+				SecretHash: edge.HashBrokerSecret("echo-secret-b"),
+				Subject:    "urn:xb:apikey:echo-b",
+				Tenant:     "urn:xb:tenant:echo-shared",
+				Scopes:     []string{"*"},
+			},
+		},
+		nil,
+		nil,
+	)
+	const (
+		sharedKey = "shared-idem-key"
+		tokenA    = "xbk_echo_a.echo-secret-a"
+		tokenB    = "xbk_echo_b.echo-secret-b"
+		scopeA    = "broker-echo\x1furn:xb:apikey:echo-a"
+		scopeB    = "broker-echo\x1furn:xb:apikey:echo-b"
+	)
+
+	firstA := doBrokerEchoHTTP(
+		ctx,
+		httpClient,
+		server.URL,
+		http.MethodPost,
+		tokenA,
+		sharedKey,
+		"principal-a-first",
+	)
+	firstAID := requireBrokerEchoID(t, firstA)
+	firstASnapshot := readBrokerEchoSnapshot(
+		t,
+		ctx,
+		admin,
+		scopeA,
+		sharedKey,
+	)
+	assertBrokerEchoSnapshot(t, firstASnapshot, firstA, 1)
+
+	firstB := doBrokerEchoHTTP(
+		ctx,
+		httpClient,
+		server.URL,
+		http.MethodPost,
+		tokenB,
+		sharedKey,
+		"principal-b-first",
+	)
+	firstBID := requireBrokerEchoID(t, firstB)
+	if firstAID == firstBID {
+		t.Fatalf(
+			"principals shared an idempotent response: A=%q B=%q",
+			firstAID,
+			firstBID,
+		)
+	}
+	firstBSnapshot := readBrokerEchoSnapshot(
+		t,
+		ctx,
+		admin,
+		scopeB,
+		sharedKey,
+	)
+	assertBrokerEchoSnapshot(t, firstBSnapshot, firstB, 1)
+
+	replayedA := doBrokerEchoHTTP(
+		ctx,
+		httpClient,
+		server.URL,
+		http.MethodPost,
+		tokenA,
+		sharedKey,
+		"principal-a-replay",
+	)
+	if replayedAID := requireBrokerEchoID(t, replayedA); replayedAID != firstAID {
+		t.Fatalf(
+			"principal did not replay its response: first=%q replay=%q",
+			firstAID,
+			replayedAID,
+		)
+	}
+	assertBrokerEchoStoredWireEqual(t, firstA, replayedA)
+	replayedASnapshot := readBrokerEchoSnapshot(
+		t,
+		ctx,
+		admin,
+		scopeA,
+		sharedKey,
+	)
+	if !firstASnapshot.equal(replayedASnapshot) {
+		t.Fatalf(
+			"principal replay changed durable response:\nfirst=%#v\nreplay=%#v",
+			firstASnapshot,
+			replayedASnapshot,
+		)
+	}
+	if rowsA, rowsB := brokerEchoScopeRows(t, ctx, admin, scopeA),
+		brokerEchoScopeRows(t, ctx, admin, scopeB); rowsA != 1 || rowsB != 1 {
+		t.Fatalf("principal scope rows A=%d B=%d, want 1 each", rowsA, rowsB)
+	}
+}
+
 func TestBrokerEchoCapacityReturnsTyped429WithoutLosingReplay(
 	t *testing.T,
 ) {
@@ -958,16 +1141,37 @@ func newBrokerEchoServer(
 	wrapIdentity brokerEchoIdentityWrapper,
 ) *httptest.Server {
 	t.Helper()
-	authenticator, err := edge.NewHMACAuthenticator(edge.HMACAuthenticatorConfig{
-		ClientTokenSecret: []byte("phase3-broker-echo-client-secret!"),
-		BrokerCredentials: []edge.BrokerCredential{{
+	return newBrokerEchoServerWithCredentials(
+		t,
+		apiPool,
+		now,
+		requestID,
+		[]edge.BrokerCredential{{
 			Prefix:     "xbk_echo",
 			SecretHash: edge.HashBrokerSecret("echo-secret"),
 			Subject:    "urn:xb:apikey:echo",
 			Tenant:     "urn:xb:tenant:echo",
 			Scopes:     []string{"accounts:read"},
 		}},
-		Clock: brokerEchoClock{value: now},
+		wrapStore,
+		wrapIdentity,
+	)
+}
+
+func newBrokerEchoServerWithCredentials(
+	t *testing.T,
+	apiPool *pgxpool.Pool,
+	now time.Time,
+	requestID func() string,
+	credentials []edge.BrokerCredential,
+	wrapStore brokerEchoStoreWrapper,
+	wrapIdentity brokerEchoIdentityWrapper,
+) *httptest.Server {
+	t.Helper()
+	authenticator, err := edge.NewHMACAuthenticator(edge.HMACAuthenticatorConfig{
+		ClientTokenSecret: []byte("phase3-broker-echo-client-secret!"),
+		BrokerCredentials: credentials,
+		Clock:             brokerEchoClock{value: now},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1146,7 +1350,8 @@ func assertBrokerEchoSnapshot(
 	scopeRows int,
 ) {
 	t.Helper()
-	if len(snapshot.requestHash) != sha256.Size ||
+	wantRequestHash := sha256.Sum256([]byte("{}"))
+	if !bytes.Equal(snapshot.requestHash, wantRequestHash[:]) ||
 		snapshot.status != response.status ||
 		!bytes.Equal(snapshot.responseBody, response.body) ||
 		snapshot.createdAt.IsZero() ||
