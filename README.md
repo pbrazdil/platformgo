@@ -268,6 +268,19 @@ does not claim KYC or durable status lifecycle, successful admin login, admin
 credential/session authority, password-creation policy, refresh rotation or
 revocation, restart, retry, or lost-acknowledgment behavior.
 
+Cross-account order ownership is separately accepted through production
+password login, HMAC-authenticated HTTP, the least-privilege API role, and
+PostgreSQL 19 Beta 2. A token whose PostgreSQL-derived account claims do not
+contain the target receives the generic `403`; the observed foreign-request
+effects are one caller-scoped rate claim and zero rows in the enumerated
+command, shard, and economic graph. The same source-shaped request from the
+durable owner receives the current Go `202` only after one atomic
+idempotency/command/replay/order-intent/command-outbox admission. This
+acceptance proves the current transport ownership boundary, not a second
+application-layer ownership check, dynamic revocation of issued token claims,
+engine or risk acceptance, order execution, fills, economic mutation, NATS
+publication, replay, restart, or lost-acknowledgment behavior.
+
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
@@ -277,8 +290,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 73
-independently reviewed green source tests; 2,578 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 74
+independently reviewed green source tests; 2,577 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.

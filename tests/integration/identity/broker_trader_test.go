@@ -157,22 +157,6 @@ func TestAdminListsCarryTenantAndFilterByIt(t *testing.T) {
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/identity/e2e_trader.rs:116
-//	test: ownership_gate_blocks_cross_account_submit
-func TestOwnershipGateBlocksCrossAccountSubmit(t *testing.T) {
-	fixture := brokerTraderNewFixture()
-	fixture.createUserForTenant("", "trader-a", "trader-a@test", "pw-a")
-	userB := fixture.createUserForTenant("", "trader-b", "trader-b@test", "pw-b")
-	accountB, _ := fixture.createAccountForTenant("", userB.ID)
-	tokenA, _ := fixture.login("trader-a", "pw-a", "client")
-	tokenB, _ := fixture.login("trader-b", "pw-b", "client")
-	brokerTraderRequireStatus(t, fixture.submitOrder(tokenA, accountB.ID), brokerTraderStatusForbidden)
-	brokerTraderRequireStatus(t, fixture.submitOrder(tokenB, accountB.ID), brokerTraderStatusCreated)
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/identity/e2e_trader.rs:175
 //	test: trader_lists_own_accounts
 func TestTraderListsOwnAccounts(t *testing.T) {
