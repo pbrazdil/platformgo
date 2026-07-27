@@ -20,7 +20,9 @@ PostgreSQL 19 Beta 2; development snapshots, Beta 1, older majors, and
 noncanonical version strings fail closed. PostgreSQL 19 Beta 2 is qualified
 only for development and CI. Production requires PostgreSQL 19 GA and the
 major-upgrade, backup-restore, recovery, and reconciliation gates in
-`OPERATIONS.md`.
+`OPERATIONS.md`. The broker-echo replay claim additionally depends on the
+PostgreSQL 19 `INSERT ... ON CONFLICT DO SELECT FOR UPDATE` behavior and must
+be requalified by the full gate on the released PostgreSQL 19 GA build.
 
 ## 3. Logical schemas
 
@@ -265,6 +267,36 @@ schema tip is migration 010. Recover only with a reviewed forward fix or a
 complete valid post-correction/pre-009 restore while every runtime remains
 stopped.
 
+### Phase 3 broker-echo exact-replay migration boundary
+
+Migration `20260727000100_phase3_broker_echo_exact_replay.up.sql` is a
+forward-only, no-overlap API cutover. It creates the dedicated
+`identity.broker_echo_replays` authority and claims one `(principal, key hash)`
+with PostgreSQL 19's `INSERT ... ON CONFLICT DO SELECT FOR UPDATE`. The row
+stores the exact HTTP status, logical required headers, and body bytes; replay
+does not re-render them. The external idempotency key is SHA-256 hashed before
+persistence, and the raw key is never stored in this table.
+
+PostgreSQL `statement_timestamp()` is the only creation and expiry authority.
+Each claim has a 24-hour lifetime. Rows are immutable while live; only expired
+rows may be deleted, through
+`identity.purge_expired_broker_echo_replays(integer)` or the targeted
+expired-key replacement inside the claim function. Unrelated cleanup is not in
+the claim's correctness path. Runtime roles receive no direct table access.
+`platformgo_api` may execute only the definer claim and bounded purge functions,
+and loses access to the legacy broker-echo claim and legacy replay table.
+
+The migration locks `identity.idempotency_responses` in
+`SHARE` mode before validating and copying its live broker-echo
+subset. Its fixed live-row and response-byte bounds are part of the reviewed
+migration. A fixed total-relation-size ceiling also bounds the physical work of
+the legacy scan. Before cutover, operations records all measured values and
+proves they are within those exact bounds; an excess or a response that cannot
+be reconstructed byte-for-byte aborts atomically. Old and new API binaries
+must never overlap this migration. The stop, backup, journal/catalog
+classification, schema verification, start, and rollback protocol is in
+`OPERATIONS.md`.
+
 ## 11. Retention and partitioning
 
 High-volume append-only tables may be time partitioned:
@@ -280,6 +312,9 @@ The periodic API-key replay cleanup reports every bounded batch and exposes a
 least-privilege per-encryption-key live count plus oldest expiry through
 `identity.api_key_replay_coverage()`. Missing live decryption keys make
 readiness false; zero-count evidence is required before key removal.
+Broker-echo exact responses retain for 24 hours from PostgreSQL statement time.
+Cleanup deletes expired rows only, in bounded batches, and reports its deleted
+count; it must not update or delete a live replay.
 
 ## 12. Backup and restore
 

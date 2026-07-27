@@ -44,6 +44,10 @@ Validate at each boundary. Internal origin does not make a payload valid.
 - Replay-key rotation distributes future decryption material to every replica
   before activation and retains old keys through the replay TTL and cleanup
   horizon.
+- Broker-echo replay hashes the external idempotency key with SHA-256 before
+  persistence; the raw key is not stored. Its dedicated table retains only the
+  principal-bound key hash, request hash, exact response, and PostgreSQL-owned
+  24-hour timestamps.
 
 ## 5. Authorization
 
@@ -54,6 +58,10 @@ Validate at each boundary. Internal origin does not make a payload valid.
   mutations. Its ability to execute a credential-minting definer function is an
   explicit trust boundary; compromise of that role triggers credential
   reconciliation and is not contained as an ordinary read-only database leak.
+- Broker-echo replay is exposed to `platformgo_api` only through fixed
+  `SECURITY DEFINER` claim and bounded expired-row purge functions. The role has
+  no direct read or DML grant on the dedicated replay table, cannot update live
+  responses, and cannot call the replaced legacy claim path.
 - NATS permissions prevent cross-role subject publication/subscription.
 - Privileged risk settings, kill switch and account operations require explicit permissions and audit.
 

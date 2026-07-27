@@ -53,6 +53,61 @@ tip before retrying or choosing a binary. A journal/catalog disagreement stays
 halted for a reviewed forward fix; never guess, edit migration history, or
 restore selectively.
 
+### Phase 3 broker-echo exact-replay upgrade
+
+Migration `20260727000100_phase3_broker_echo_exact_replay.up.sql` is a
+no-overlap cutover from the legacy broker-echo replay function to the dedicated
+exact-response store:
+
+1. Withdraw broker traffic. Stop and drain every old API instance and replay
+   cleanup loop, then prove its leases, PostgreSQL sessions, and transactions
+   have ended. No old process may overlap the migration or the new binary.
+2. Measure and record the live legacy broker-echo row count, total response
+   bytes, and complete legacy relation size including indexes and TOAST.
+   Compare all three with the exact fixed bounds in the migration and retain
+   the query output as release evidence. An excess or an unreconstructable live
+   response blocks the cutover.
+3. Record the candidate artifact digest and take a complete, restore-verified
+   database backup/PITR boundary containing the legacy replay data and
+   `engine.schema_migrations`.
+4. Run the new-image migrator. Under bounded lock and statement timeouts it
+   takes `SHARE` on `identity.idempotency_responses`, validates
+   the live subset, and backfills the dedicated table atomically. A definite
+   pre-commit error leaves the previous tip authoritative; drain the blocker or
+   correct the source data through a reviewed process before retrying.
+5. Treat connection loss, client deadline, failover, or missing `COMMIT`
+   acknowledgment as an unknown outcome. Keep all API processes stopped.
+   Compare the exact migration filename and checksum in
+   `engine.schema_migrations` with catalog evidence for
+   `identity.broker_echo_replays`, its primary key, expiry index, immutability
+   trigger, claim/purge functions, and grants. Classify one exact tip before
+   retrying or selecting a binary; a journal/catalog disagreement requires a
+   reviewed forward fix.
+6. After commit, run strict schema verification and permission probes. Prove
+   that `platformgo_api` can execute the new claim and bounded purge functions,
+   cannot directly read or mutate the dedicated table, and cannot use the
+   legacy claim or replay table.
+7. Start only the new API artifact. Verify same-key replay returns the exact
+   stored status, logical required headers, and body bytes; different-request
+   conflict, concurrent duplicate claim, lost HTTP acknowledgment, 24-hour
+   PostgreSQL-time expiry, and expired-only bounded purge must all pass before
+   restoring traffic.
+
+Before any new traffic is accepted, an owner-authorized rollback is a complete
+restore of the verified pre-migration boundary followed by the prior binary and
+normal recovery checks. Never down-migrate or selectively restore replay
+tables. After new traffic is accepted, rollback is a reviewed forward fix with
+traffic withdrawn; restoring the old boundary would discard accepted durable
+facts.
+
+This cutover is qualified only on PostgreSQL 19 Beta 2 for development and CI
+because its claim path uses PostgreSQL 19
+`INSERT ... ON CONFLICT DO SELECT FOR UPDATE`. Rerun the complete policy,
+format, lint, test, race, deterministic-repeat, PostgreSQL integration,
+migration, recovery, and security gate on PostgreSQL 19 GA. Production remains
+NO-GO before GA and remains blocked afterward until the production upgrade,
+restore, recovery, and reconciliation evidence is complete.
+
 ### Phase 3 realtime schema upgrade
 
 Migration `20260725001100_phase3_committed_realtime_outbox.up.sql` has an
