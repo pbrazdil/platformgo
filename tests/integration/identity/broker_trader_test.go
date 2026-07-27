@@ -157,30 +157,6 @@ func TestAdminListsCarryTenantAndFilterByIt(t *testing.T) {
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/identity/e2e_trader.rs:32
-//	test: login_and_own_profile_with_cross_audience_rejection
-func TestLoginAndOwnProfileWithCrossAudienceRejection(t *testing.T) {
-	fixture := brokerTraderNewFixture()
-	user := fixture.createUserForTenant("", "trader1", "trader1@xb.local", "trade-pw")
-	token, status := fixture.login("trader1", "trade-pw", "client")
-	brokerTraderRequireStatus(t, status, brokerTraderStatusOK)
-	profile := fixture.myProfile(token)
-	if profile.Status != brokerTraderStatusOK || profile.Email != "trader1@xb.local" ||
-		profile.KYCStatus != "none" || !strings.HasPrefix(profile.UserID, "urn:") ||
-		profile.IdentityStatus != "active" || profile.UserID != user.ID {
-		t.Fatalf("profile=%#v", profile)
-	}
-	_, status = fixture.login("trader1", "nope", "client")
-	brokerTraderRequireStatus(t, status, brokerTraderStatusUnauthorized)
-	brokerTraderRequireStatus(t, fixture.myProfile("").Status, brokerTraderStatusUnauthorized)
-	adminToken, status := fixture.login("trader1", "trade-pw", "admin")
-	brokerTraderRequireStatus(t, status, brokerTraderStatusOK)
-	brokerTraderRequireStatus(t, fixture.myProfile(adminToken).Status, brokerTraderStatusUnauthorized)
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/identity/e2e_trader.rs:116
 //	test: ownership_gate_blocks_cross_account_submit
 func TestOwnershipGateBlocksCrossAccountSubmit(t *testing.T) {

@@ -256,6 +256,18 @@ does not claim dynamic broker-key creation, PostgreSQL broker-key authority,
 revocation, restart, multi-replica clock consistency, or monotonic expiry
 across a backward system-clock correction.
 
+Trader password login and the caller profile are separately accepted through
+the production HTTP edge, HMAC authentication, Argon2id verification,
+least-privilege API role, and PostgreSQL 19 Beta 2. The successful client sees
+the exact current Go `userId`, `login`, `email`, and `status` profile; a wrong
+password, anonymous request, and correctly signed admin-audience token each
+receive the generic `401` without an unauthorized session or client-rate
+effect. Under the owner-approved current-Go identity decision, `kycStatus`
+remains absent and the admin login plane remains unimplemented. This acceptance
+does not claim KYC or durable status lifecycle, successful admin login, admin
+credential/session authority, password-creation policy, refresh rotation or
+revocation, restart, retry, or lost-acknowledgment behavior.
+
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
@@ -265,8 +277,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 72
-independently reviewed green source tests; 2,579 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 73
+independently reviewed green source tests; 2,578 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
