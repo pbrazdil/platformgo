@@ -25,6 +25,8 @@ if [[ -d migrations ]]; then
 fi
 
 ./scripts/check-migrations.sh
+./scripts/test-check-migrations.sh
+python3 ./scripts/test-agent-workflow-policy.py
 ./scripts/test-check-governance-change.sh
 ./scripts/check-governance-change.sh
 

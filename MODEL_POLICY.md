@@ -56,6 +56,7 @@ Use `text.verbosity` in Responses API requests and `model_verbosity` in Codex co
 Stable repository rules belong in `AGENTS.md` and this file. Use:
 
 - `docs/AGENT_TASK_TEMPLATE.md` for implementation, porting, investigation, and planning assignments;
+- `docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md` before high-risk implementation;
 - `docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md` for independent high-risk review.
 
 A task prompt adds only information unique to that task: goal, scope and ownership, relevant inputs, task-specific constraints, required evidence, success criteria, validation, deliverables, and any approval boundary narrower than `AGENTS.md`.
@@ -92,6 +93,12 @@ Programmatic Tool Calling is allowed only for a bounded, predictable, non-side-e
 Use subagents only when work divides cleanly into independent, non-overlapping workstreams. The primary agent owns decomposition, file ownership, integration, conflict resolution, waiting for all requested results, and final validation. Avoid concurrent edits to shared harnesses, decimal primitives, migrations, or the same package.
 
 All agents remain on `gpt-5.6-sol`; only approved effort, verbosity, and permission profiles vary.
+
+High-risk work begins with parallel adversarial preflight by the applicable
+migration, determinism, and money reviewers. Advisory review runs throughout
+implementation and reports potential blockers immediately, but cannot grant
+release approval. Validation and release evidence are bound to one exact tree;
+old evidence or GO never transfers after that tree changes.
 
 ## Prompt caching
 

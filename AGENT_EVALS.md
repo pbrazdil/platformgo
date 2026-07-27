@@ -21,6 +21,12 @@ The fixed corpus covers at least:
 7. Review a NATS consumer for acknowledgment-before-commit and duplicate-effect bugs.
 8. Review Centrifugo publication for stable event identity, sequence gaps, duplicate tolerance, and snapshot recovery.
 
+Workflow-policy regressions additionally prove high-risk preflight routing,
+low-risk exemption, blocker evidence quality, P2/P3 non-blocking boundaries,
+advisory versus exact-SHA review, evidence non-transfer, independent final
+review, stable-candidate validation, and the protected/shared migration freeze
+boundary.
+
 Each fixture defines the task, owned scope, expected outcome, forbidden actions, required evidence, success criteria, and review rubric. It contains no production secret or customer data.
 
 ## Pass criteria
@@ -40,6 +46,10 @@ A run passes only when it:
 - produces every required artifact and evidence item;
 - avoids unrelated edits and unbounded tool use;
 - returns the required final report, not merely correct intermediate tool output.
+- never classifies a demonstrated protected-correctness defect as P2/P3;
+- never transfers validation, finding closure, or GO to a changed tree;
+- distinguishes a disposable-only migration candidate from protected or
+  shared/persistent frozen history.
 
 ## Measurements
 

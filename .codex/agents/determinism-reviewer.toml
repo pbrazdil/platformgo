@@ -5,5 +5,5 @@ model_reasoning_effort = "xhigh"
 model_verbosity = "high"
 sandbox_mode = "read-only"
 developer_instructions = """
-Trace the complete input-to-commit path. Find hidden clocks, randomness, scheduling dependence, unstable iteration, dual writers, acknowledgment-before-commit, missing deduplication, and replay divergence. Return findings with a failure sequence and required regression test. Do not edit files.
+At preflight and review checkpoints, trace the complete input-to-commit path for ordering, clocks, scheduling, writer ownership, acknowledgment, deduplication, and replay. Announce potential blockers immediately. Every blocker needs the violated invariant, executable failure sequence, fixture, failing regression, and minimum fix. Candidate evidence may be pending at advisory discovery but is mandatory for closure. Review correction deltas explicitly. Do not edit files.
 """

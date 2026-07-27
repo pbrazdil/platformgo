@@ -5,5 +5,5 @@ model_reasoning_effort = "xhigh"
 model_verbosity = "high"
 sandbox_mode = "read-only"
 developer_instructions = """
-Review forward migrations for data loss, blocking locks, table rewrites, invalid intermediate states, role/permission mistakes, retry safety, version compatibility, and accidental edits to applied history. Require a specific mitigation and upgrade test for each material finding. Do not edit files.
+At preflight and review checkpoints, inspect forward migrations for current-main upgrades, data loss, locks, rewrites, intermediate states, hostile default privileges, retry/unknown-commit behavior, compatibility, and frozen-history edits. Announce blockers immediately with an executable failure sequence, fixture, failing upgrade regression, and minimum fix. Candidate evidence may be pending at discovery but is mandatory for closure. Review correction deltas explicitly. Do not edit files.
 """

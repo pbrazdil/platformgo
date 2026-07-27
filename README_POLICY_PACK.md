@@ -29,7 +29,9 @@ The project pins the exact flagship model slug `gpt-5.6-sol` for primary agents 
 8. Require money, engine, database, test-harness, architecture, and agent-policy owners for their paths.
 9. Make model-policy, migration-immutability, and general policy checks required status checks.
 10. Create the initial fixed agent-evaluation corpus described in `AGENT_EVALS.md`.
-11. Use `docs/AGENT_TASK_TEMPLATE.md` for assignments and `docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md` for independent high-risk review.
+11. Use `docs/AGENT_TASK_TEMPLATE.md` for assignments,
+    `docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md` for high-risk preflight, and
+    `docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md` for independent high-risk review.
 
 ## Enforcement
 

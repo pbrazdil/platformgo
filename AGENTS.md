@@ -19,7 +19,10 @@ The Rust platform and Nautilus runtime are never executed in development or CI. 
 All primary agents and subagents use the exact model slug `gpt-5.6-sol`. Do not use the `gpt-5.6` alias or another GPT-5.6 variant. Project defaults and named agents are in `.codex/`; the machine-checkable policy is enforced by `scripts/check-agent-runtime.py`.
 
 Read `MODEL_POLICY.md` before changing agent instructions, prompts, `.codex` configuration, or multi-agent workflows.
-Use `docs/AGENT_TASK_TEMPLATE.md` for assignments and `docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md` for independent high-risk review. Add only task-specific goal, scope, inputs, evidence, success criteria, validation, and deliverables instead of repeating standing rules.
+Use `docs/AGENT_TASK_TEMPLATE.md` for assignments,
+`docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md` for high-risk preflight, and
+`docs/AGENT_CRITICAL_REVIEW_TEMPLATE.md` for independent high-risk review.
+Add only task-specific facts instead of repeating standing rules.
 
 ## Instruction scope
 
@@ -107,7 +110,13 @@ Missing or stale market data, unknown schemas, sequence gaps, impossible transit
 
 ### Immutable migrations
 
-Applied migrations are immutable. Every correction is a new forward migration. No production down migrations, squashing, renaming, reordering, or editing applied files.
+A migration's path and bytes freeze when it first reaches a protected branch or
+is applied to a shared or persistent database, whichever happens first.
+Application only to an explicitly disposable local/test database does not
+freeze an unpublished, unshared candidate. Before freeze that candidate may be
+edited, renamed, reordered, deleted, or squashed. After freeze it is immutable;
+every correction is a new forward migration. Production down migrations are
+forbidden.
 
 ### External compatibility
 
@@ -125,34 +134,63 @@ deterministic engine and domain
 
 `internal/domain/**` and `internal/engine/**` must not import PostgreSQL, NATS, Centrifugo, HTTP, environment access, direct logging control flow, wall-clock APIs, randomness, or infrastructure-specific types. Interfaces belong with their consumers. Do not build generic abstractions for future markets before a second market requires them.
 
-## Test-driven workflow
+## Risk-first, test-driven workflow
 
-For each vertical slice:
+Sequence:
 
-1. Read the complete source-test context and relevant invariants.
-2. Port or write a native Go test that expresses the observable requirement.
-3. Add source provenance and update the independent port, review, wiring,
-   evidence, milestone, and ownership fields in `ports/test-port-map.csv`.
-4. Confirm the test fails for the missing behavior rather than missing test plumbing.
-5. Implement the smallest deterministic behavior.
-6. Add integration or contract tests only at crossed boundaries.
-7. Refactor after green without changing semantics.
+```text
+scope
+→ parallel adversarial preflight when high-risk
+→ failing tests
+→ implementation plus advisory review
+→ focused green
+→ advisory blocker closure
+→ one full local validation pass on a stable candidate
+→ exact SHA specialist and final release review
+→ push and hosted CI on that SHA
+→ merge
+```
+
+Preflight is required for money, ledger, fills, margin,
+funding, balances, durable PostgreSQL state, migrations, ordering,
+single-writer ownership, concurrency, idempotency, duplicate delivery,
+acknowledgment, restart, recovery, reconciliation, rollback, HTTP/gRPC/realtime
+compatibility, authentication, authorization, ACL/security, or production
+lifecycle, readiness, and shutdown. Use
+`docs/AGENT_ADVERSARIAL_PREFLIGHT_TEMPLATE.md`; applicable migration,
+determinism, and money reviewers inspect in parallel before implementation.
+docs-only, mechanical, and isolated test-only work
+does not require preflight.
+
+Checkpoints are **Scope, design, and failure matrix**; **Failing tests**;
+**Implementation boundary** before docs/full suite; and
+**Exact-SHA release candidate**. Advisory review inspects working diffs and
+cannot grant release approval; blockers are immediate. Originating specialists
+close correction deltas. The independent final reviewer audits the
+candidate once, read-only.
+
+P0/P1 findings block publish and merge and require the evidence in the critical
+review template. P2/P3 findings are non-blocking only outside the protected-risk
+boundary; a real money, durable-state, ordering, idempotency, compatibility,
+security, or recoverability defect is P1.
+
+Read complete source-test context, prove the representative failing test,
+record provenance, implement minimally, and refactor only after green.
 
 Tests must not run the old Rust system, depend on live market data for economics, use sleeps in model tests, weaken assertions, hide work behind permanent skips, or use `t.Parallel()` before harness approval.
 
-Preferred history:
-
-```text
-test: port <behavior> from pinned source
-feat: implement <behavior>
-refactor: simplify <behavior> without semantic change
-```
-
 ## Multi-agent work
 
-Use subagents only when work divides into independent, non-overlapping units. Prefer them for exploration, test inventory, review, and isolated source modules. Avoid parallel edits to shared harness, migrations, decimal primitives, or the same package.
+Independent work clearing its predecessor checkpoint may parallelize
+design, tests, implementation, and contract/docs with non-overlapping
+ownership. The primary owns decomposition, conflicts, integration, candidate,
+and validation. Shared authority files have one editor; specialists are
+read-only. Every subagent uses `gpt-5.6-sol`.
 
-The primary agent owns task decomposition, file ownership, conflict resolution, integration, and final validation. Every subagent must use `gpt-5.6-sol`; named profiles in `.codex/agents/` pin this explicitly.
+Prefer safe `main` layers: schema/upgrade proof, store semantics, runtime
+activation, and source-port acceptance. Never create an unsafe intermediate
+state. Above 2,000–3,000 added lines or multiple authority boundaries, justify
+why safe separation is impossible.
 
 ## Editing discipline
 
@@ -167,7 +205,9 @@ The primary agent owns task decomposition, file ownership, conflict resolution, 
 
 ## Validation
 
-Run the smallest relevant tests while developing. Before declaring completion, run:
+Run the smallest test, affected package, boundary suite, policy, and
+format check during implementation. After advisory blockers close, stabilize a
+clean candidate commit and run one full local validation pass:
 
 ```bash
 make policy
@@ -178,7 +218,12 @@ make test-race
 make test-repeat
 ```
 
-Also run the relevant PostgreSQL, NATS, Centrifugo, compatibility, migration, or recovery targets when those boundaries changed. Do not claim a check passed unless it was executed successfully in the current working tree.
+Run PostgreSQL, NATS, Centrifugo, compatibility, migration, recovery,
+and vulnerability gates. Record full candidate/tree/base SHAs. Validation,
+closure, and GO apply only to that tree and never transfer. A changed tree
+invalidates evidence and repeats affected gates. Hosted CI tests the exact SHA;
+base drift invalidates approval. A final-review design blocker becomes a
+preflight failure and checklist update.
 
 ## Stop conditions
 
@@ -189,7 +234,7 @@ Stop and request an explicit decision when:
 - a money calculation lacks a rounding rule;
 - writer ownership or ordering is unclear;
 - a retry can duplicate an economic effect;
-- an applied migration would need modification;
+- a frozen migration would need modification;
 - compatibility requires an intentional break;
 - a venue gap would require guessing data;
 - a dependency is outside the allowlist without approval;
