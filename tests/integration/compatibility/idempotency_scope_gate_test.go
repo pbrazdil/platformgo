@@ -36,6 +36,8 @@ type scopeGateWriterResult struct {
 type scopeGateIdentityProbe struct {
 	edge.IdentityService
 	createBrokerAccountCalls atomic.Uint64
+	engineCommitted          *atomic.Bool
+	returnedBeforeCommit     atomic.Bool
 }
 
 func (probe *scopeGateIdentityProbe) CreateBrokerAccount(
@@ -45,12 +47,16 @@ func (probe *scopeGateIdentityProbe) CreateBrokerAccount(
 	request edge.BrokerAccountRequest,
 ) (edge.BrokerAccountAdmission, error) {
 	probe.createBrokerAccountCalls.Add(1)
-	return probe.IdentityService.CreateBrokerAccount(
+	admission, err := probe.IdentityService.CreateBrokerAccount(
 		ctx,
 		principal,
 		idempotencyKey,
 		request,
 	)
+	if !probe.engineCommitted.Load() {
+		probe.returnedBeforeCommit.Store(true)
+	}
+	return admission, err
 }
 
 // Ported from:
@@ -137,7 +143,13 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	defer enginePool.Close()
 
 	now := time.Date(2026, time.July, 27, 18, 0, 0, 123456789, time.UTC)
-	server, identityProbe := newScopeGateServer(t, apiPool, now)
+	var engineCommitted atomic.Bool
+	server, identityProbe := newScopeGateServer(
+		t,
+		apiPool,
+		now,
+		&engineCommitted,
+	)
 	requestBody := `{"userId":"` + userID + `"}`
 	writerDone := make(chan scopeGateWriterResult, 1)
 	go func() {
@@ -213,6 +225,7 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 			decision.CommandResult.Status,
 		)
 	}
+	engineCommitted.Store(true)
 
 	writer := <-writerDone
 	if writer.err != nil {
@@ -237,6 +250,9 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	if got := identityProbe.createBrokerAccountCalls.Load(); got != 1 {
 		t.Fatalf("writer application calls = %d, want 1", got)
 	}
+	if identityProbe.returnedBeforeCommit.Load() {
+		t.Fatal("writer application returned before the engine commit completed")
+	}
 
 	before := readScopeGateSnapshot(
 		t,
@@ -260,6 +276,14 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 		t,
 		server.URL,
 		requestBody,
+		idempotency,
+		writer.body,
+		account.ID,
+	)
+	assertScopeGateDenied(
+		t,
+		server.URL,
+		`{`,
 		idempotency,
 		writer.body,
 		account.ID,
@@ -289,11 +313,20 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 		t,
 		restartedAPIPool,
 		now,
+		&engineCommitted,
 	)
 	assertScopeGateDenied(
 		t,
 		restartedServer.URL,
 		requestBody,
+		idempotency,
+		writer.body,
+		account.ID,
+	)
+	assertScopeGateDenied(
+		t,
+		restartedServer.URL,
+		`{`,
 		idempotency,
 		writer.body,
 		account.ID,
@@ -324,8 +357,12 @@ func newScopeGateServer(
 	t *testing.T,
 	apiPool *pgxpool.Pool,
 	now time.Time,
+	engineCommitted *atomic.Bool,
 ) (*httptest.Server, *scopeGateIdentityProbe) {
 	t.Helper()
+	if engineCommitted == nil {
+		t.Fatal("scope-gate server requires an engine commit observer")
+	}
 	authenticator, err := edge.NewHMACAuthenticator(edge.HMACAuthenticatorConfig{
 		ClientTokenSecret: []byte("phase3-scope-gate-client-secret!"),
 		BrokerCredentials: []edge.BrokerCredential{
@@ -362,7 +399,10 @@ func newScopeGateServer(
 	if err != nil {
 		t.Fatal(err)
 	}
-	identityProbe := &scopeGateIdentityProbe{IdentityService: identity}
+	identityProbe := &scopeGateIdentityProbe{
+		IdentityService: identity,
+		engineCommitted: engineCommitted,
+	}
 	server := httptest.NewServer(edge.NewServer(edge.ServerConfig{
 		Authenticator: authenticator,
 		Identity:      identityProbe,
@@ -397,6 +437,11 @@ func waitForScopeGateCommand(
 			idempotencyKey,
 		).Scan(&payload)
 		if err == nil {
+			select {
+			case premature := <-writerDone:
+				t.Fatalf("writer returned before engine commit: %#v", premature)
+			default:
+			}
 			return payload
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
