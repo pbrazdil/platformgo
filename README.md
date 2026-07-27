@@ -158,6 +158,15 @@ connections return the same immutable reasons without changing any durable
 economic, audit, checkpoint, receipt, or outbox state. Its pinned source
 behavior is separately accepted; the external fills route remains inventory.
 
+The landed idempotency scope-gate slice proves the pinned broker behavior
+through the production HTTP handler and PostgreSQL 19 Beta 2: an exact
+`accounts:write` principal receives one committed account response, while an
+exact `accounts:read` principal reusing the same body and idempotency key gets
+`403` before body parsing, application entry, replay lookup, or durable
+mutation. The result remains stable after API-pool and server reconstruction
+under least-privilege database roles. Its direct committed-outbox delivery
+evidence does not claim NATS-real or full-process restart coverage.
+
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
@@ -167,8 +176,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 65
-independently reviewed green source tests; 2,586 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 66
+independently reviewed green source tests; 2,585 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
