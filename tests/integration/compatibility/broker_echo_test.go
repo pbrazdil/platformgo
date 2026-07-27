@@ -156,13 +156,15 @@ type brokerEchoIdentityWrapper func(edge.IdentityService) edge.IdentityService
 
 // Ported from:
 //
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/identity/e2e_broker.rs:26
 //	test: api_key_auth_plus_idempotency_replay
 //
-// Adaptation:
+// Adaptations:
 //   - The source-created broker key is represented by the production configured
-//     HMAC credential used at the Go bootstrap boundary.
+//     HMAC credential used at the Go bootstrap boundary. The source does not
+//     assert the key-creation response or storage; creation only supplies the
+//     valid credential used by the asserted ping and echo requests.
 //
 // Assertions preserved:
 //   - A valid broker key can ping, while missing and invalid keys are rejected.

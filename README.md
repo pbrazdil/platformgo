@@ -203,10 +203,12 @@ bounded documented `SHARE`, `ACCESS EXCLUSIVE`, and
 `SHARE UPDATE EXCLUSIVE` locks, complete hostile-default-ACL normalization, an
 immutable policy/ACL boundary, exact catalog classification, and atomic
 intermediate-tip rollback/retry evidence.
-This implementation still requires final independent review, hosted CI, merge,
-and separate source-port ledger acceptance. PostgreSQL 19 Beta 2 remains
-development/CI-only; production remains NO-GO until PostgreSQL 19 GA and the
-full upgrade, restore, recovery, and reconciliation gate.
+The exact implementation passed independent migration, determinism, and release
+review plus hosted CI before merge. Its pinned authentication and idempotency
+behavior now also has separate semantic port-ledger acceptance through the real
+HTTP and PostgreSQL boundary. PostgreSQL 19 Beta 2 remains development/CI-only;
+production remains NO-GO until PostgreSQL 19 GA and the full upgrade, restore,
+recovery, and reconciliation gate.
 
 Phase 3 is not complete. The runtime must still:
 
@@ -217,8 +219,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 66
-independently reviewed green source tests; 2,585 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 67
+independently reviewed green source tests; 2,584 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
