@@ -271,11 +271,29 @@ determinism, money, migration, and release reviews before merge. PostgreSQL 19
 Beta 2 remains a nonproduction qualification; this evidence is not a
 production major-upgrade rehearsal. The owner-approved source adaptation is
 separately accepted in the port ledger.
-Production additionally remains blocked on a replay-safe v3 invalid-authority
-remediation rehearsal, a post-correction restore proof, commit-acknowledgment
-outcome resolution for migrations 009/010, production-scale lock timing, and
-proof that every old runtime role and database pool is gone throughout the
-cutover.
+The current upgrade-rehearsal candidate additionally uses the exact final Go
+decision-hash v3 artifact to create the invalid pre-009 authority through
+the durable command journal, outbox, and audited single-writer engine inputs on
+PostgreSQL 19 Beta 2. Migration 009 rejects that state atomically; an active
+order blocks the first correction; normal v3 cancellation and
+risk-configuration inputs repair it; and fresh v3 plus current v4 processes
+recover the same corrected immutable history across the successful 009/010
+retry. The current production messaging store then claims all six pending v3
+outbox messages and records deterministic publisher acknowledgments. Its four
+command redeliveries become decision-hash v4 duplicate receipts at later
+sequences, with no new balance, ledger, risk, order, fill, position, or event
+effect; the two domain events are acknowledged, every immutable publication
+row retains its exact sequence and attempt metadata, the pending outbox reaches
+zero, and a fresh current recovery and reconciliation remain exact. No direct
+SQL economic repair or production historical-writer switch is introduced.
+Live readiness, JetStream consumer acknowledgment, and process-drain
+orchestration remain outside this database upgrade test.
+Production additionally remains blocked on PostgreSQL 19 GA, a production-like
+post-correction backup/restore proof, commit-acknowledgment outcome resolution
+for migrations 009/010, production-scale lock timing, proof that every deployed
+shard ID fits migration 009's signed-int32 advisory-lock key domain (or a
+separately reviewed forward compatibility path), and proof that every old
+runtime role and database pool is gone throughout the cutover.
 These results do not activate the external fills route or complete the
 remaining Phase 3 scope.
 
