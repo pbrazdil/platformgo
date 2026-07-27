@@ -351,18 +351,6 @@ func brokerTraderTenantChannel(tenant string) string {
 	return "tenant:" + tenant
 }
 
-func (fixture *brokerTraderFixture) submitOrder(token, accountID string) int {
-	access, ok := fixture.access[token]
-	if !ok || access.Audience != "client" {
-		return brokerTraderStatusUnauthorized
-	}
-	account, ok := fixture.accounts[accountID]
-	if !ok || account.UserID != access.UserID {
-		return brokerTraderStatusForbidden
-	}
-	return brokerTraderStatusCreated
-}
-
 func (fixture *brokerTraderFixture) listMyAccounts(token string) ([]brokerTraderAccount, int) {
 	access, ok := fixture.access[token]
 	if !ok || access.Audience != "client" {
