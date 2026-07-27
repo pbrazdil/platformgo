@@ -50,6 +50,22 @@ For every mutation requiring idempotency:
 - retry after timeout never creates a new command;
 - response body, status and required headers are persisted.
 
+### Broker echo exact replay
+
+Broker echo binds an idempotency key to the authenticated broker principal and
+canonical request hash. The first accepted request commits the exact HTTP
+status, logical required headers, and response body bytes in PostgreSQL. Every
+same-key/same-request retry returns those stored values without re-rendering;
+transport correlation headers such as the current attempt's request ID are not
+part of the stored logical response. Same-key/different-request remains a
+deterministic conflict.
+
+The guarantee includes concurrent duplicates and a retry after PostgreSQL
+commits but the HTTP success acknowledgment is lost. PostgreSQL statement time,
+not an API process clock, owns the 24-hour replay lifetime. After expiry, a new
+claim may replace the old row; cleanup is bounded and may delete expired rows
+only.
+
 ## 5. gRPC compatibility
 
 Preserve:
