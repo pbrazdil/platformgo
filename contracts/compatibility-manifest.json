@@ -31,7 +31,8 @@
     "api-key-idempotent-resolution-precedes-rate-rejection",
     "broker-account-identifiers-preserve-current-go-urns",
     "client-api-key-creation-requires-idempotency-key",
-    "fill-trade-type-is-always-classified"
+    "fill-trade-type-is-always-classified",
+    "trader-profile-preserves-current-go-identity-boundary"
   ],
   "implementedHTTPRoutes": [
     "GET /healthz",
