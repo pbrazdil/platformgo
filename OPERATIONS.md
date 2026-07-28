@@ -79,6 +79,34 @@ prior ACL remains intact before retrying. For an unknown commit acknowledgment,
 inspect the exact filename/checksum and the raw table/column ACL together. A
 journal/catalog disagreement remains stopped for a forward repair.
 
+### Phase 3 admin fleet-fills ACL upgrade
+
+Migration `20260728000300_phase3_admin_fleet_fills_acl.up.sql` is an ACL-only
+no-overlap cutover for `trading.fills`. Stop and drain old API and engine
+processes before applying it, and keep them stopped until the exact journal and
+ACL state is classified. The migration performs no fill or ledger data change
+and does not rewrite the relation. It removes every explicit non-owner table
+and column grant and dependent grant chain from the existing table, then
+atomically restores only non-grantable API `SELECT` and engine
+`SELECT, INSERT`.
+
+Run the migration under the migrator's five-second `lock_timeout`; its SQL also
+sets a ten-second `statement_timeout`. Ordinary engine-like `ROW EXCLUSIVE`
+DML is compatible with the ACL change. An `ACCESS EXCLUSIVE` blocker produces
+a definite pre-commit rollback rather than an unbounded wait. Before retrying,
+prove the migration filename is absent, the prior raw ACL is unchanged, and
+fill data and relation identity are unchanged.
+
+After commit, verify the exact filename/checksum and raw table plus column ACL:
+the only explicit non-owner rows are API `SELECT` and engine `SELECT, INSERT`,
+all without grant option. Also prove API mutation is denied and both intended
+roles can read. A prior binary started cold rejects the newer migration tip.
+For a connection loss or missing `COMMIT` acknowledgment, keep every runtime
+stopped and inspect the journal/checksum and complete ACL together. A mismatch
+requires a reviewed forward repair or complete verified pre-migration restore;
+never edit the journal, edit frozen migration bytes, or restore ACL catalogs
+selectively.
+
 ### Phase 3 command market-sequence binding upgrade
 
 Migration
