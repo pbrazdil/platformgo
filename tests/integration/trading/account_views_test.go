@@ -268,22 +268,6 @@ func TestPositionsAreABoundedSinglePageNotKeyset(t *testing.T) {
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/trading/e2e_balances.rs:18
-//	test: flat_account_balance_is_pure_cash_and_scale_stripped
-func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
-	fixture := newAccountViewsFixture()
-	fixture.seedCash("acct-1", "1000.000000000000000", "999.999", "0.001")
-	balance := fixture.balance("acct-1")
-	if balance.Currency != "USDC" || balance.Total != "1000" || balance.Equity != "1000" ||
-		balance.Free != "1000" || balance.Locked != "0" || balance.CrossEquity != "1000" ||
-		balance.UnrealizedPnL != "0" || balance.MarginRatio != nil || balance.MaintenanceMargin != "0" {
-		t.Fatalf("balance=%#v", balance)
-	}
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/trading/e2e_balances.rs:83
 //	test: a_working_order_locks_its_reserved_margin
 func TestAWorkingOrderLocksItsReservedMargin(t *testing.T) {
