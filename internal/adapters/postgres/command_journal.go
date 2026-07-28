@@ -405,8 +405,9 @@ func (journal *CommandJournal) Begin(
 		if _, insertErr := tx.Exec(ctx, `
 			INSERT INTO trading.commands (
 				command_id, account_id, account_sequence, command_type,
-				schema_version, canonical_payload, status, logical_time
-			) VALUES ($1,$2,$3,$4,$5,$6,'pending',$7)`,
+				schema_version, canonical_payload, status, logical_time,
+				market_sequence_binding
+			) VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,'ordered')`,
 			request.CommandID.String(),
 			request.AccountID,
 			request.AccountSequence,
@@ -627,6 +628,7 @@ func validateBeginCommand(
 	}
 	if input.InputID != request.CommandID ||
 		input.Kind != engine.InputKindCommand ||
+		input.MarketSequence != 0 ||
 		!engine.TradingActionAllowedForInputKind(input.Kind, action.Kind) ||
 		input.SchemaVersion != request.SchemaVersion ||
 		input.SourceSequence != request.AccountSequence ||
@@ -635,7 +637,7 @@ func validateBeginCommand(
 		string(action.Kind) != request.CommandType ||
 		!bytes.Equal(canonicalCommand, canonicalInput) {
 		return engine.InputEnvelope{}, fmt.Errorf(
-			"%w: begin command %s redundant metadata differs from outbox",
+			"%w: begin command %s requires an unresolved market sequence and matching redundant metadata",
 			ErrCommandInputConflict,
 			request.CommandID,
 		)

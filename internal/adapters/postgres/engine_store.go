@@ -41,7 +41,7 @@ const (
 	FailpointAfterPersistBeforeCommit = "postgres.after_persist_before_commit"
 	engineWriterLockNamespace         = 0x50474f45
 	engineOwnerLockNamespace          = 0x50474f4f
-	engineRuntimeSchemaRevision       = "20260725001100_phase3_committed_realtime_outbox"
+	engineRuntimeSchemaRevision       = "20260728000200_phase3_command_market_sequence_binding"
 )
 
 type faultSet interface {
@@ -162,6 +162,22 @@ func (store *EngineStore) AcquireShardOwnership(
 	connection, err := store.pool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire shard %d ownership connection: %w", shardID, err)
+	}
+	if _, err := connection.Exec(
+		ctx,
+		`SELECT set_config(
+			'platformgo.runtime_schema_revision',
+			$1,
+			false
+		)`,
+		engineRuntimeSchemaRevision,
+	); err != nil {
+		connection.Release()
+		return nil, fmt.Errorf(
+			"bind shard %d ownership runtime schema revision: %w",
+			shardID,
+			err,
+		)
 	}
 	if err := ensureDeploymentShard(ctx, connection, shardID); err != nil {
 		connection.Release()
@@ -368,6 +384,87 @@ func (store *EngineStore) ApplyTrading(
 	if checkpointErr := verifyCheckpoint(ctx, tx, state); checkpointErr != nil {
 		return state, engine.Decision{}, false, checkpointErr
 	}
+	receipts, err := loadRelevantReceipts(ctx, tx, input)
+	if err != nil {
+		return state, engine.Decision{}, false, err
+	}
+	originalInputFound := false
+	if receipts != nil {
+		_, originalInputFound = receipts.LookupByInputID(input.InputID)
+	}
+	input = bindOrderedMarketSequence(state, input, receipts)
+	if input.Kind == engine.InputKindMarket &&
+		!originalInputFound &&
+		input.StreamSequence == state.NextStreamSequence() &&
+		input.MarketSequence != input.StreamSequence {
+		halted, haltErr := engine.FailClosed(
+			state,
+			input,
+			engine.ErrDurableInputConflict,
+			"new market input fence does not match its assigned shard sequence",
+		)
+		if faultErr := persistEngineFault(
+			ctx,
+			tx,
+			input,
+			action,
+			halted,
+			haltErr,
+		); faultErr != nil {
+			return state, engine.Decision{}, false, faultErr
+		}
+		if checkpointErr := persistCheckpoint(ctx, tx, halted); checkpointErr != nil {
+			return state, engine.Decision{}, false, checkpointErr
+		}
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return state, engine.Decision{}, false, fmt.Errorf(
+				"commit invalid market fence fault: %w",
+				commitErr,
+			)
+		}
+		return halted, engine.Decision{}, false, haltErr
+	}
+	if input.Kind != engine.InputKindMarket &&
+		input.Kind != engine.InputKindCommand &&
+		!originalInputFound {
+		var expectedMarketSequence uint64
+		if sequence, found := state.MarketSequence(); found {
+			expectedMarketSequence = sequence
+		}
+		if input.MarketSequence != expectedMarketSequence {
+			halted, haltErr := engine.FailClosed(
+				state,
+				input,
+				engine.ErrDurableInputConflict,
+				fmt.Sprintf(
+					"new input kind %d market fence %d does not match committed high-watermark %d",
+					input.Kind,
+					input.MarketSequence,
+					expectedMarketSequence,
+				),
+			)
+			if faultErr := persistEngineFault(
+				ctx,
+				tx,
+				input,
+				action,
+				halted,
+				haltErr,
+			); faultErr != nil {
+				return state, engine.Decision{}, false, faultErr
+			}
+			if checkpointErr := persistCheckpoint(ctx, tx, halted); checkpointErr != nil {
+				return state, engine.Decision{}, false, checkpointErr
+			}
+			if commitErr := tx.Commit(ctx); commitErr != nil {
+				return state, engine.Decision{}, false, fmt.Errorf(
+					"commit invalid non-command market fence fault: %w",
+					commitErr,
+				)
+			}
+			return halted, engine.Decision{}, false, haltErr
+		}
+	}
 	deliveryDecision, deliveryFound, deliveryMatches, err := loadDuplicateDelivery(
 		ctx,
 		tx,
@@ -378,10 +475,6 @@ func (store *EngineStore) ApplyTrading(
 	}
 	if deliveryFound && deliveryMatches {
 		return state, deliveryDecision, true, nil
-	}
-	receipts, err := loadRelevantReceipts(ctx, tx, input)
-	if err != nil {
-		return state, engine.Decision{}, false, err
 	}
 	if original, found := receipts.LookupByInputID(input.InputID); found &&
 		original.StreamSequence != input.StreamSequence {
@@ -467,6 +560,35 @@ func (store *EngineStore) ApplyTrading(
 	if duplicate {
 		return next, decision, true, nil
 	}
+	if input.Kind == engine.InputKindMarket &&
+		len(decision.BookChanges) == 0 {
+		halted, haltErr := engine.FailClosed(
+			state,
+			input,
+			engine.ErrDurableInputConflict,
+			"market input did not commit authoritative market state",
+		)
+		if faultErr := persistEngineFault(
+			ctx,
+			tx,
+			input,
+			action,
+			halted,
+			haltErr,
+		); faultErr != nil {
+			return state, engine.Decision{}, false, faultErr
+		}
+		if checkpointErr := persistCheckpoint(ctx, tx, halted); checkpointErr != nil {
+			return state, engine.Decision{}, false, checkpointErr
+		}
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return state, engine.Decision{}, false, fmt.Errorf(
+				"commit invalid market input fault: %w",
+				commitErr,
+			)
+		}
+		return halted, engine.Decision{}, false, haltErr
+	}
 
 	if err := persistDecision(ctx, tx, input, action, decision); err != nil {
 		if isDeterministicDurableInputConflict(err) {
@@ -516,6 +638,36 @@ func (store *EngineStore) ApplyTrading(
 		)
 	}
 	return next, decision, false, nil
+}
+
+// bindOrderedMarketSequence resolves the zero value emitted before JetStream
+// establishes total order. A new market input binds to its assigned shard
+// sequence, while every other new unresolved input binds to the shard-wide
+// committed market-state high-watermark. Redelivery binds to the original
+// durable decision, so a later stream position or later market input cannot
+// change the business-input identity.
+func bindOrderedMarketSequence(
+	state engine.State,
+	input engine.InputEnvelope,
+	receipts engine.ReceiptLookup,
+) engine.InputEnvelope {
+	if input.MarketSequence != 0 {
+		return input
+	}
+	if receipts != nil {
+		if original, found := receipts.LookupByInputID(input.InputID); found {
+			input.MarketSequence = original.Decision.MarketSequence
+			return input
+		}
+	}
+	if input.Kind == engine.InputKindMarket {
+		input.MarketSequence = input.StreamSequence
+		return input
+	}
+	if sequence, found := state.MarketSequence(); found {
+		input.MarketSequence = sequence
+	}
+	return input
 }
 
 func isDeterministicDurableInputConflict(err error) bool {
@@ -1201,6 +1353,7 @@ func persistCommandResult(
 	var accountSequence uint64
 	var storedPayload []byte
 	var commandLogicalTime int64
+	var marketSequenceBinding string
 	var outboxSubject string
 	var outboxSchemaVersion uint32
 	var outboxPayload []byte
@@ -1208,6 +1361,17 @@ func persistCommandResult(
 	if err := tx.QueryRow(ctx, `
 		SELECT c.status, c.command_type, c.schema_version, c.account_id,
 		       c.account_sequence, c.canonical_payload, c.logical_time,
+		       COALESCE(
+		           to_jsonb(c) ->> 'market_sequence_binding',
+		           CASE
+		               WHEN COALESCE(
+		                   (o.payload ->> 'marketSequence')::bigint,
+		                   0
+		               ) = 0
+		               THEN 'ordered'
+		               ELSE 'explicit'
+		           END
+		       ),
 		       o.subject, o.schema_version, o.payload, a.shard_id
 		  FROM trading.commands AS c
 		  JOIN messaging.outbox AS o ON o.message_id = c.command_id
@@ -1224,6 +1388,7 @@ func persistCommandResult(
 		&accountSequence,
 		&storedPayload,
 		&commandLogicalTime,
+		&marketSequenceBinding,
 		&outboxSubject,
 		&outboxSchemaVersion,
 		&outboxPayload,
@@ -1261,6 +1426,45 @@ func persistCommandResult(
 			ErrCommandInputConflict,
 			input.InputID,
 			err,
+		)
+	}
+	if marketSequenceBinding == "ordered" &&
+		storedInput.MarketSequence != 0 {
+		return fmt.Errorf(
+			"%w: command %s outbox market sequence must remain unresolved",
+			ErrCommandInputConflict,
+			input.InputID,
+		)
+	}
+	if marketSequenceBinding == "explicit" &&
+		storedInput.MarketSequence == 0 {
+		return fmt.Errorf(
+			"%w: command %s explicit market sequence is missing",
+			ErrCommandInputConflict,
+			input.InputID,
+		)
+	}
+	var marketSequence uint64
+	if sequenceErr := tx.QueryRow(ctx, `
+		SELECT COALESCE(max(stream_sequence), 0)
+		  FROM market.books`,
+	).Scan(&marketSequence); sequenceErr != nil {
+		return fmt.Errorf(
+			"read command %s market-state high-watermark: %w",
+			input.InputID,
+			sequenceErr,
+		)
+	}
+	if marketSequenceBinding == "ordered" {
+		storedInput.MarketSequence = marketSequence
+	}
+	if input.MarketSequence != marketSequence {
+		return fmt.Errorf(
+			"%w: command %s market fence %d does not match committed high-watermark %d",
+			ErrCommandInputConflict,
+			input.InputID,
+			input.MarketSequence,
+			marketSequence,
 		)
 	}
 	canonicalStored, err := canonicalJSON(storedPayload)
@@ -2084,7 +2288,7 @@ func recoverTradingState(
 		switch receiptKind {
 		case "business":
 			next, decision, applyErr =
-				engine.ApplyTradingWithReceiptsAtDecisionHashVersion(
+				engine.ApplyTradingForRecoveryAtDecisionHashVersion(
 					state,
 					input,
 					action,

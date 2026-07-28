@@ -879,7 +879,7 @@ func TestLaterAccountCommandCannotBypassOrderedPublication(t *testing.T) {
 			Kind:                 engine.InputKindCommand,
 			SourceID:             "command-journal",
 			SourceSequence:       uint64(index + 1),
-			MarketSequence:       uint64(index + 1),
+			MarketSequence:       0,
 			LogicalTime:          engine.NewLogicalTime(logicalTime.Add(time.Duration(index) * time.Second)),
 			ConfigurationVersion: 1,
 			InstrumentVersion:    1,

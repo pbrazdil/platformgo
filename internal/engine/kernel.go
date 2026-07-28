@@ -12,6 +12,7 @@ import (
 type State struct {
 	shardID            ShardID
 	nextStreamSequence uint64
+	marketSequence     uint64
 	ready              bool
 	hash               Hash
 	lastReceipt        Receipt
@@ -47,6 +48,16 @@ func (state State) Ready() bool {
 // Hash returns the canonical state-chain hash.
 func (state State) Hash() Hash {
 	return state.hash
+}
+
+// MarketSequence returns the shard-wide high-watermark of committed market
+// state. Ordered adapters bind commands to it before hashing and persistence,
+// so one scalar identifies the complete market snapshot visible to a command.
+func (state State) MarketSequence() (uint64, bool) {
+	if state.marketSequence == 0 {
+		return 0, false
+	}
+	return state.marketSequence, true
 }
 
 // CurrencyScales returns the monotonic currency identities reconstructed by
@@ -376,6 +387,15 @@ func applyWithSchemaAndDecisionHashVersion(
 	previousState := state
 	previousStateHash := state.hash
 	state, decision := transition(state)
+	if input.Kind == InputKindMarket && len(decision.BookChanges) != 0 {
+		state.marketSequence = input.MarketSequence
+		if state.marketSequence == 0 {
+			// Receipts committed before ordered adapter binding recorded zero.
+			// Their physical stream sequence deterministically reconstructs the
+			// hidden high-watermark without changing historical decision bytes.
+			state.marketSequence = input.StreamSequence
+		}
+	}
 	if decisionHashVersion >= 4 {
 		if engineError := freezeFillEffectiveLeverage(
 			previousState,

@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -616,60 +617,133 @@ func TestFundingHistoryMigrationUpgradesPopulatedRealtimeSchema(t *testing.T) {
 		MigrateAndProvision(ctx, 41); err != nil {
 		t.Fatalf("apply previous realtime schema: %v", err)
 	}
-	store := platformpostgres.NewEngineStore(pool)
-	state := engine.NewState(41)
-	ids := testkit.NewShardIDSequence(41)
-	clock := testkit.NewManualClock(engine.NewLogicalTime(time.Date(
+	logicalTime := engine.NewLogicalTime(time.Date(
 		2026,
 		time.July,
 		24,
 		14,
 		0,
-		0,
+		1,
 		123456789,
 		time.UTC,
-	)))
-	state, _, _, _ = applyStoredTrading(
-		t,
-		pool,
-		store,
-		state,
-		ids,
-		clock,
-		engine.TradingAction{
-			Kind: engine.TradingActionConfigureInstrument,
-			ConfigureInstrument: &engine.ConfigureInstrument{
-				InstrumentID:            "BTC-PERP",
-				Revision:                1,
-				PriceScale:              2,
-				QuantityScale:           3,
-				SettlementCurrency:      "USDC",
-				SettlementCurrencyScale: 2,
-				InitialMarginRate:       "0.1",
-				MaintenanceMarginRate:   "0.05",
-				MaxLeverage:             "10",
-				MakerFeeRate:            "0",
-				TakerFeeRate:            "0",
-			},
+	))
+	action := engine.TradingAction{
+		Kind: engine.TradingActionUpdateBook,
+		UpdateBook: &engine.UpdateBook{
+			InstrumentID: "UNKNOWN-PERP",
+			MarkPrice:    "100",
+			Bids: []engine.BookLevel{{
+				Price: "99", Quantity: "1",
+			}},
+			Asks: []engine.BookLevel{{
+				Price: "101", Quantity: "1",
+			}},
 		},
-		platformpostgres.ApplyOptions{},
-	)
-	_, _, fundingInput, _ := applyStoredTrading(
-		t,
-		pool,
-		store,
-		state,
-		ids,
-		clock,
-		engine.TradingAction{
-			Kind: engine.TradingActionConfigureAccount,
-			ConfigureAccount: &engine.ConfigureAccount{
-				AccountID: "account-1",
-				OmsMode:   engine.OmsModeNetting,
-			},
-		},
-		platformpostgres.ApplyOptions{},
-	)
+	}
+	input, err := (testkit.TradingInput{
+		InputID:              testkit.NewShardIDSequence(41).Next(),
+		ShardID:              41,
+		SourceID:             "legacy-funding-history",
+		SourceSequence:       1,
+		StreamSequence:       1,
+		MarketSequence:       1,
+		LogicalTime:          logicalTime,
+		ConfigurationVersion: 1,
+		InstrumentVersion:    1,
+		Action:               action,
+	}).CanonicalEnvelope()
+	if err != nil {
+		t.Fatalf("build previous-schema funding receipt: %v", err)
+	}
+	input.Kind = engine.InputKindMarket
+	state, decision, err := engine.ApplyTrading(engine.NewState(41), input, action)
+	if err != nil ||
+		decision.CommandResult.Status != engine.CommandStatusRejected ||
+		len(decision.BookChanges) != 0 {
+		t.Fatalf("derive previous-schema funding receipt: %+v, %v", decision, err)
+	}
+	envelopeJSON, err := json.Marshal(struct {
+		InputID              string
+		SchemaVersion        uint32
+		ShardID              uint32
+		Kind                 uint8
+		SourceID             string
+		SourceSequence       uint64
+		StreamSequence       uint64
+		MarketSequence       uint64
+		LogicalTime          int64
+		ConfigurationVersion uint64
+		InstrumentVersion    uint64
+		Payload              []byte
+	}{
+		InputID:              input.InputID.String(),
+		SchemaVersion:        input.SchemaVersion,
+		ShardID:              uint32(input.ShardID),
+		Kind:                 uint8(input.Kind),
+		SourceID:             input.SourceID,
+		SourceSequence:       input.SourceSequence,
+		StreamSequence:       input.StreamSequence,
+		MarketSequence:       input.MarketSequence,
+		LogicalTime:          input.LogicalTime.UnixNano(),
+		ConfigurationVersion: input.ConfigurationVersion,
+		InstrumentVersion:    input.InstrumentVersion,
+		Payload:              input.Payload.Bytes(),
+	})
+	if err != nil {
+		t.Fatalf("encode previous-schema funding envelope: %v", err)
+	}
+	decisionJSON, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatalf("encode previous-schema funding decision: %v", err)
+	}
+	businessHash := engine.BusinessInputHash(input)
+	stateHash := state.Hash()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2,
+			'0.1', '0.05', '10', '0', '0'
+		);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('account-1', 'NETTING');
+		INSERT INTO engine.account_shards (account_id, shard_id)
+		VALUES ('account-1', 41)`); err != nil {
+		t.Fatalf("seed previous-schema funding projections: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		WITH runtime_revision AS (
+			SELECT set_config(
+				'platformgo.runtime_schema_revision',
+				'20260725001100_phase3_committed_realtime_outbox',
+				true
+			)
+		)
+		INSERT INTO engine.input_receipts (
+			shard_id, input_id, stream_sequence, schema_version,
+			input_hash_version, input_hash, decision_hash_version,
+			decision_hash, resulting_state_hash, envelope, decision,
+			business_input_hash, business_input_hash_version
+		)
+		SELECT
+			41, $1, 1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+		  FROM runtime_revision`,
+		input.InputID.String(),
+		decision.InputHashVersion,
+		decision.InputHash[:],
+		decision.DecisionHashVersion,
+		decision.DecisionHash[:],
+		stateHash[:],
+		envelopeJSON,
+		decisionJSON,
+		businessHash[:],
+		engine.CurrentBusinessHashVersion,
+	); err != nil {
+		t.Fatalf("seed previous-schema funding receipt: %v", err)
+	}
 	const positionID = "019f9b6d-3154-4db1-b639-57c246e92201"
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO trading.funding_settlements (
@@ -690,7 +764,7 @@ func TestFundingHistoryMigrationUpgradesPopulatedRealtimeSchema(t *testing.T) {
 			'USDC'
 		)`,
 		positionID,
-		fundingInput.InputID.String(),
+		input.InputID.String(),
 	); err != nil {
 		t.Fatalf("seed previous-schema funding settlement: %v", err)
 	}
@@ -1250,7 +1324,7 @@ func TestRuntimeMigrationVerificationIsExactAndOldEngineIsFenced(t *testing.T) {
 			SELECT
 				set_config(
 					'platformgo.runtime_schema_revision',
-					'20260725001100_phase3_committed_realtime_outbox',
+					'20260728000200_phase3_command_market_sequence_binding',
 					true
 				),
 				set_config(
@@ -1729,7 +1803,7 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260725001100_phase3_committed_realtime_outbox',
+				'20260728000200_phase3_command_market_sequence_binding',
 				false
 			),
 			set_config(
@@ -2021,7 +2095,7 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 			SELECT
 				set_config(
 					'platformgo.runtime_schema_revision',
-					'20260725001100_phase3_committed_realtime_outbox',
+					'20260728000200_phase3_command_market_sequence_binding',
 					true
 				),
 				set_config(
@@ -4908,10 +4982,10 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 27 ||
+	if count != 28 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
 		last !=
-			"20260728000100_phase3_flat_balance_currency_scale_read.up.sql" {
+			"20260728000200_phase3_command_market_sequence_binding.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,
@@ -5665,7 +5739,7 @@ func assertReceiptIdentityConstraints(t *testing.T, pool *pgxpool.Pool) {
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260725001100_phase3_committed_realtime_outbox',
+				'20260728000200_phase3_command_market_sequence_binding',
 				false
 			),
 			set_config(

@@ -79,6 +79,51 @@ prior ACL remains intact before retrying. For an unknown commit acknowledgment,
 inspect the exact filename/checksum and the raw table/column ACL together. A
 journal/catalog disagreement remains stopped for a forward repair.
 
+### Phase 3 command market-sequence binding upgrade
+
+Migration
+`20260728000200_phase3_command_market_sequence_binding.up.sql` is a
+no-overlap engine/API cutover. Stop and drain the engine and API command
+writers first. The migration then proves that no engine owner still holds the
+configured shard advisory lock, takes `SHARE` on `trading.commands` and `SHARE
+ROW EXCLUSIVE` on `engine.input_receipts`, and runs under a five-second lock
+timeout plus ten-second statement timeout. A live old engine or table writer
+therefore rolls the transaction back rather than pausing and resuming across
+the cutover. A pending legacy command whose immutable API outbox already has a
+nonzero market fence returns SQLSTATE `55000`; drain it to a terminal response
+under the previous artifact before retrying.
+
+The command-column/default change is metadata-only but briefly requires
+`ACCESS EXCLUSIVE`; trigger installation takes `SHARE ROW EXCLUSIVE` on
+`messaging.outbox`. Verify
+that the nullable `market_sequence_binding` column, its `ordered` default, the
+`NOT VALID` value constraint, both command/outbox guards, and the market
+receipt guard exist and are enabled. There is no command backfill: null means
+legacy history. Existing rejected market receipts are preserved and replay as
+rejections without advancing market state. Existing accepted receipts with a
+legacy zero or producer-supplied fence retain their bytes and hashes; recovery
+reconstructs only the hidden watermark from their durable physical stream
+sequence. New and previous command binaries can admit only a zero-sentinel
+outbox; an explicit outbox fails within its admission transaction with
+SQLSTATE `23514`. A post-cutover market receipt must contain a non-empty book
+change and matching stream/market metadata. The engine runtime-schema revision
+must equal `20260728000200_phase3_command_market_sequence_binding` on every
+shard ownership-epoch insert/update, business receipt, duplicate receipt, shard
+fault, and checkpoint insert/update. This fences a previous engine that passed
+schema verification before the upgrade but attempted shard ownership only
+after commit; its epoch write fails with SQLSTATE `55000` before it can publish
+engine readiness.
+
+On `55P03`, `57014`, `55000`, or another definite pre-commit error, verify that
+the migration filename, column, functions, and triggers are all absent before
+retrying at the prior exact tip. For an unknown commit result, keep every
+runtime stopped and classify the exact checksum plus catalog state. After a
+confirmed commit, an old engine cannot restart because its migration set is
+schema-behind, and a previously verified old process cannot establish ownership
+because its session revision is stale. Rollback is a schema-compatible forward
+artifact or a complete verified pre-migration restore, never migration-history
+editing or selective receipt removal.
+
 ### Phase 3 broker-echo exact-replay upgrade
 
 Migrations `20260727000100_phase3_broker_echo_exact_replay.up.sql`,
