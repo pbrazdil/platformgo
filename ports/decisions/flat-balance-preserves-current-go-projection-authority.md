@@ -63,7 +63,7 @@ canonical JSON strings.
 The acceptance must prove rollback, stable retry, same-sequence replay,
 later-sequence duplicate delivery, restart recovery, reconciliation,
 least-privilege reads, anonymous and foreign-account denial, exact field
-absence, deterministic row ordering, and whole-response failure for malformed
+absence, the source's one-row response, and whole-response failure for malformed
 durable currency or decimal values. It must not claim source-compatible
 query-time derivation, the adjacent working-order reservation behavior,
 margin ratio, maintenance margin, unrealized PnL, cross equity, realtime
