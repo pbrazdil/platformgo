@@ -134,6 +134,8 @@ Network calls are outside the transaction.
   instrument decisions, decision hashes, state hashes, and the final
   bidirectional registry match. Runtime roles cannot mutate the registry;
   instrument writes register or verify a scale inside the engine transaction.
+  The API role has non-grantable `SELECT` only so authoritative balance reads
+  can reject missing registry rows and values exceeding the registered scale.
 
 ## 7. Locking and isolation
 
@@ -236,6 +238,22 @@ decision-hash v3. A prior binary is therefore not compatible after the
 migration commits. Applied migration history is never edited: recover with a
 reviewed forward fix, or restore the complete pre-migration database while all
 writers remain stopped.
+
+### Phase 3 flat-balance currency-scale read boundary
+
+Migration `20260728000100_phase3_flat_balance_currency_scale_read.up.sql`
+changes only the ACL catalogs for the existing append-only
+`trading.currency_scales` table. It scrubs `PUBLIC`, every direct non-owner
+table grant, every column grant, and dependent same-object grant chains, then
+grants non-grantable `SELECT` only to `platformgo_engine` and
+`platformgo_api`. It performs no heap rewrite, scan, backfill, or economic
+mutation.
+
+The compatibility balance query uses a `LEFT JOIN` so a balance without scale
+authority is an error rather than an omitted row. Every returned amount is
+validated through `domain.NewMoney` at the registered scale before any result
+is serialized. Missing scale authority, invalid currency, non-finite money,
+or excess scale rejects the whole read.
 
 ### Phase 3 frozen-effective-leverage migration boundary
 

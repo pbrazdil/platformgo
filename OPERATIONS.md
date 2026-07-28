@@ -53,6 +53,32 @@ tip before retrying or choosing a binary. A journal/catalog disagreement stays
 halted for a reviewed forward fix; never guess, edit migration history, or
 restore selectively.
 
+### Phase 3 flat-balance currency-scale read upgrade
+
+Migration `20260728000100_phase3_flat_balance_currency_scale_read.up.sql` is an
+ACL-only no-overlap cutover. Stop and drain every old API process before
+applying it. The migration scrubs the existing currency-scale table ACL and
+grants read-only access to the candidate API role; it does not rewrite or scan
+economic data. Verify raw table and column ACLs after commit: the only
+non-owner grants are non-grantable `SELECT` for `platformgo_engine` and
+`platformgo_api`.
+
+Deploy in this order: migration first, then the candidate API binary. A prior
+binary started cold after the migration rejects the schema as newer; an
+already-running prior API process remains query-compatible but must not be
+left overlapping the cutover. Rollback therefore uses a schema-compatible
+binary embedding the new migration but restoring the prior query behavior, or
+a reviewed forward fix. Full database rollback is allowed only from the
+complete verified pre-migration restore boundary while every runtime remains
+stopped. Never remove the journal row, edit the migration, or selectively
+restore ACL catalogs.
+
+If the migration returns `lock_timeout`, the transaction has rolled back:
+verify that its filename is absent from `engine.schema_migrations` and the
+prior ACL remains intact before retrying. For an unknown commit acknowledgment,
+inspect the exact filename/checksum and the raw table/column ACL together. A
+journal/catalog disagreement remains stopped for a forward repair.
+
 ### Phase 3 broker-echo exact-replay upgrade
 
 Migrations `20260727000100_phase3_broker_echo_exact_replay.up.sql`,

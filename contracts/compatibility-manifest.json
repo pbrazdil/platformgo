@@ -32,6 +32,7 @@
     "broker-account-identifiers-preserve-current-go-urns",
     "client-api-key-creation-requires-idempotency-key",
     "fill-trade-type-is-always-classified",
+    "flat-balance-preserves-current-go-projection-authority",
     "native-login-refresh-placement-preserves-current-go-client-boundary",
     "trader-profile-preserves-current-go-identity-boundary",
     "web-login-cookie-placement-preserves-current-go-client-boundary"
