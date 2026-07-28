@@ -37,12 +37,14 @@ only committed PostgreSQL projection values. A source client requiring the
 four additional fields, or expecting the read edge to discard stored
 `locked/free` values and derive a flat view from `total`, must adapt.
 
-The decision changes no economic formula, rounding rule, transaction,
-migration, schema, ledger effect, writer ownership, identifier, or database
-grant. It does not make malformed durable money safe to expose: the
-production reader must validate every currency and exact decimal, discard the
-whole result on any invalid row, and return only the generic unavailable
-contract. The API role remains read-only for `ledger.balances`.
+The decision changes no economic formula, rounding rule, transaction, schema,
+ledger effect, writer ownership, or identifier. It requires one additive
+least-privilege grant allowing the API role to read the existing append-only
+`trading.currency_scales` authority. The production reader must bind each
+balance to that registered scale, validate every exact decimal at the scale,
+discard the whole result on any invalid row, and return only the generic
+unavailable contract. The API role remains read-only for both
+`ledger.balances` and `trading.currency_scales`.
 
 Options considered:
 1. Recreate the nine-field Rust query and recompute balances at the HTTP edge.
@@ -75,7 +77,10 @@ Tests added/changed:
   PostgreSQL 19 evidence in
   `tests/integration/compatibility/flat_balance_test.go`.
 - Strengthen `CompatibilityStore.Balances` to validate and canonicalize every
-  currency and economic decimal before returning any row.
+  currency and economic decimal against the durable scale before returning any
+  row.
+- Add a forward least-privilege migration granting the API role read-only
+  access to the append-only currency-scale registry.
 - Keep the frozen five-field OpenAPI schema unchanged.
 
 Approver: Petr Brazdil, through the active owner instruction:
