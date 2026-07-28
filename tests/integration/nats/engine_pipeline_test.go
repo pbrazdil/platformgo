@@ -1084,18 +1084,31 @@ func TestEngineProcessorFailsClosedAfterOwnershipSessionLoss(t *testing.T) {
 		_ = former.Close(context.Background())
 	})
 
-	var ownerPID uint32
+	var (
+		ownerCount int
+		ownerPID   uint32
+	)
 	if err := pool.QueryRow(ctx, `
-		SELECT pid
+		SELECT count(*), COALESCE(min(pid), 0)
 		  FROM pg_locks
 		 WHERE locktype = 'advisory'
+		   AND database = (
+				SELECT oid
+				  FROM pg_database
+				 WHERE datname = current_database()
+		   )
 		   AND classid = $1::oid
 		   AND objid = $2::oid
+		   AND objsubid = 2
+		   AND mode = 'ExclusiveLock'
 		   AND granted`,
 		engineLockNamespace,
 		uint32(shardID),
-	).Scan(&ownerPID); err != nil {
+	).Scan(&ownerCount, &ownerPID); err != nil {
 		t.Fatalf("find shard owner backend: %v", err)
+	}
+	if ownerCount != 1 {
+		t.Fatalf("shard owner backend count = %d, want 1", ownerCount)
 	}
 	var terminated bool
 	if err := pool.QueryRow(
