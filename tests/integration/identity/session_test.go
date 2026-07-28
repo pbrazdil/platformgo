@@ -2,7 +2,6 @@ package identity
 
 import (
 	"net/http"
-	"strings"
 	"testing"
 )
 
@@ -154,35 +153,6 @@ func TestSessionLogoutRevokesSessionAndStopsRefresh(t *testing.T) {
 		t.Fatalf("session revoke audit rows = %d, want 1", fixture.audit["session.revoke.success"])
 	}
 	sessionRequireStatus(t, fixture.refresh("trader", refresh), http.StatusUnauthorized)
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/identity/e2e_web_refresh_cookie.rs:74
-//	test: web_login_sets_httponly_cookie_and_omits_body_refresh
-func TestSessionWebLoginSetsHTTPOnlyCookieAndOmitsBodyRefresh(t *testing.T) {
-	response := newSessionWebFixture().login(sessionWebOrigin)
-	sessionRequireStatus(t, response, http.StatusOK)
-	if response.headers.Get("Access-Control-Allow-Credentials") != "true" {
-		t.Fatalf("allow credentials = %q", response.headers.Get("Access-Control-Allow-Credentials"))
-	}
-	if response.headers.Get("Access-Control-Allow-Origin") != sessionWebOrigin {
-		t.Fatalf("allow origin = %q", response.headers.Get("Access-Control-Allow-Origin"))
-	}
-	cookie := response.headers.Get("Set-Cookie")
-	if !strings.Contains(cookie, sessionRefreshName+"=") ||
-		!strings.Contains(cookie, "HttpOnly") ||
-		!strings.Contains(cookie, "Path="+sessionRefreshPath) ||
-		sessionCookieToken(cookie) == "" {
-		t.Fatalf("web refresh cookie = %q", cookie)
-	}
-	if response.body["accessToken"] == "" {
-		t.Fatal("web login omitted access token")
-	}
-	if _, exists := response.body["refreshToken"]; exists {
-		t.Fatalf("web login exposed refresh token: %#v", response.body)
-	}
 }
 
 // Ported from:

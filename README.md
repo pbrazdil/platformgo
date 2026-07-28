@@ -281,6 +281,19 @@ access-token validation, web-origin behavior, positive cookie behavior, CORS,
 password-creation compatibility, refresh redemption or rotation, token-family
 replay, logout or revocation, restart, retry, or lost-acknowledgment behavior.
 
+Origin-bearing web-shaped login is separately accepted at that same production
+client `POST /v1/auth/login` boundary with the least-privilege API role and
+PostgreSQL 19 Beta 2. The response carries the exact statically configured
+`Access-Control-Allow-Origin`, emits no `Access-Control-Allow-Credentials` or
+`Set-Cookie`, returns both nonempty tokens in the body, and commits exactly one
+session containing only the SHA-256 refresh-token hash. The owner-approved
+decision preserves this current Go client behavior rather than simulating the
+absent source-compatible admin/browser-login plane. This acceptance does not
+claim dynamic origin reflection or allowlisting, successful admin login,
+credentialed CORS, cookies, CSRF protection, access-token validation,
+password-creation compatibility, refresh redemption or rotation, token-family
+replay, logout or revocation, restart, retry, or lost-acknowledgment behavior.
+
 Cross-account order ownership is separately accepted through production
 password login, HMAC-authenticated HTTP, the least-privilege API role, and
 PostgreSQL 19 Beta 2. A token whose PostgreSQL-derived account claims do not
@@ -303,8 +316,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It now records 75
-independently reviewed green source tests; 2,576 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It now records 76
+independently reviewed green source tests; 2,575 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
