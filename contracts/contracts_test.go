@@ -86,6 +86,7 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 		"fill-trade-type-is-always-classified",
 		"native-login-refresh-placement-preserves-current-go-client-boundary",
 		"trader-profile-preserves-current-go-identity-boundary",
+		"web-login-cookie-placement-preserves-current-go-client-boundary",
 	}
 	foundDeviations := make(map[string]bool, len(requiredDeviations))
 	for _, raw := range manifest.IntentionalDeviations {
