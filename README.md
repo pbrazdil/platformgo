@@ -311,6 +311,9 @@ Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
   broker, gRPC, realtime, and deployment-role contracts;
+- establish a complete refresh lifecycle before the cookie-refresh source rows
+  can leave placeholder state; current Go has no production refresh handler,
+  and route `404` must not be mislabeled as implemented compatibility;
 - continue the remaining fill-history behaviors through complete, independently
   reviewed compatibility slices;
 - obtain separate port-ledger acceptance for each additional source behavior
