@@ -305,7 +305,7 @@ func TestOutboxRuntimeRoleExecutesProductionClaimAndRepublish(t *testing.T) {
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260725001100_phase3_committed_realtime_outbox',
+				'20260728000200_phase3_command_market_sequence_binding',
 				false
 			),
 			set_config(

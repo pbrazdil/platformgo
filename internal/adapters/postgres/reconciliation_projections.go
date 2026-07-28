@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -87,6 +88,7 @@ type durableCommand struct {
 	Status          string
 	Result          []byte
 	LogicalTime     engine.LogicalTime
+	MarketBinding   string
 	OutboxSubject   string
 	OutboxSchema    uint32
 	OutboxPayload   []byte
@@ -785,6 +787,17 @@ func compareCommands(
 		       command.schema_version, command.canonical_payload,
 		       command.status, COALESCE(command.result, 'null'::jsonb),
 		       command.logical_time,
+		       COALESCE(
+		           to_jsonb(command) ->> 'market_sequence_binding',
+		           CASE
+		               WHEN COALESCE(
+		                   (outbox.payload ->> 'marketSequence')::bigint,
+		                   0
+		               ) = 0
+		               THEN 'ordered'
+		               ELSE 'explicit'
+		           END
+		       ),
 		       COALESCE(outbox.subject, ''),
 		       COALESCE(outbox.schema_version, 0),
 		       COALESCE(outbox.payload, 'null'::jsonb),
@@ -820,6 +833,7 @@ func compareCommands(
 			&actual.Status,
 			&actual.Result,
 			&logicalTime,
+			&actual.MarketBinding,
 			&actual.OutboxSubject,
 			&actual.OutboxSchema,
 			&actual.OutboxPayload,
@@ -867,6 +881,14 @@ func compareCommands(
 		if err != nil {
 			return 0, err
 		}
+		want.OutboxPayload, err = commandOutboxForBinding(
+			want.OutboxPayload,
+			actual.MarketBinding,
+		)
+		if err != nil {
+			return 0, err
+		}
+		want.MarketBinding = actual.MarketBinding
 		want.OutboxPayload, err = canonicalJSON(want.OutboxPayload)
 		if err != nil {
 			return 0, err
@@ -880,6 +902,33 @@ func compareCommands(
 		delete(expected, commandID)
 	}
 	return mismatches + uint64(len(expected)), rows.Err()
+}
+
+func commandOutboxForBinding(
+	resolvedPayload []byte,
+	binding string,
+) ([]byte, error) {
+	input, _, err := engine.DecodeInputMessage(resolvedPayload)
+	if err != nil {
+		return nil, fmt.Errorf("decode resolved command outbox: %w", err)
+	}
+	switch binding {
+	case "ordered":
+		input.MarketSequence = 0
+	case "explicit":
+		if input.MarketSequence == 0 {
+			return nil, errors.New(
+				"explicit command market binding has no resolved sequence",
+			)
+		}
+	default:
+		return nil, fmt.Errorf("unknown command market binding %q", binding)
+	}
+	encoded, err := engine.EncodeInputMessage(input)
+	if err != nil {
+		return nil, fmt.Errorf("encode command outbox for binding: %w", err)
+	}
+	return encoded, nil
 }
 
 func pendingCommandProjectionMatches(
@@ -915,6 +964,10 @@ func pendingCommandProjectionMatches(
 	actionAccountID, scoped := engine.TradingActionAccountID(action)
 	return input.InputID == command.CommandID &&
 		input.Kind == engine.InputKindCommand &&
+		((command.MarketBinding == "ordered" &&
+			input.MarketSequence == 0) ||
+			(command.MarketBinding == "explicit" &&
+				input.MarketSequence != 0)) &&
 		engine.TradingActionAllowedForInputKind(input.Kind, action.Kind) &&
 		input.ShardID == shardID &&
 		input.SchemaVersion == command.SchemaVersion &&

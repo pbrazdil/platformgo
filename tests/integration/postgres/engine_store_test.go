@@ -1344,15 +1344,12 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 				); err != nil {
 					t.Fatalf("remove producer authority constraint for corruption: %v", err)
 				}
-				_, err := pool.Exec(context.Background(), `
+				corruptAsReplicationAuthority(t, pool, `
 					UPDATE messaging.outbox
 					   SET producer_class = 'engine'
 					 WHERE message_id = $1`,
 					fixture.orderInputID.String(),
 				)
-				if err != nil {
-					t.Fatalf("corrupt command outbox producer authority: %v", err)
-				}
 			},
 			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
 				return report.CommandMismatchCount
@@ -3193,7 +3190,7 @@ func TestEngineStoreBindsCompleteCommandEnvelope(t *testing.T) {
 		SourceID:             "command-journal",
 		SourceSequence:       1,
 		StreamSequence:       1,
-		MarketSequence:       2,
+		MarketSequence:       0,
 		LogicalTime:          engine.NewLogicalTime(baseTime),
 		ConfigurationVersion: 3,
 		InstrumentVersion:    4,
@@ -3360,7 +3357,7 @@ func TestEngineStoreRejectsAccountCommandBeforePredecessorCommits(t *testing.T) 
 			Kind:                 engine.InputKindCommand,
 			SourceID:             "command-journal",
 			SourceSequence:       uint64(index + 1),
-			MarketSequence:       uint64(index + 1),
+			MarketSequence:       0,
 			LogicalTime:          engine.NewLogicalTime(logicalTime.Add(time.Duration(index) * time.Second)),
 			ConfigurationVersion: 1,
 			InstrumentVersion:    1,
@@ -3678,7 +3675,7 @@ func TestEngineStoreRecoversDecisionHashV2V3AndExtendsTheChainWithV4(
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260725001100_phase3_committed_realtime_outbox',
+				'20260728000200_phase3_command_market_sequence_binding',
 				false
 			),
 			set_config(
@@ -3905,7 +3902,7 @@ func TestEngineStoreRecoversDecisionHashV2V3AndExtendsTheChainWithV4(
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260725001100_phase3_committed_realtime_outbox',
+				'20260728000200_phase3_command_market_sequence_binding',
 				false
 			),
 			set_config(
@@ -4724,7 +4721,7 @@ func nextStoredInput(
 		SourceID:             "postgres-integration",
 		SourceSequence:       sequence,
 		StreamSequence:       sequence,
-		MarketSequence:       sequence,
+		MarketSequence:       0,
 		LogicalTime:          clock.Now(),
 		ConfigurationVersion: 1,
 		InstrumentVersion:    1,
@@ -4736,6 +4733,7 @@ func nextStoredInput(
 	switch action.Kind {
 	case engine.TradingActionUpdateBook:
 		input.Kind = engine.InputKindMarket
+		input.MarketSequence = sequence
 	case engine.TradingActionSettleFunding,
 		engine.TradingActionLiquidateAccount:
 		input.Kind = engine.InputKindTimer
@@ -4791,7 +4789,9 @@ func seedPendingCommand(
 	); err != nil {
 		t.Fatalf("seed command %s account shard: %v", input.InputID, err)
 	}
-	outboxPayload, err := engine.EncodeInputMessage(input)
+	outboxInput := input
+	outboxInput.MarketSequence = 0
+	outboxPayload, err := engine.EncodeInputMessage(outboxInput)
 	if err != nil {
 		t.Fatalf("encode pending command %s outbox: %v", input.InputID, err)
 	}

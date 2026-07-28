@@ -46,6 +46,8 @@ import (
 //   - Fault rollback, exact retry, both duplicate-delivery paths, restart,
 //     reconciliation, balanced ledger entries, auth, ownership, and the
 //     least-privilege read role are exercised in one deterministic fixture.
+//   - The adjacent working-order account preserves current Go's approved
+//     maximum-price and prospective-fee reservation authority.
 func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 	databaseURL := os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN")
 	if databaseURL == "" {
@@ -78,7 +80,6 @@ func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 	store := platformpostgres.NewEngineStore(admin)
 	journal := platformpostgres.NewCommandJournal(admin)
 	state := engine.NewState(shardID)
-	var latestMarketSequence uint64
 	apply := func(
 		commandIDText string,
 		accountLane string,
@@ -103,7 +104,7 @@ func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 			SourceID:             "phase3-flat-balance-source-port",
 			SourceSequence:       accountSequence,
 			StreamSequence:       state.NextStreamSequence(),
-			MarketSequence:       latestMarketSequence,
+			MarketSequence:       0,
 			LogicalTime:          engine.NewLogicalTime(logicalTime),
 			ConfigurationVersion: 1,
 			InstrumentVersion:    1,
@@ -158,11 +159,11 @@ func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 			QuantityScale:           3,
 			SettlementCurrency:      "USDC",
 			SettlementCurrencyScale: 2,
-			InitialMarginRate:       "0.1",
-			MaintenanceMarginRate:   "0.05",
-			MaxLeverage:             "10",
-			MakerFeeRate:            "0",
-			TakerFeeRate:            "0",
+			InitialMarginRate:       "0.02",
+			MaintenanceMarginRate:   "0.01",
+			MaxLeverage:             "50",
+			MakerFeeRate:            "0.0002",
+			TakerFeeRate:            "0.0005",
 		},
 	}
 	state, _, _, _, err = apply(
@@ -314,10 +315,9 @@ func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 	}
 	requireFlatBalanceRowCounts(t, admin, 3, 1, 2)
 
-	// A second engine-created account supplies a causally valid non-flat
-	// projection so the HTTP test can distinguish committed used/free columns
-	// from source-style edge recomputation. It does not accept the adjacent
-	// pinned working-order balance behavior or its formula.
+	// A second engine-created account supplies the adjacent pinned working-order
+	// vector so the HTTP test can distinguish committed used/free columns from
+	// source-style edge recomputation.
 	logicalTime = logicalTime.Add(time.Second)
 	state, _, _, _, err = apply(
 		"019f9550-0004-7000-8000-000000000004",
@@ -347,7 +347,7 @@ func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 				Currency:      "USDC",
 				CurrencyScale: 2,
 				Operation:     engine.BalanceOperationDeposit,
-				Amount:        "1000",
+				Amount:        "10000",
 			},
 		},
 		nil,
@@ -360,9 +360,9 @@ func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 		Kind: engine.TradingActionUpdateBook,
 		UpdateBook: &engine.UpdateBook{
 			InstrumentID: "BTC-PERP",
-			MarkPrice:    "100",
-			Bids:         []engine.BookLevel{{Price: "99", Quantity: "10"}},
-			Asks:         []engine.BookLevel{{Price: "110", Quantity: "10"}},
+			MarkPrice:    "49999",
+			Bids:         []engine.BookLevel{{Price: "49998", Quantity: "10"}},
+			Asks:         []engine.BookLevel{{Price: "50001", Quantity: "10"}},
 		},
 	}
 	bookPayload, err := engine.EncodeTradingAction(bookAction)
@@ -397,7 +397,6 @@ func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 	if err != nil || duplicate {
 		t.Fatalf("apply margin fixture book = duplicate %t error %v", duplicate, err)
 	}
-	latestMarketSequence = bookInput.MarketSequence
 	logicalTime = logicalTime.Add(time.Second)
 	orderID, err := engine.ParseID("019f9550-0007-7000-8000-000000000007")
 	if err != nil {
@@ -418,7 +417,7 @@ func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 				Type:         engine.OrderTypeLimit,
 				TimeInForce:  engine.TimeInForceGTC,
 				Quantity:     "1",
-				Price:        "90",
+				Price:        "50000",
 			},
 		},
 		nil,
@@ -426,10 +425,10 @@ func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 	if err != nil ||
 		marginDecision.CommandResult.Status != engine.CommandStatusAccepted ||
 		len(marginDecision.BalanceChanges) != 1 ||
-		marginDecision.BalanceChanges[0].Total != "1000" ||
-		marginDecision.BalanceChanges[0].Used != "1" ||
-		marginDecision.BalanceChanges[0].Free != "999" ||
-		marginDecision.BalanceChanges[0].Equity != "1000" {
+		marginDecision.BalanceChanges[0].Total != "10000" ||
+		marginDecision.BalanceChanges[0].Used != "45" ||
+		marginDecision.BalanceChanges[0].Free != "9955" ||
+		marginDecision.BalanceChanges[0].Equity != "10000" {
 		t.Fatalf("margin projection decision = %+v, error %v", marginDecision, err)
 	}
 	if marginDecision.MarketSequence != bookInput.MarketSequence {
@@ -474,10 +473,10 @@ func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 	}
 	marginBalance, ok := recovered.Balance(marginAccount, "USDC")
 	if !ok ||
-		marginBalance.Total != "1000" ||
-		marginBalance.Used != "1" ||
-		marginBalance.Free != "999" ||
-		marginBalance.Equity != "1000" {
+		marginBalance.Total != "10000" ||
+		marginBalance.Used != "45" ||
+		marginBalance.Free != "9955" ||
+		marginBalance.Equity != "10000" {
 		t.Fatalf("recovered margin projection = %+v, found %t", marginBalance, ok)
 	}
 
@@ -607,7 +606,7 @@ func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 		server.URL+"/v1/accounts/"+marginAccount+"/balances",
 		ownerToken,
 		http.StatusOK,
-		`[{"currency":"USDC","total":"1000","locked":"1","free":"999","equity":"1000"}]`+"\n",
+		`[{"currency":"USDC","total":"10000","locked":"45","free":"9955","equity":"10000"}]`+"\n",
 	)
 	requireFlatBalanceHTTP(
 		t,
@@ -619,6 +618,20 @@ func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 	requireFlatBalanceHTTP(
 		t,
 		server.URL+path,
+		otherToken,
+		http.StatusForbidden,
+		`{"code":"forbidden","message":"forbidden","requestId":"flat-balance-request"}`+"\n",
+	)
+	requireFlatBalanceHTTP(
+		t,
+		server.URL+"/v1/accounts/"+marginAccount+"/balances",
+		"",
+		http.StatusUnauthorized,
+		`{"code":"unauthorized","message":"unauthorized","requestId":"flat-balance-request"}`+"\n",
+	)
+	requireFlatBalanceHTTP(
+		t,
+		server.URL+"/v1/accounts/"+marginAccount+"/balances",
 		otherToken,
 		http.StatusForbidden,
 		`{"code":"forbidden","message":"forbidden","requestId":"flat-balance-request"}`+"\n",
@@ -642,8 +655,8 @@ func TestFlatAccountBalanceIsPureCashAndScaleStripped(t *testing.T) {
 	).Scan(&ownerRate, &otherRate); err != nil {
 		t.Fatal(err)
 	}
-	if ownerRate != 3 || otherRate != 1 {
-		t.Fatalf("rate claims owner/foreign = %d/%d, want 3/1", ownerRate, otherRate)
+	if ownerRate != 3 || otherRate != 2 {
+		t.Fatalf("rate claims owner/foreign = %d/%d, want 3/2", ownerRate, otherRate)
 	}
 	requireFlatBalanceRowCounts(t, admin, 7, 2, 4)
 
@@ -972,9 +985,9 @@ func requireFlatBalanceLedger(
 	}
 	want := []string{
 		"system:clearing|USDC|-1000",
-		"system:clearing|USDC|-1000",
+		"system:clearing|USDC|-10000",
 		accountID + "|USDC|1000",
-		marginAccount + "|USDC|1000",
+		marginAccount + "|USDC|10000",
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("ledger entries = %v, want %v", got, want)

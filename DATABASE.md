@@ -118,6 +118,61 @@ Network calls are outside the transaction.
   projection and emits no ledger entries unless the funded total changed.
 - Decision-hash version 3 introduced complete derived balance projections.
   Valid v2/v3 receipts remain verifiable at their recorded version.
+- A market input or API command admitted before JetStream ordering stores
+  `marketSequence=0` in its producer or command outbox. This is the only legal
+  API command representation; admission rejects nonzero values. Inside the
+  serialized engine transaction, a market input resolves the sentinel to its
+  assigned shard-stream sequence and every other unresolved input resolves it
+  to the shard-wide committed market-state high-watermark. Both resolve before
+  business hashing and receipt persistence. Command completion independently
+  validates the
+  resolved sequence against `max(market.books.stream_sequence)`; a later
+  redelivery reuses the original receipt's resolved sequence rather than its
+  new delivery position or the latest market state. New command rows carry the
+  non-null `ordered` binding marker, and reconciliation derives their expected
+  zero command outbox from that enforced producer contract. A nullable marker
+  is reserved for pre-migration history: only those legacy rows derive whether
+  their immutable outbox was ordered-zero or explicit-nonzero, while every
+  other durable field is compared exactly.
+- Migration
+  `20260728000200_phase3_command_market_sequence_binding.up.sql` takes a
+  five-second lock timeout and a strictly longer ten-second statement timeout
+  around the engine-owner advisory lock, `SHARE` command lock, and `SHARE ROW
+  EXCLUSIVE` receipt lock, so a live old engine fails the cutover with lock
+  timeout and legacy command or market admission cannot cross it. The
+  migration refuses any pending explicit legacy command with SQLSTATE `55000`.
+  The metadata-only command-column/default work briefly upgrades to `ACCESS
+  EXCLUSIVE`; installing the compatibility trigger takes `SHARE ROW EXCLUSIVE`
+  on `messaging.outbox`. There is no row backfill or table rewrite. Existing
+  completed explicit history remains readable through the legacy-null
+  classification. Existing rejected market receipts remain immutable, replay
+  as their original rejected decisions, advance input order, and do not
+  advance the market watermark. Existing accepted receipts with a legacy zero
+  or producer-supplied market fence also retain their exact historical bytes
+  and hashes, while recovery reconstructs the hidden authoritative watermark
+  from the receipt's durable physical stream sequence. The check constraint is
+  `NOT VALID` to avoid an unbounded validation scan while still enforcing every
+  new value. During the
+  one-release compatibility window, an old binary receives the `ordered`
+  default and its formerly legal explicit outbox is rejected inside the same
+  admission transaction with SQLSTATE `23514`; zero-sentinel admission remains
+  compatible. A durable receipt trigger likewise rejects a post-cutover market
+  receipt without authoritative book state or with a market/stream fence
+  mismatch. The migration advances
+  `platformgo.runtime_schema_revision` to its own tip and enforces that value
+  on every shard ownership-epoch insert/update, business receipt, duplicate
+  receipt, shard fault, and checkpoint insert/update. This per-write fence
+  stops an old engine before it can establish writer/readiness authority after
+  verifying
+  the previous tip before cutover but acquired shard ownership only after the
+  migration committed. The migration and history record share one transaction,
+  so active
+  ownership, lock timeout, statement timeout, preflight refusal, or another
+  definite pre-commit failure leaves no partial column, trigger, or history
+  state and a later retry is safe. A connection loss or missing acknowledgment
+  during/after `COMMIT` has an unknown outcome: keep runtimes stopped and
+  compare the exact migration checksum with the column, constraint, functions,
+  and enabled triggers before retrying.
 - Current decision-hash version 4 preserves the v3 balance authority and also
   binds every new fill's exact positive execution-time effective leverage into
   its effects hash. The value comes from the unique account/instrument risk

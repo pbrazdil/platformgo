@@ -122,7 +122,24 @@ func TestFlatBalanceCurrencyScaleReadUpgradesPopulatedCurrentMain(t *testing.T) 
 	if err := migrator.Migrate(ctx); err != nil {
 		t.Fatalf("idempotent migration retry: %v", err)
 	}
-	assertFinalMigrationHistory(t, pool)
+	var (
+		migrationCount int
+		lastMigration  string
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), max(filename)
+		  FROM engine.schema_migrations`,
+	).Scan(&migrationCount, &lastMigration); err != nil {
+		t.Fatalf("inspect flat-balance migration history: %v", err)
+	}
+	if migrationCount != 27 ||
+		lastMigration != flatBalanceScaleMigration {
+		t.Fatalf(
+			"flat-balance migration history count=%d last=%q",
+			migrationCount,
+			lastMigration,
+		)
+	}
 }
 
 func TestFlatBalanceCurrencyScaleReadScrubsHostileACLs(t *testing.T) {

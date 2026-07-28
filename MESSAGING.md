@@ -76,6 +76,39 @@ Engine inputs additionally carry shard, source sequence, configuration revision 
 
 Payload schemas evolve additively within a version. Breaking changes use a new subject/envelope version and migration plan.
 
+### Ordered market-fence binding
+
+Producers cannot predict the physical JetStream sequence at which an input will
+be consumed. Producers write `marketSequence=0` as the unresolved transport
+representation; for API commands it is the only legal representation and
+command admission rejects a nonzero value. After JetStream assigns the input's
+shard sequence, the single serialized engine owner resolves a market input to
+that assigned sequence and every other unresolved input to the shard-wide
+committed market-state high-watermark before computing the business-input hash,
+decision, receipt, or checkpoint.
+
+The original producer or command outbox retains the zero sentinel. The
+committed engine receipt retains the resolved market sequence and is
+authoritative for redelivery: a market event republished at a later shard
+sequence retains its original market sequence, and a command arriving after
+later market events retains its original market-state fence. Reconciliation
+reconstructs the required zero API representation from the non-null `ordered`
+marker on every new command, not from the outbox row being audited. Only
+pre-migration rows retain a null marker; completed legacy explicit envelopes
+are classified from their immutable outbox. The schema upgrade refuses pending
+legacy explicit envelopes and cannot overlap a live old engine owner.
+Historical rejected market receipts remain immutable and replay without
+advancing market state. Historical accepted receipts keep their exact bytes
+and hashes while recovery derives the hidden market watermark from durable
+physical stream order. Transactional command/outbox and market-receipt guards
+keep previous binaries compatible only for the zero-sentinel and
+authoritative-market producer contracts. The cutover also advances the engine
+runtime-schema revision and checks it first on the shard ownership epoch, then
+again on business receipts, duplicate receipts, faults, and checkpoints. An old
+engine that verified the previous schema before the migration therefore fails
+before it can establish writer/readiness authority instead of crossing the
+cutover.
+
 ## 5. Publication
 
 Durable publication originates from a PostgreSQL outbox transaction.

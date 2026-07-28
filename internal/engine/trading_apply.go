@@ -53,6 +53,32 @@ func ApplyTradingWithReceiptsAtDecisionHashVersion(
 	)
 }
 
+// ApplyTradingForRecoveryAtDecisionHashVersion replays immutable historical
+// decision bytes while reconstructing the hidden market watermark from the
+// durable physical stream order. Pre-binding receipts may contain zero or a
+// producer-supplied fence; neither changes their historical hashes.
+func ApplyTradingForRecoveryAtDecisionHashVersion(
+	state State,
+	input InputEnvelope,
+	action TradingAction,
+	receipts ReceiptLookup,
+	decisionHashVersion uint32,
+) (State, Decision, error) {
+	next, decision, err := applyTradingWithReceiptsAtDecisionHashVersion(
+		state,
+		input,
+		action,
+		receipts,
+		decisionHashVersion,
+	)
+	if err == nil &&
+		input.Kind == InputKindMarket &&
+		len(decision.BookChanges) != 0 {
+		next.marketSequence = input.StreamSequence
+	}
+	return next, decision, err
+}
+
 func applyTradingWithReceiptsAtDecisionHashVersion(
 	state State,
 	input InputEnvelope,
@@ -417,7 +443,6 @@ func updateTradingBook(
 	if err != nil {
 		return rejectedTradingDecision(state, RejectionInvalidAction)
 	}
-
 	state.trading = state.trading.clone()
 	state.trading.replaceBook(book)
 	state, decision := acceptedTradingDecision(state)

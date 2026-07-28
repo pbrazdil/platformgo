@@ -522,6 +522,20 @@ func TestCommandJournalRejectsRedundantMetadataMismatch(t *testing.T) {
 				request.AccountID = "account-2"
 			},
 		},
+		{
+			name: "resolved market sequence",
+			mutate: func(request *platformpostgres.BeginCommandRequest) {
+				input, _, err := engine.DecodeInputMessage(request.OutboxPayload)
+				if err != nil {
+					t.Fatalf("DecodeInputMessage: %v", err)
+				}
+				input.MarketSequence = 1
+				request.OutboxPayload, err = engine.EncodeInputMessage(input)
+				if err != nil {
+					t.Fatalf("EncodeInputMessage: %v", err)
+				}
+			},
+		},
 	}
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
