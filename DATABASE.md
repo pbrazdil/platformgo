@@ -310,6 +310,32 @@ validated through `domain.NewMoney` at the registered scale before any result
 is serialized. Missing scale authority, invalid currency, non-finite money,
 or excess scale rejects the whole read.
 
+### Phase 3 admin fleet-fills ACL boundary
+
+Migration `20260728000300_phase3_admin_fleet_fills_acl.up.sql` changes only
+the ACL catalogs for the existing append-only `trading.fills` table. It
+removes `PUBLIC`, every direct non-owner table grant, every direct non-owner
+column grant, and dependent same-object grant chains—including grants
+inherited when the table was created under hostile owner defaults. It then
+restores exactly non-grantable `SELECT` to `platformgo_api` and non-grantable
+`SELECT, INSERT` to `platformgo_engine`. The migration does not alter the
+owner's default-privilege template and performs no heap rewrite, scan,
+backfill, or economic mutation.
+
+Privilege changes and the migration journal commit in one transaction under
+the migrator's five-second `lock_timeout` and the migration's ten-second
+`statement_timeout`. A definite pre-commit timeout leaves the previous ACL and
+journal intact for retry. A missing `COMMIT` acknowledgment is an unknown
+outcome: keep runtimes stopped and compare the exact filename/checksum with the
+complete raw table and column ACL before selecting a binary or retrying.
+
+The internal application read performs one
+`SELECT EXISTS (SELECT 1 FROM trading.fills)` through `platformgo_api`. It
+returns the exact empty page only when that statement's PostgreSQL snapshot
+contains no committed fill. Any committed fill or database error fails closed;
+no fill value, total above zero, ordering, filter, cursor, or non-empty DTO is
+projected by this boundary.
+
 ### Phase 3 frozen-effective-leverage migration boundary
 
 Migration `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` is the
