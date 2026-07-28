@@ -1071,7 +1071,10 @@ func TestEngineProcessorFailsClosedAfterOwnershipSessionLoss(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 
-	const shardID engine.ShardID = 29
+	const (
+		engineLockNamespace uint32         = 0x50474f4f
+		shardID             engine.ShardID = 29
+	)
 	store := platformpostgres.NewEngineStore(pool)
 	former, err := platformnats.NewEngineProcessor(ctx, store, shardID)
 	if err != nil {
@@ -1081,21 +1084,36 @@ func TestEngineProcessorFailsClosedAfterOwnershipSessionLoss(t *testing.T) {
 		_ = former.Close(context.Background())
 	})
 
-	var ownerPID uint32
+	var (
+		ownerCount int
+		ownerPID   uint32
+	)
 	if err := pool.QueryRow(ctx, `
-		SELECT pid
+		SELECT count(*), COALESCE(min(pid), 0)
 		  FROM pg_locks
 		 WHERE locktype = 'advisory'
-		   AND objid = $1::oid
+		   AND database = (
+				SELECT oid
+				  FROM pg_database
+				 WHERE datname = current_database()
+		   )
+		   AND classid = $1::oid
+		   AND objid = $2::oid
+		   AND objsubid = 2
+		   AND mode = 'ExclusiveLock'
 		   AND granted`,
+		engineLockNamespace,
 		uint32(shardID),
-	).Scan(&ownerPID); err != nil {
+	).Scan(&ownerCount, &ownerPID); err != nil {
 		t.Fatalf("find shard owner backend: %v", err)
+	}
+	if ownerCount != 1 {
+		t.Fatalf("shard owner backend count = %d, want 1", ownerCount)
 	}
 	var terminated bool
 	if err := pool.QueryRow(
 		ctx,
-		"SELECT pg_terminate_backend($1)",
+		"SELECT pg_terminate_backend($1, 5000)",
 		ownerPID,
 	).Scan(&terminated); err != nil || !terminated {
 		t.Fatalf("terminate shard owner backend = %t, error %v", terminated, err)
