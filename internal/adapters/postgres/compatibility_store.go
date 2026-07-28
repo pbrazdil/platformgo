@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/upcomers-org/platformgo/internal/application"
+	"github.com/upcomers-org/platformgo/internal/domain"
 	"github.com/upcomers-org/platformgo/internal/edge"
 	"github.com/upcomers-org/platformgo/internal/engine"
 )
@@ -1099,14 +1100,17 @@ func (store *CompatibilityStore) Balances(
 ) ([]edge.BalanceView, error) {
 	rows, err := store.pool.Query(ctx, `
 		SELECT
-			currency,
-			trim_scale(total)::text,
-			trim_scale(used)::text,
-			trim_scale(free)::text,
-			trim_scale(equity)::text
-		  FROM ledger.balances
-		 WHERE account_id = $1
-		 ORDER BY currency`,
+			balance.currency,
+			scale.scale,
+			trim_scale(balance.total)::text,
+			trim_scale(balance.used)::text,
+			trim_scale(balance.free)::text,
+			trim_scale(balance.equity)::text
+		  FROM ledger.balances AS balance
+		  LEFT JOIN trading.currency_scales AS scale
+		    ON scale.currency = balance.currency
+		 WHERE balance.account_id = $1
+		 ORDER BY balance.currency`,
 		accountID,
 	)
 	if err != nil {
@@ -1116,14 +1120,52 @@ func (store *CompatibilityStore) Balances(
 	values := make([]edge.BalanceView, 0)
 	for rows.Next() {
 		var value edge.BalanceView
+		var registeredScale *int16
 		if err := rows.Scan(
 			&value.Currency,
+			&registeredScale,
 			&value.Total,
 			&value.Locked,
 			&value.Free,
 			&value.Equity,
 		); err != nil {
 			return nil, fmt.Errorf("scan balance: %w", err)
+		}
+		if registeredScale == nil ||
+			*registeredScale < 0 ||
+			*registeredScale > 18 {
+			return nil, fmt.Errorf(
+				"list balances: currency scale authority is unavailable",
+			)
+		}
+		currency, err := domain.NewCurrency(
+			value.Currency,
+			uint8(*registeredScale),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"list balances: invalid authoritative currency: %w",
+				err,
+			)
+		}
+		for _, field := range []struct {
+			name   string
+			target *string
+		}{
+			{name: "total", target: &value.Total},
+			{name: "locked", target: &value.Locked},
+			{name: "free", target: &value.Free},
+			{name: "equity", target: &value.Equity},
+		} {
+			money, err := domain.NewMoney(*field.target, currency)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"list balances: invalid authoritative %s: %w",
+					field.name,
+					err,
+				)
+			}
+			*field.target = money.Decimal().String()
 		}
 		values = append(values, value)
 	}
