@@ -62,6 +62,12 @@ Validate at each boundary. Internal origin does not make a payload valid.
   `SECURITY DEFINER` claim and bounded expired-row purge functions. The role has
   no direct read or DML grant on the dedicated replay table, cannot update live
   responses, and cannot call the replaced legacy claim path.
+- The durable `messaging.outbox` relation has one explicit non-owner allowlist:
+  API can read and insert only the four producer columns, engine can read and
+  insert, and the outbox role can read and update only claim/publication
+  metadata. Hostile owner defaults, named or column grants, grant options, and
+  dependent chains are removed by a forward ACL migration without changing the
+  owner's default-privilege template.
 - NATS permissions prevent cross-role subject publication/subscription.
 - Privileged risk settings, kill switch and account operations require explicit permissions and audit.
 

@@ -73,6 +73,14 @@ retry cap, generic quarantine policy, PostgreSQL outbox/inbox or
 commit-before-ack proof, atomic move, crash/restart or unknown-outcome
 recovery, operator repair/replay procedure, exactly-once guarantee,
 engine-input poison policy, source-record deletion, or economic-effect claim.
+The durable outbox table now also has an explicit hostile-default-resistant
+PostgreSQL ACL boundary. A forward-only, writer-fenced migration removes every
+unlisted table and column grant, grant option, and dependent chain while
+preserving exactly the existing API producer, engine producer, and outbox
+publisher privileges. It changes no outbox row, index, trigger, producer
+authority, claim order, retry, acknowledgment, worker polling, or publication
+identity. This security prerequisite is intentionally separate from the still
+unreviewed coalesced-doorbell source row.
 Exact client funding history is also landed with immutable PostgreSQL
 projection integrity, nanosecond keyset pagination, exact aggregation,
 least-privilege reads, populated-schema upgrade coverage, and separate

@@ -460,6 +460,37 @@ and reconcile the exact filename/checksum, 32-file tip, complete table/column
 and function ACLs, function definition, preserved relation state, raw ledger
 ACLs, defaults, and legacy function before retrying or selecting a binary.
 
+### Phase 3 durable-outbox ACL boundary
+
+Migration `20260729000300_phase3_outbox_acl.up.sql` advances the immutable
+journal from the 32-file risk-monitor tip to the 33-file outbox-ACL tip. It
+takes `SHARE` on `messaging.outbox` under the migrator's five-second
+`lock_timeout` and its own ten-second `statement_timeout`, fencing any API,
+engine, or publisher transaction that already performed DML under a privilege
+being revoked.
+
+The migration removes `PUBLIC`, every explicit non-owner table and column
+grant, grant options, and dependent same-object grant chains. It then restores
+only these non-grantable privileges:
+
+- `platformgo_api`: table `SELECT` and column `INSERT` on `message_id`,
+  `subject`, `schema_version`, and `payload`;
+- `platformgo_engine`: table `SELECT, INSERT`;
+- `platformgo_outbox`: table `SELECT` and column `UPDATE` on `attempts`,
+  `next_attempt_at`, `claimed_at`, `published_at`, `publish_sequence`, and
+  `last_error`.
+
+This is an ACL-catalog-only correction. It does not alter rows, indexes,
+constraints, existing command-binding triggers, owner default privileges,
+runtime schema revision, producer authority, claim order, publication
+identity, retry behavior, or worker polling. A definite pre-commit timeout
+leaves the 32-file journal, prior ACL, and outbox state intact for a complete
+retry. A missing `COMMIT` acknowledgment is an unknown outcome: keep runtimes
+stopped and reconcile the exact filename/checksum, 33-file tip, complete raw
+table and column ACL, canonical explicit-column outbox digest, relation
+filenode, indexes, constraints, triggers, owner defaults, and neighboring
+inbox ACL before retrying or selecting a binary.
+
 ### Phase 3 frozen-effective-leverage migration boundary
 
 Migration `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` is the
