@@ -94,13 +94,22 @@ and reconciliation. No additional engine/domain/realtime delivery effect is
 created beyond command admission and duplicate audit. This intentionally does
 not claim the pinned Rust
 synchronous application error, its `free margin` message, or an HTTP status.
-The current Phase 3 candidate also repairs command-admission replay authority:
-a forward-only PostgreSQL 19 Beta 2 migration fences engine and API writers,
+Command-admission replay authority is now also hardened by a landed
+forward-only PostgreSQL 19 Beta 2 migration. It fences engine and API writers,
 removes hostile inherited table and column privileges from commands,
 idempotency records, and immutable replay responses, and adds statement-level
 truncate guards without changing rows or relation storage. Focused hostile
-upgrade, rollback/retry, and executable replay-protection tests are green;
-full stable-candidate validation and exact-SHA review remain pending.
+upgrade, rollback/retry, executable replay-protection, and runtime-role tests,
+the full local gate, four exact-SHA reviews, and all seven hosted checks passed
+before merge.
+The current source-port candidate separately accepts the pinned reused-intent
+behavior at the owner-approved current Go boundary. Intent `idem-1` maps to the
+transport-derived key `intent:idem-1`; concurrent identical submissions admit
+one exact PostgreSQL command/idempotency/replay/order-intent/outbox graph, a
+fresh journal returns its byte-exact stored `202`, and a changed payload under
+that key conflicts. This acceptance does not impose global intent uniqueness
+across arbitrary explicit keys or claim synchronous engine, risk, or
+materialized-order behavior.
 Exact client funding history is also landed with immutable PostgreSQL
 projection integrity, nanosecond keyset pagination, exact aggregation,
 least-privilege reads, populated-schema upgrade coverage, and separate
@@ -476,8 +485,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It records 89 independently
-reviewed green source tests; 2,562 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It records 90 independently
+reviewed green source tests; 2,561 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
@@ -505,11 +514,16 @@ This repository is not yet a production-capable replacement.
 
 ## Validation snapshot
 
-The current command-admission ACL candidate is green on focused PostgreSQL 19
-Beta 2 hostile-default, populated-upgrade, timeout/rollback/retry, executable
-replay-destruction, and least-privilege tests. Full stable-candidate policy,
-format, lint, vulnerability, test, race, repeat, exact-SHA specialist, hosted
-CI, and merge gates remain pending.
+The command-admission ACL repair is landed after focused PostgreSQL 19 Beta 2
+hostile-default, populated-upgrade, timeout/rollback/retry, executable
+replay-destruction, and least-privilege tests; full policy, format, lint,
+vulnerability, test, race, repeat, four exact-SHA reviews, and all seven hosted
+checks passed on its frozen candidate.
+The current reused-intent source-port candidate is green on its focused
+PostgreSQL 19 Beta 2 least-privilege test, including concurrent convergence,
+fresh-journal exact replay, changed-payload conflict, readiness-drained replay,
+and proof that admission leaves every economic and realtime projection
+unchanged. Its full stable-candidate and release gates remain pending.
 
 The landed Phase 3 slices have passed repository-wide formatting, lint, unit,
 race, repeat, vulnerability, module-consistency, and policy checks. Historical
