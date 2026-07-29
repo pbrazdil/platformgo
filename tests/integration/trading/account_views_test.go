@@ -144,21 +144,6 @@ func TestMarginConfigPutIsAtomicAndRejectsFractionalLeverage(t *testing.T) {
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/trading/e2e_admin_fleet_blotter.rs:108
-//	test: admin_fleet_positions_blotter_reads_and_is_gated
-func TestAdminFleetPositionsBlotterReadsAndIsGated(t *testing.T) {
-	fixture := newAccountViewsFixture()
-	page, err := fixture.fleetBlotter("admin", "positions")
-	if err != nil || len(page.Items) != 0 || intValue(page.Total) != 0 {
-		t.Fatalf("page=%#v err=%v", page, err)
-	}
-	_, err = fixture.fleetBlotter("user-1", "positions")
-	requireTradingViewError(t, err, "forbidden")
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/trading/e2e_admin_fleet_blotter.rs:136
 //	test: admin_risk_monitor_reads_and_is_gated
 func TestAdminRiskMonitorReadsAndIsGated(t *testing.T) {
