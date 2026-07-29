@@ -36,6 +36,11 @@ health-listener address; a forward-only identity authority cutover guard;
 direct Centrifugo contract proof; and a committed
 PostgreSQL-to-Centrifugo realtime publication path with stable event identity,
 per-channel ordering, bounded claims, retry, and crash recovery.
+The pinned direct-outbox drain behavior is also separately accepted through
+the production PostgreSQL store and real JetStream: one direct batch publishes
+one pending operational message with its exact subject and stable outbox ID,
+records the JetStream acknowledgment sequence, and permits a synchronously
+confirmed durable-consumer acknowledgment.
 Exact client funding history is also landed with immutable PostgreSQL
 projection integrity, nanosecond keyset pagination, exact aggregation,
 least-privilege reads, populated-schema upgrade coverage, and separate
@@ -411,8 +416,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It records 82 independently
-reviewed green source tests; 2,569 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It records 83 independently
+reviewed green source tests; 2,568 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
@@ -448,6 +453,9 @@ NATS and Centrifugo. Their exact SHAs are green in hosted CI. The frozen
 deployment manifest also covers the worker's production
 `UZO_HTTP_HEALTH_ADDR` bootstrap key, whose typed parsing and real
 `/healthz`/`/readyz` listener wiring are exercised by native Go tests. The
+direct-outbox source acceptance additionally has live PostgreSQL 19 Beta 2 and
+JetStream proof for exact batch count, subject, stable `Nats-Msg-Id`, persisted
+publish sequence, and synchronous durable-consumer acknowledgment. The
 realtime path additionally has live PostgreSQL 19 Beta 2
 commit/order/retry evidence, a simulated Centrifugo outage proof, real
 Centrifugo history and scoped-token contract proof, independent determinism and
