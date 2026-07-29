@@ -28,6 +28,13 @@ import (
 //     separately committed submitted-to-working helper transition.
 //   - The order and complete balance projection commit together in PostgreSQL.
 //
+// Assertions preserved:
+//   - Before any working order, the account's USDC locked balance is zero.
+//   - A source-shaped non-reduce-only GTC BUY LIMIT reserves exact margin and
+//     reduces free balance by the same amount. Under the owner-approved
+//     current-Go authority decision, the accepted exact result is locked 45
+//     and free 9955 instead of the source's locked 20 and free 9980.
+//
 // Strengthening:
 //   - Pre-commit rollback, exact retry, both duplicate-delivery paths, stable
 //     decision hashes, restart recovery, reconciliation, exact cancel release,

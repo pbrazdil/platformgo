@@ -204,31 +204,3 @@ func TestPositionsAreABoundedSinglePageNotKeyset(t *testing.T) {
 	_, err = fixture.positionsPage("bogus", 2, "")
 	requireTradingViewError(t, err, "bad_request")
 }
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/trading/e2e_balances.rs:83
-//	test: a_working_order_locks_its_reserved_margin
-func TestAWorkingOrderLocksItsReservedMargin(t *testing.T) {
-	fixture := newAccountViewsFixture()
-	fixture.seedCash("acct-1", "10000", "0", "10000")
-	before := fixture.balance("acct-1")
-	if before.Locked != "0" {
-		t.Fatalf("before=%#v", before)
-	}
-	command := limitBuyFixture("resting-1")
-	command.OrderType, command.Quantity, command.LimitPrice = "LIMIT", "1", "50000"
-	if _, err := fixture.orders.submit(command); err != nil {
-		t.Fatal(err)
-	}
-	fixture.orders.markWorking("resting-1")
-	config, err := fixture.marginConfig("user-1", "acct-1", "BTC-PERP")
-	if err != nil || config.MarginInit != "0.02" || config.Leverage != "50" {
-		t.Fatalf("config=%#v err=%v", config, err)
-	}
-	after := fixture.balance("acct-1")
-	if after.Locked != "20" || after.Free != "9980" {
-		t.Fatalf("after=%#v", after)
-	}
-}
