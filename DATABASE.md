@@ -377,6 +377,37 @@ fails closed with a typed unsupported-state error. This boundary reads no
 economic value and does not establish non-empty DTO fields, totals above zero,
 ordering, filters, cursors, or an external admin route.
 
+### Phase 3 admin fleet-positions ACL boundary
+
+Migration `20260729000100_phase3_admin_fleet_positions_acl.up.sql` is the
+forward-only ACL correction for the existing `trading.positions` table. It
+removes `PUBLIC`, every direct non-owner table grant, every direct non-owner
+column grant, grant options, and dependent same-object grant chains, including
+grants inherited from hostile owner defaults. It then restores exactly
+non-grantable `SELECT` to `platformgo_api` and non-grantable
+`SELECT, INSERT, UPDATE` to `platformgo_engine`.
+
+The migration does not change `trading.fills`, owner default-privilege
+templates, runtime schema revision, position or fill rows, or either relation
+file. It performs no heap rewrite, scan, or backfill. Privilege changes and the
+migration journal commit in one transaction under the migrator's five-second
+`lock_timeout` and the migration's ten-second `statement_timeout`. An up-front
+`SHARE` lock on `trading.positions` fences a transaction that already executed
+position DML under a privilege being revoked. A pre-revocation
+`ROW EXCLUSIVE` writer therefore produces a bounded definite pre-commit
+rollback; after the writer is drained or rolled back, retry the complete
+migration.
+
+A missing `COMMIT` acknowledgment is an unknown outcome. Keep all runtimes
+stopped and compare the exact filename/checksum with the complete raw
+`trading.positions` table and column ACL before retrying or choosing a binary.
+The only valid non-owner ACL is API `SELECT` plus engine
+`SELECT, INSERT, UPDATE`, all without grant option. Also prove the canonical
+explicit-column position digest and relation filenode, and the fill digest,
+filenode, and ACL, match the pre-migration state. A journal, ACL, or relation
+state disagreement requires a reviewed forward repair or complete verified
+pre-migration restore; never edit frozen migration bytes or migration history.
+
 ### Phase 3 frozen-effective-leverage migration boundary
 
 Migration `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` is the
