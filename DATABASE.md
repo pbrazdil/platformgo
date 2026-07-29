@@ -408,6 +408,58 @@ filenode, and ACL, match the pre-migration state. A journal, ACL, or relation
 state disagreement requires a reviewed forward repair or complete verified
 pre-migration restore; never edit frozen migration bytes or migration history.
 
+### Phase 3 admin risk-monitor ACL boundary
+
+Migration `20260729000200_phase3_admin_risk_monitor_acl.up.sql` advances the
+immutable migration journal from the 31-file positions tip to the 32-file risk
+tip. It takes bounded `SHARE` locks in exact order on `trading.accounts`,
+`engine.account_shards`, and `identity.account_provisioning_intents` before
+changing any ACL or function catalog. That order fences existing lifecycle DML
+without deadlocking a provisioning transaction paused after shard assignment.
+A conflicting writer returns SQLSTATE `55P03` under the migrator's five-second
+`lock_timeout`; the migration's ten-second `statement_timeout` also bounds
+catalog enumeration.
+
+The migration scrubs `PUBLIC`, every explicit non-owner table and column grant,
+grant options, and dependent same-object grant chains on those three
+relations. It restores exactly these non-grantable privileges:
+
+- `trading.accounts`: API `SELECT`; engine `SELECT, INSERT, UPDATE`.
+- `engine.account_shards`: API `SELECT, INSERT`; engine `SELECT`.
+- `identity.account_provisioning_intents`: API `SELECT, INSERT`; engine
+  `SELECT`.
+
+It also creates the zero-argument
+`trading.admin_risk_state_exists()` authority as `LANGUAGE sql`, `STABLE`,
+`SECURITY DEFINER`, with `search_path=pg_catalog`. One fully qualified
+statement tests only existence in `trading.accounts`, `trading.commands`,
+`engine.account_shards`, `ledger.balances`, `ledger.transactions`, and
+`ledger.entries`. The migration removes `PUBLIC` and every explicit non-owner
+function grant, including dependent grant chains, transfers any pre-existing
+same-signature function to the migration owner inside the same transaction,
+then grants non-grantable `EXECUTE` only to `platformgo_api`. Raw ledger ACLs
+remain unchanged, so the API can evaluate the boolean authority but cannot read
+raw ledger transactions or entries. Its pre-existing balance-projection read
+remains unchanged.
+
+The predicate reads no `NUMERIC` column, performs no arithmetic or rounding,
+and defines no non-empty risk DTO, total, threshold, filter, ordering, cursor,
+or external route. It returns false only when the same PostgreSQL snapshot has
+no account, command, shard assignment, balance, ledger transaction, or ledger
+entry. Any such committed durable state makes the application boundary fail
+closed rather than inventing risk values.
+
+This is an ACL/catalog-only migration: it performs no heap rewrite, backfill,
+row mutation, runtime-schema revision change, raw-ledger privilege change, or
+legacy provisioning-function change. The three relation states and filenodes,
+owner default privileges, and legacy function remain unchanged. All effects
+and the migration journal commit in one transaction. A definite pre-commit
+failure leaves the 31-file schema and prior ACLs intact for a complete retry.
+A missing `COMMIT` acknowledgment is an unknown outcome: keep runtimes stopped
+and reconcile the exact filename/checksum, 32-file tip, complete table/column
+and function ACLs, function definition, preserved relation state, raw ledger
+ACLs, defaults, and legacy function before retrying or selecting a binary.
+
 ### Phase 3 frozen-effective-leverage migration boundary
 
 Migration `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` is the

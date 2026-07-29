@@ -183,6 +183,65 @@ complete verified pre-migration restore. Never delete the journal row, edit
 frozen migration bytes, reset a persistent database, or selectively restore
 ACL catalogs.
 
+### Phase 3 admin risk-monitor ACL upgrade
+
+Migration `20260729000200_phase3_admin_risk_monitor_acl.up.sql` is a
+forward-only, ACL/catalog-only no-overlap cutover from the exact 31-file
+positions tip to the 32-file risk tip. Stop and drain old API and engine
+processes before applying it. Keep them stopped until the exact
+journal/checksum, three lifecycle-relation ACLs and states, narrow risk
+function, unchanged raw ledger ACLs, owner defaults, and legacy provisioning
+function are classified.
+
+Apply under the migrator's five-second `lock_timeout`; the SQL sets a
+ten-second `statement_timeout` and takes `SHARE` in exact order on
+`trading.accounts`, `engine.account_shards`, and
+`identity.account_provisioning_intents` before any ACL or function DDL. A
+transaction paused after shard assignment therefore waits on the shard lock
+without a lock-order inversion. A writer on the first or last relation, or
+that paused admission, produces bounded SQLSTATE `55P03`, not `40P01`. This is
+a definite pre-commit rollback: prove the migration filename is absent, all
+three prior raw ACLs and canonical row digests/filenodes are unchanged, then
+drain or roll back the blocker and retry the whole migration.
+
+After commit, verify migration count 32 and this exact tip/checksum. The only
+explicit non-owner table privileges must be:
+
+- accounts: API `SELECT`; engine `SELECT, INSERT, UPDATE`;
+- shards: API `SELECT, INSERT`; engine `SELECT`;
+- provisioning intents: API `SELECT, INSERT`; engine `SELECT`.
+
+All grants are non-grantable. Verify the only
+`trading.admin_risk_state_exists` overload has no arguments, returns boolean,
+is SQL/STABLE/SECURITY DEFINER, has exactly `search_path=pg_catalog`, is owned
+by the migration owner—including after an unexpected same-signature
+predecessor is atomically transferred—and contains the six fully qualified
+existence predicates. Its only non-owner privilege is non-grantable API
+`EXECUTE`.
+`PUBLIC`, hostile/default-derived grantees, inheriting logins, and dependent
+grant chains must receive SQLSTATE `42501`. The API role must still receive
+`42501` for direct reads of raw ledger transactions or entries. Engine
+provisioning privileges must remain usable, while API execution of the legacy
+`identity.provision_broker_account` function remains denied.
+
+The function is only a committed-state presence gate. It reads no economic
+number and performs no arithmetic or rounding; it does not establish risk
+amounts, thresholds, totals, filters, ordering, cursors, pagination, or an
+external route. Market/instrument-only state remains empty. Any committed
+account, command, shard, balance, ledger transaction, or ledger entry makes
+the reader fail closed until separately specified non-empty risk behavior
+exists.
+
+A connection loss or missing `COMMIT` acknowledgment is an unknown outcome,
+not proof of rollback and not authorization to retry. Keep every runtime
+stopped and reconnect with the migrator identity. Compare the exact
+filename/checksum and 32-file tip with all table/column ACLs, function
+definition and ACL, preserved relation digests/filenodes, raw ledger ACLs,
+owner defaults, and the legacy function. Any journal/catalog/state
+disagreement requires a reviewed forward repair or complete verified
+pre-migration restore. Never delete the journal row, edit frozen migration
+bytes, reset a persistent database, or selectively restore ACL catalogs.
+
 ### Phase 3 command market-sequence binding upgrade
 
 Migration
