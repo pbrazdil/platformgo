@@ -320,6 +320,60 @@ repair or complete verified pre-migration restore. Never edit the frozen
 migration, delete its journal row, reset a persistent database, or selectively
 restore ACL catalogs.
 
+### Phase 3 finite fill-leverage constraint upgrade
+
+Migrations
+`20260729000500_phase3_fill_leverage_finite_constraint.up.sql` and
+`20260729000600_phase3_validate_fill_leverage_finite.up.sql` form a
+forward-only, stopped-runtime sequence from the exact 34-file
+command-admission tip:
+
+1. Stop and drain every API, engine, publisher, projector, marketdata,
+   realtime, consumer, and cleanup runtime. Prove no application-role
+   transaction remains. Record the exact 34-file journal and checksums, fill
+   digest and relation filenode, and take a complete restore-verified pre-005
+   database boundary.
+2. Apply migration 005 under its two-second `lock_timeout` and thirty-second
+   `statement_timeout`. It first acquires the engine-owner transaction advisory
+   lock for the configured shard, so a live owner fails the cutover within the
+   bound. Only after that fence does it take `ACCESS EXCLUSIVE` on
+   `trading.fills`, which conflicts with reads and writes. Adding the `NOT
+   VALID` constraint performs no historical scan, heap rewrite, row write,
+   backfill, or repair.
+3. Verify the exact 35-file tip and checksum, the present but unvalidated
+   `fills_effective_leverage_finite_positive` constraint, the unchanged
+   existing positive constraint, and unchanged fill digest and relation
+   filenode. Keep all runtimes stopped at this intermediate tip.
+4. Apply migration 006 with the same bounds. `VALIDATE CONSTRAINT` scans
+   `trading.fills` under `SHARE UPDATE EXCLUSIVE` and performs no rewrite or row
+   mutation.
+5. Verify the exact 36-file tip and checksum, both constraints validated, and
+   the unchanged fill digest and relation filenode. Only then start the exact
+   candidate artifact and prove valid finite leverage remains canonical while
+   corrupt non-finite leverage fails the whole read closed without exposing a
+   partial page or mutating history.
+
+If preexisting numeric `NaN` exists, migration 005 commits and migration 006
+fails with SQLSTATE `23514`. The database remains at the exact 35-file tip with
+the new constraint enforced but unvalidated and the `NaN` row unchanged. Keep
+every runtime stopped. Do not retry migration 006, directly update or delete
+the immutable fill, add a repair migration, or remove a constraint. Remain
+halted for a reviewed forward or owner decision. Only an explicit owner
+authorization permits restoring the complete verified pre-005 database
+boundary, followed by the exact prior artifact, fresh recovery, and full
+reconciliation. Never reset or recreate a persistent database or selectively
+restore fill history.
+
+SQLSTATE `55P03` or a statement timeout definitely raised before `COMMIT`
+rolls back only the active migration; prove whether the journal remains at 34
+or 35 before a clean retry. A connection loss, client deadline, failover, or
+missing `COMMIT` acknowledgment is an unknown outcome. Keep every runtime
+stopped and reconcile the exact filename/checksum, 34-, 35-, or 36-file journal
+tip, constraint presence and validation state, fill digest, and relation
+filenode before retrying or selecting a binary. Never infer rollback from the
+client error, delete a journal row, edit an applied migration, reset a
+persistent database, or selectively restore fill history.
+
 ### Phase 3 command market-sequence binding upgrade
 
 Migration

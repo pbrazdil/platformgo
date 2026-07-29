@@ -530,6 +530,51 @@ tip, full raw table/column ACLs, all three truncate guards, explicit-column
 digests, relation filenodes, neighboring intent/outbox state, and owner
 defaults before retrying or selecting a binary.
 
+### Phase 3 finite fill-leverage constraint boundary
+
+Migration
+`20260729000500_phase3_fill_leverage_finite_constraint.up.sql` advances the
+immutable journal from the exact 34-file command-admission tip to the 35-file
+finite-constraint tip. Under a two-second `lock_timeout` and thirty-second
+`statement_timeout`, it first acquires the engine-owner transaction advisory
+lock for the configured shard, then takes `ACCESS EXCLUSIVE` on
+`trading.fills` and adds `fills_effective_leverage_finite_positive` as `NOT
+VALID`. A live engine owner therefore times out before the DDL, and no
+legitimate engine writer overlaps the constraint cutover. This is a
+catalog-only change: it performs no historical scan, heap rewrite, row write,
+backfill, or repair. The existing `fills_effective_leverage_positive`
+constraint is not dropped or changed. The new constraint immediately rejects
+every new non-`NULL` value unless it is both positive and distinct from numeric
+`NaN`, `Infinity`, and `-Infinity`; historical `NULL` remains accepted.
+
+Migration
+`20260729000600_phase3_validate_fill_leverage_finite.up.sql` separately scans
+`trading.fills` under `SHARE UPDATE EXCLUSIVE`, with the same two-second and
+thirty-second bounds, and validates the new constraint without rewriting or
+mutating the table. A successful transaction advances the immutable journal
+to the exact 36-file validation tip.
+
+A preexisting numeric `NaN` has an explicit stopped-runtime outcome: migration
+005 commits at the 35-file tip with the constraint enforced but unvalidated,
+then migration 006 fails with SQLSTATE `23514` and rolls back only its own
+validation transaction. Keep every runtime stopped. Do not retry validation,
+update or delete immutable fill history, introduce a repair, or remove either
+constraint. Remain halted for a reviewed forward or owner decision. Only an
+explicit owner authorization permits restoring the complete verified pre-005
+database boundary, followed by the exact prior artifact, fresh recovery, and
+full reconciliation. Never reset or recreate a persistent database or
+selectively restore fill history.
+
+A definite lock or statement timeout before `COMMIT` rolls back that migration
+transaction. A connection, client-deadline, failover, or missing
+`COMMIT`-acknowledgment error is an unknown outcome. Keep runtimes stopped and
+classify the exact migration filename and checksum, 34-, 35-, or 36-file tip,
+constraint presence and `convalidated` state, and preserved fill digest and
+relation filenode before retrying or selecting a binary. The application
+readers independently parse every non-`NULL` effective leverage through the
+exact ratio domain, require a positive value, and canonicalize it; invalid
+durable data fails the complete read closed without changing rows.
+
 ### Phase 3 frozen-effective-leverage migration boundary
 
 Migration `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` is the

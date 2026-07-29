@@ -9,7 +9,7 @@ major-upgrade, backup-restore, recovery, and reconciliation rehearsal.
 
 ## Current status
 
-Last updated: 2026-07-29
+Last updated: 2026-07-30
 
 Current delivery stage: **Phase 3 — compatibility edges, in progress**.
 
@@ -94,6 +94,18 @@ and reconciliation. No additional engine/domain/realtime delivery effect is
 created beyond command admission and duplicate audit. This intentionally does
 not claim the pinned Rust
 synchronous application error, its `free margin` message, or an HTTP status.
+The current finite fill-leverage hardening candidate preserves valid and
+historical `NULL` fill behavior while making both compatibility readers fail
+the complete read closed on a non-finite or non-positive durable leverage.
+Separate forward migrations add an immediately enforced `NOT VALID`
+finite-positive check behind the configured-shard engine-owner fence, without
+scanning or rewriting fill pages, then validate it in a bounded scan. The
+stopped-runtime intermediate and final schema tips are exactly 35 and 36 files.
+A preexisting numeric `NaN` leaves the database at the 35-file tip after
+SQLSTATE `23514`; operators must not retry or repair that history and must
+remain halted for a reviewed forward or owner decision. Only an explicit owner
+authorization permits a complete verified pre-constraint restore followed by
+the exact prior artifact, fresh recovery, and full reconciliation.
 Command-admission replay authority is now also hardened by a landed
 forward-only PostgreSQL 19 Beta 2 migration. It fences engine and API writers,
 removes hostile inherited table and column privileges from commands,
@@ -516,6 +528,12 @@ This repository is not yet a production-capable replacement.
 
 ## Validation snapshot
 
+The finite fill-leverage hardening candidate has focused PostgreSQL 19 Beta 2
+tests defining its corruption-read, no-partial-page, restart, exact 35/36-tip,
+no-rewrite, finite-write, bounded lock timeout/retry, representative
+100,000-row bounded validation, and preexisting-`NaN` refusal boundaries.
+Those focused tests are green; no repository-wide or exact-SHA release claim
+is made for this working tree.
 The command-admission ACL repair is landed after focused PostgreSQL 19 Beta 2
 hostile-default, populated-upgrade, timeout/rollback/retry, executable
 replay-destruction, and least-privilege tests; full policy, format, lint,
