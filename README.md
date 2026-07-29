@@ -94,7 +94,7 @@ and reconciliation. No additional engine/domain/realtime delivery effect is
 created beyond command admission and duplicate audit. This intentionally does
 not claim the pinned Rust
 synchronous application error, its `free margin` message, or an HTTP status.
-The current finite fill-leverage hardening candidate preserves valid and
+The landed finite fill-leverage hardening preserves valid and
 historical `NULL` fill behavior while making both compatibility readers fail
 the complete read closed on a non-finite or non-positive durable leverage.
 Separate forward migrations add an immediately enforced `NOT VALID`
@@ -528,12 +528,14 @@ This repository is not yet a production-capable replacement.
 
 ## Validation snapshot
 
-The finite fill-leverage hardening candidate has focused PostgreSQL 19 Beta 2
+The landed finite fill-leverage hardening has PostgreSQL 19 Beta 2
 tests defining its corruption-read, no-partial-page, restart, exact 35/36-tip,
 no-rewrite, finite-write, bounded lock timeout/retry, representative
 100,000-row bounded validation, and preexisting-`NaN` refusal boundaries.
-Those focused tests are green; no repository-wide or exact-SHA release claim
-is made for this working tree.
+Its exact implementation candidate passed the full local policy, format, lint,
+test, race, repeat, and vulnerability gates; independent money, migration,
+determinism, and release reviews found no P0-P3 issue; and all seven hosted
+checks passed before merge.
 The command-admission ACL repair is landed after focused PostgreSQL 19 Beta 2
 hostile-default, populated-upgrade, timeout/rollback/retry, executable
 replay-destruction, and least-privilege tests; full policy, format, lint,
