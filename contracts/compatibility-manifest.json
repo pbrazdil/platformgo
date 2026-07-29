@@ -32,6 +32,7 @@
     "broker-account-identifiers-preserve-current-go-urns",
     "client-api-key-creation-requires-idempotency-key",
     "fill-trade-type-is-always-classified",
+    "fills-http-preserves-current-go-projection",
     "flat-balance-preserves-current-go-projection-authority",
     "native-login-refresh-placement-preserves-current-go-client-boundary",
     "trader-profile-preserves-current-go-identity-boundary",
@@ -54,6 +55,7 @@
     "GET /v1/accounts/{accountId}/orders",
     "GET /v1/accounts/{accountId}/positions",
     "GET /v1/accounts/{accountId}/balances",
+    "GET /v1/accounts/{accountId}/fills",
     "GET /v1/accounts/{accountId}/funding",
     "GET /broker/v1/ping",
     "POST /broker/v1/echo",
@@ -74,7 +76,7 @@
   "openAPIArtifacts": {
     "openapi/admin-v1.json": "615e8a49f9e6a71f6a3ea0108bd71353bd5b7050cc79cee6b17d98af84a6aeb3",
     "openapi/broker-v1.json": "ed285edd599e89031e552e9d01be827cc677d14641ccd30438955288c62a8b1c",
-    "openapi/client-v1.json": "15e029fce613c3ce3f8bdc8d67d6d71eaf27de3e47862ea275838cb3739c82ac"
+    "openapi/client-v1.json": "42461474eb48058875938d75a8b428504ac3613ee41dd87e8157cae0e4dfc810"
   },
   "platformSourceRevision": "50141367492be46ebf5623f6191a14b94af2f2bd",
   "protobufDescriptor": {

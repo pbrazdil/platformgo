@@ -197,6 +197,17 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "statuses": [200, 400, 401, 403, 429, 503],
         "success_array": "BalanceView",
     },
+    ("GET", "/v1/accounts/{accountId}/fills"): {
+        "statuses": [200, 400, 401, 403, 429, 503],
+        "success": "FillExecutionPage",
+        "success_description": (
+            "Committed moving keyset view of the current Go fill projection, "
+            "newest first"
+        ),
+        "pagination": True,
+        "fill_filters": True,
+        "security": "bearer",
+    },
     ("GET", "/v1/accounts/{accountId}/funding"): {
         "statuses": [200, 400, 401, 403, 429],
         "success": "FundingPage",
@@ -206,9 +217,10 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
     },
     ("GET", "/broker/v1/ping"): {"statuses": [200, 401]},
     ("POST", "/broker/v1/echo"): {
-        "statuses": [200, 401, 403, 409, 503],
+        "statuses": [200, 401, 403, 409, 429, 503],
         "idempotency": True,
         "success": "BrokerEcho",
+        "rate_description": "Replay capacity limited",
     },
     ("POST", "/broker/v1/users"): {
         "statuses": [201, 400, 401, 403, 503],
@@ -310,6 +322,10 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                 operation["responses"]["409"]["description"] = accepted[
                     "conflict_description"
                 ]
+            if accepted.get("rate_description") is not None:
+                operation["responses"]["429"]["description"] = accepted[
+                    "rate_description"
+                ]
             operation["x-platformgo-contract-status"] = "phase3-accepted-runtime"
             request_schema = accepted.get("request")
             if request_schema is not None:
@@ -367,6 +383,29 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                     },
                 },
             ]
+            if accepted.get("fill_filters") is True:
+                operation["parameters"].extend(
+                    [
+                        {
+                            "name": "side",
+                            "in": "query",
+                            "required": False,
+                            "schema": {
+                                "type": "string",
+                                "enum": ["BUY", "SELL", "buy", "sell"],
+                            },
+                        },
+                        {
+                            "name": "tradeId",
+                            "in": "query",
+                            "required": False,
+                            "schema": {
+                                "type": "string",
+                                "format": "uuid",
+                            },
+                        },
+                    ]
+                )
         if accepted is not None and accepted.get("security") is not None:
             operation["security"] = [{accepted["security"]: []}]
         paths.setdefault(path, {})[method.lower()] = operation
@@ -639,6 +678,82 @@ def schemas(client: bool) -> dict[str, object]:
                 "equity": decimal,
             },
         },
+        **(
+            {
+                "FillExecutionView": {
+                    "type": "object",
+                    "required": [
+                        "fillId",
+                        "orderId",
+                        "positionId",
+                        "side",
+                        "tradeType",
+                        "reason",
+                        "realizedPnl",
+                        "settlementCurrency",
+                        "filledAt",
+                    ],
+                    "properties": {
+                        "fillId": {"type": "string", "format": "uuid"},
+                        "orderId": {"type": "string"},
+                        "positionId": {"type": "string", "format": "uuid"},
+                        "side": {
+                            "type": "string",
+                            "enum": ["BUY", "SELL"],
+                        },
+                        "tradeType": {
+                            "type": "string",
+                            "enum": [
+                                "open",
+                                "increase",
+                                "reduce",
+                                "flip",
+                                "close",
+                            ],
+                        },
+                        "reason": {
+                            "type": "string",
+                            "enum": [
+                                "manual",
+                                "stop_loss",
+                                "take_profit",
+                                "liquidation",
+                                "flatten",
+                            ],
+                        },
+                        "realizedPnl": {
+                            **decimal,
+                            "type": ["string", "null"],
+                        },
+                        "settlementCurrency": {
+                            "type": ["string", "null"],
+                        },
+                        "leverage": decimal,
+                        "filledAt": {
+                            "type": "string",
+                            "format": "date-time",
+                        },
+                    },
+                },
+                "FillExecutionPage": {
+                    "type": "object",
+                    "required": ["items", "total"],
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/components/schemas/FillExecutionView"
+                            },
+                        },
+                        "nextCursor": {"type": "string"},
+                        "prevCursor": {"type": "string"},
+                        "total": {"type": "integer", "minimum": 0},
+                    },
+                },
+            }
+            if client
+            else {}
+        ),
         "BrokerEcho": {
             "type": "object",
             "required": ["id"],

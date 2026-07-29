@@ -314,6 +314,25 @@ func (testTradingReader) Balances(context.Context, string) ([]BalanceView, error
 	return []BalanceView{{Currency: "USDC", Total: "1000", Free: "1000", Equity: "1000"}}, nil
 }
 
+func (testTradingReader) Fills(
+	context.Context,
+	string,
+	FillExecutionFilter,
+) (FillExecutionPage, error) {
+	return FillExecutionPage{
+		Items: []FillExecutionView{{
+			FillID:     "019fa844-26c0-7000-8000-000000000103",
+			OrderID:    "urn:xb:order:019fa844-26c0-7000-8000-000000000111",
+			PositionID: "019fa844-26c0-7000-8000-000000000131",
+			Side:       "BUY",
+			TradeType:  "open",
+			Reason:     "manual",
+			FilledAt:   "2026-07-24T10:00:00Z",
+		}},
+		Total: 1,
+	}, nil
+}
+
 func (testTradingReader) Funding(
 	_ context.Context,
 	_ string,
@@ -613,6 +632,221 @@ func TestSubmitOrderAuthenticatesOwnsAndReplaysExactly(t *testing.T) {
 	forbidden := performRequest(t, handler, http.MethodPost, "/v1/accounts/urn:xb:account:other/orders", body, headers)
 	if forbidden.Code != http.StatusForbidden {
 		t.Fatalf("foreign account status = %d, want 403", forbidden.Code)
+	}
+}
+
+func TestFillsRouteIsAuthenticatedAndAccountScoped(t *testing.T) {
+	reader := &recordingFillsReader{}
+	handler := NewServer(ServerConfig{
+		Authenticator: testAuthenticator{},
+		Identity:      testIdentity{},
+		Trading:       reader,
+	}).Handler()
+	headers := map[string]string{"authorization": "Bearer client-token"}
+
+	owned := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/v1/accounts/urn:xb:account:acct-7/fills?limit=2&side=buy",
+		nil,
+		headers,
+	)
+	if owned.Code != http.StatusOK {
+		t.Fatalf("owned fills status = %d body=%s", owned.Code, owned.Body.String())
+	}
+	const wantBody = `{"items":[{"fillId":"019fa844-26c0-7000-8000-000000000103","orderId":"urn:xb:order:019fa844-26c0-7000-8000-000000000111","positionId":"019fa844-26c0-7000-8000-000000000131","side":"BUY","tradeType":"open","reason":"manual","realizedPnl":null,"settlementCurrency":null,"filledAt":"2026-07-24T10:00:00Z"}],"total":1}` + "\n"
+	if owned.Body.String() != wantBody {
+		t.Fatalf("owned fills body = %s, want exact %s", owned.Body.String(), wantBody)
+	}
+	if reader.calls != 1 ||
+		reader.accountID != "urn:xb:account:acct-7" ||
+		reader.filter.Side != "BUY" ||
+		reader.filter.Limit != 2 {
+		t.Fatalf(
+			"fills read calls=%d account=%q filter=%#v",
+			reader.calls,
+			reader.accountID,
+			reader.filter,
+		)
+	}
+
+	anonymous := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/v1/accounts/urn:xb:account:acct-7/fills",
+		nil,
+		nil,
+	)
+	if anonymous.Code != http.StatusUnauthorized {
+		t.Fatalf(
+			"anonymous fills status = %d, want 401",
+			anonymous.Code,
+		)
+	}
+	if reader.calls != 1 {
+		t.Fatalf("anonymous request reached fills reader: calls=%d", reader.calls)
+	}
+
+	foreign := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/v1/accounts/urn:xb:account:other/fills",
+		nil,
+		headers,
+	)
+	if foreign.Code != http.StatusForbidden {
+		t.Fatalf("foreign fills status = %d, want 403", foreign.Code)
+	}
+	if reader.calls != 1 {
+		t.Fatalf("foreign request reached fills reader: calls=%d", reader.calls)
+	}
+
+	malformed := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/v1/accounts/not-a-urn/fills",
+		nil,
+		headers,
+	)
+	if malformed.Code != http.StatusBadRequest {
+		t.Fatalf("malformed fills status = %d, want 400", malformed.Code)
+	}
+	if reader.calls != 1 {
+		t.Fatalf("malformed request reached fills reader: calls=%d", reader.calls)
+	}
+}
+
+type recordingFillsReader struct {
+	testTradingReader
+	calls     int
+	accountID string
+	filter    FillExecutionFilter
+}
+
+func (reader *recordingFillsReader) Fills(
+	ctx context.Context,
+	accountID string,
+	filter FillExecutionFilter,
+) (FillExecutionPage, error) {
+	reader.calls++
+	reader.accountID = accountID
+	reader.filter = filter
+	return reader.testTradingReader.Fills(ctx, accountID, filter)
+}
+
+func TestFillsRouteRejectsMalformedQueriesBeforeRead(t *testing.T) {
+	reader := &recordingFillsReader{}
+	handler := NewServer(ServerConfig{
+		Authenticator: testAuthenticator{},
+		Identity:      testIdentity{},
+		Trading:       reader,
+	}).Handler()
+	headers := map[string]string{"authorization": "Bearer client-token"}
+	validCursor := "MTc4NDkwMTYwMDAwMDAwMDEwMDowMTlmYTg0NC0yNmMwLTcwMDAtODAwMC0wMDAwMDAwMDAxMDM"
+	validTradeID := "019fa844-26c0-7000-8000-000000000103"
+
+	for _, rawQuery := range []string{
+		"unknown=value",
+		"side=buy&side=sell",
+		"side=",
+		"side=%20",
+		"side=hold",
+		"tradeId=",
+		"tradeId=not-a-uuid",
+		"limit=",
+		"limit=zero",
+		"limit=0",
+		"limit=-1",
+		"limit=201",
+		"limit=999999999999999999999",
+		"cursor=not-base64!",
+		"cursor=MTIz",
+		"direction=",
+		"direction=sideways",
+		"side=%zz",
+	} {
+		response := performRequest(
+			t,
+			handler,
+			http.MethodGet,
+			"/v1/accounts/urn:xb:account:acct-7/fills?"+rawQuery,
+			nil,
+			headers,
+		)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf(
+				"query %q status=%d body=%s, want 400",
+				rawQuery,
+				response.Code,
+				response.Body.String(),
+			)
+		}
+		if reader.calls != 0 {
+			t.Fatalf("query %q reached fills reader", rawQuery)
+		}
+	}
+
+	response := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/v1/accounts/urn:xb:account:acct-7/fills?tradeId="+
+			validTradeID+"&cursor="+validCursor+"&direction=backward&limit=200",
+		nil,
+		headers,
+	)
+	if response.Code != http.StatusOK || reader.calls != 1 {
+		t.Fatalf(
+			"valid query status=%d calls=%d body=%s",
+			response.Code,
+			reader.calls,
+			response.Body.String(),
+		)
+	}
+	if reader.filter.TradeID != validTradeID ||
+		reader.filter.Cursor != validCursor ||
+		reader.filter.Direction != "backward" ||
+		reader.filter.Limit != 200 {
+		t.Fatalf("valid query filter = %#v", reader.filter)
+	}
+}
+
+type emptyFillsReader struct{ testTradingReader }
+
+func (emptyFillsReader) Fills(
+	context.Context,
+	string,
+	FillExecutionFilter,
+) (FillExecutionPage, error) {
+	return FillExecutionPage{}, nil
+}
+
+func TestFillsRouteReturnsNonNullEmptyItems(t *testing.T) {
+	handler := NewServer(ServerConfig{
+		Authenticator: testAuthenticator{},
+		Identity:      testIdentity{},
+		Trading:       emptyFillsReader{},
+	}).Handler()
+	response := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/v1/accounts/urn:xb:account:acct-7/fills",
+		nil,
+		map[string]string{"authorization": "Bearer client-token"},
+	)
+	const want = `{"items":[],"total":0}` + "\n"
+	if response.Code != http.StatusOK || response.Body.String() != want {
+		t.Fatalf(
+			"empty fills status=%d body=%s, want %s",
+			response.Code,
+			response.Body.String(),
+			want,
+		)
 	}
 }
 

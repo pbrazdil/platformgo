@@ -379,13 +379,21 @@ type FillExecutionView struct {
 	FilledAt           string  `json:"filledAt"`
 }
 
-// FillExecutionPage is the narrow filtered execution projection proven by
-// pinned fill-history source tests. It is not an accepted HTTP contract.
+// FillExecutionPage is the frozen filtered execution envelope.
 type FillExecutionPage struct {
-	Items      []FillExecutionView
-	NextCursor *string
-	PrevCursor *string
-	Total      int64
+	Items      []FillExecutionView `json:"items"`
+	NextCursor *string             `json:"nextCursor,omitempty"`
+	PrevCursor *string             `json:"prevCursor,omitempty"`
+	Total      int64               `json:"total"`
+}
+
+// FillExecutionFilter is the accepted account-fill query subset.
+type FillExecutionFilter struct {
+	Side      string
+	TradeID   string
+	Limit     int
+	Cursor    string
+	Direction string
 }
 
 // FundingView is one exact, append-only client funding projection.
@@ -416,5 +424,6 @@ type TradingReader interface {
 	Orders(context.Context, string) ([]OrderView, error)
 	Positions(context.Context, string) ([]PositionView, error)
 	Balances(context.Context, string) ([]BalanceView, error)
+	Fills(context.Context, string, FillExecutionFilter) (FillExecutionPage, error)
 	Funding(context.Context, string, PageParams) (FundingPage, error)
 }

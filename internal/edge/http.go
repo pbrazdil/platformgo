@@ -2,6 +2,7 @@ package edge
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,6 +20,9 @@ import (
 const maxRequestBodyBytes = 1 << 20
 
 var plainDecimal = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$`)
+var canonicalUUID = regexp.MustCompile(
+	`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
+)
 
 // Server is the dependency-injected HTTP compatibility edge.
 type Server struct {
@@ -373,6 +378,28 @@ func (server *Server) handleAccountRead(
 		response, err = server.trading.Positions(request.Context(), accountID)
 	case "balances":
 		response, err = server.trading.Balances(request.Context(), accountID)
+	case "fills":
+		filter, parseErr := fillExecutionFilter(request)
+		if parseErr != nil {
+			writeError(
+				writer,
+				request,
+				http.StatusBadRequest,
+				"invalid_request",
+				"invalid fills page",
+			)
+			return
+		}
+		var page FillExecutionPage
+		page, err = server.trading.Fills(
+			request.Context(),
+			accountID,
+			filter,
+		)
+		if page.Items == nil {
+			page.Items = make([]FillExecutionView, 0)
+		}
+		response = page
 	case "funding":
 		params, parseErr := fundingPageParams(request)
 		if parseErr != nil {
@@ -396,12 +423,16 @@ func (server *Server) handleAccountRead(
 	}
 	if err != nil {
 		if errors.Is(err, ErrInvalidRequest) {
+			message := "invalid funding page"
+			if resource == "fills" {
+				message = "invalid fills page"
+			}
 			writeError(
 				writer,
 				request,
 				http.StatusBadRequest,
 				"invalid_request",
-				"invalid funding page",
+				message,
 			)
 			return
 		}
@@ -814,7 +845,7 @@ func accountReadRoute(path string) (string, string, bool) {
 		return "", "", false
 	}
 	remainder := strings.TrimPrefix(path, prefix)
-	for _, resource := range []string{"orders", "positions", "balances", "funding"} {
+	for _, resource := range []string{"orders", "positions", "balances", "fills", "funding"} {
 		suffix := "/" + resource
 		if strings.HasSuffix(remainder, suffix) {
 			accountID := strings.TrimSuffix(remainder, suffix)
@@ -822,6 +853,83 @@ func accountReadRoute(path string) (string, string, bool) {
 		}
 	}
 	return "", "", false
+}
+
+func fillExecutionFilter(request *http.Request) (FillExecutionFilter, error) {
+	values, err := url.ParseQuery(request.URL.RawQuery)
+	if err != nil {
+		return FillExecutionFilter{}, err
+	}
+	for key, entries := range values {
+		switch key {
+		case "side", "tradeId", "limit", "cursor", "direction":
+		default:
+			return FillExecutionFilter{}, ErrInvalidRequest
+		}
+		if len(entries) != 1 {
+			return FillExecutionFilter{}, ErrInvalidRequest
+		}
+		if entries[0] == "" {
+			return FillExecutionFilter{}, ErrInvalidRequest
+		}
+	}
+	one := func(key string) string {
+		entries := values[key]
+		if len(entries) == 0 {
+			return ""
+		}
+		return entries[0]
+	}
+	filter := FillExecutionFilter{
+		Side:      strings.TrimSpace(one("side")),
+		TradeID:   strings.TrimSpace(one("tradeId")),
+		Cursor:    one("cursor"),
+		Direction: one("direction"),
+	}
+	if _, present := values["side"]; present && filter.Side == "" {
+		return FillExecutionFilter{}, ErrInvalidRequest
+	}
+	if _, present := values["tradeId"]; present && filter.TradeID == "" {
+		return FillExecutionFilter{}, ErrInvalidRequest
+	}
+	if filter.Side != "" {
+		side := strings.ToUpper(filter.Side)
+		if side != "BUY" && side != "SELL" {
+			return FillExecutionFilter{}, ErrInvalidRequest
+		}
+		filter.Side = side
+	}
+	if filter.TradeID != "" && !canonicalUUID.MatchString(filter.TradeID) {
+		return FillExecutionFilter{}, ErrInvalidRequest
+	}
+	if filter.Cursor != "" {
+		raw, decodeErr := base64.RawURLEncoding.DecodeString(filter.Cursor)
+		if decodeErr != nil {
+			return FillExecutionFilter{}, ErrInvalidRequest
+		}
+		parts := strings.SplitN(string(raw), ":", 2)
+		if len(parts) != 2 || !canonicalUUID.MatchString(parts[1]) {
+			return FillExecutionFilter{}, ErrInvalidRequest
+		}
+		if _, parseErr := strconv.ParseInt(parts[0], 10, 64); parseErr != nil {
+			return FillExecutionFilter{}, ErrInvalidRequest
+		}
+	}
+	switch filter.Direction {
+	case "", "next", "prev", "backward":
+	default:
+		return FillExecutionFilter{}, ErrInvalidRequest
+	}
+	rawLimit := one("limit")
+	if rawLimit == "" {
+		return filter, nil
+	}
+	limit, err := strconv.ParseInt(rawLimit, 10, 32)
+	if err != nil || limit < 1 || limit > 200 {
+		return FillExecutionFilter{}, ErrInvalidRequest
+	}
+	filter.Limit = int(limit)
+	return filter, nil
 }
 
 func fundingPageParams(request *http.Request) (PageParams, error) {
