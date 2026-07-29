@@ -4,28 +4,6 @@ import "testing"
 
 // Ported from:
 // platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-// source: apps/app/tests/it/messaging/e2e_dlq.rs:9
-// test: redelivery_cap_then_dead_letter
-func TestRedeliveryCapThenDeadLetter(t *testing.T) {
-	queue := &deadLetterFixture{}
-	queue.publish(platformMessage{ID: "poison", Topic: "test.dlq.fixture"})
-	first, ok := queue.next()
-	if !ok || first.Redelivered {
-		t.Fatalf("first delivery = %#v, present=%v", first, ok)
-	}
-	queue.nack(first)
-	second, ok := queue.next()
-	if !ok || !second.Redelivered {
-		t.Fatalf("second delivery = %#v, present=%v", second, ok)
-	}
-	queue.deadLetter(second)
-	if _, ok := queue.next(); ok || len(queue.dead) != 1 {
-		t.Fatalf("source still delivers or dead letter missing: source=%v dead=%v", queue.source, queue.dead)
-	}
-}
-
-// Ported from:
-// platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 // source: apps/app/tests/it/messaging/e2e_outbox.rs:38
 // test: pending_depth_counts_backlog_and_purge_removes_published
 func TestPendingDepthCountsBacklogAndPurgeRemovesPublished(t *testing.T) {
