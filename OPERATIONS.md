@@ -107,6 +107,45 @@ requires a reviewed forward repair or complete verified pre-migration restore;
 never edit the journal, edit frozen migration bytes, or restore ACL catalogs
 selectively.
 
+### Phase 3 admin fleet-orders ACL upgrade
+
+Migration `20260728000400_phase3_admin_fleet_orders_acl.up.sql` is an ACL-only
+no-overlap cutover for `trading.orders` and `trading.order_intents`. Stop and
+drain old API and engine processes before applying it. Keep them stopped until
+the exact journal and complete ACL state of both relations are classified.
+The migration performs no row-data change, heap rewrite, backfill, or runtime
+schema-revision bump.
+
+Apply under the migrator's five-second `lock_timeout`; the SQL sets a
+ten-second `statement_timeout`. It scrubs the two relations in deterministic
+order. Up-front `SHARE` locks intentionally conflict with `ROW EXCLUSIVE`
+writers so that a statement authorized before revocation cannot commit after
+the ACL cutover. A pre-revocation writer or an `ACCESS EXCLUSIVE` blocker on
+the second relation produces a definite
+pre-commit rollback of both relations' ACL changes and the migration journal.
+Before retrying, prove the filename is absent, the complete raw table and
+column ACL of both relations is unchanged, and both data digests and relation
+filenodes are unchanged. Drain or roll back the writer before retrying.
+
+After commit, verify the exact filename/checksum and raw table plus column ACL.
+The only explicit non-owner privileges are API `SELECT` on orders, API
+`SELECT, INSERT` on order intents, engine `SELECT, INSERT, UPDATE` on orders,
+and engine `SELECT` on order intents, all without grant option. Also execute
+role-boundary probes: API cannot mutate orders; engine cannot mutate order
+intents; neither runtime role can `DELETE` or `TRUNCATE` either relation. A
+prior binary started cold must reject the newer migration tip.
+
+A connection loss or missing `COMMIT` acknowledgment is an unknown outcome,
+not authorization to retry blindly. Keep all runtimes stopped and inspect the
+exact filename/checksum together with the complete raw ACL of both relations.
+A journal/catalog mismatch requires a reviewed forward repair or complete
+verified pre-migration restore. Never delete the journal row, edit frozen
+migration bytes, reset a persistent database, or restore ACL catalogs
+selectively. Before its first application, a candidate migration may be
+changed only while every database that has received it is explicitly
+disposable, local/test-only, unpublished, and unshared. Once protected or
+shared, its path and bytes are immutable and every correction is forward-only.
+
 ### Phase 3 command market-sequence binding upgrade
 
 Migration

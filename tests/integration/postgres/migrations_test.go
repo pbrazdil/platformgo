@@ -4982,10 +4982,10 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 29 ||
+	if count != 30 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
 		last !=
-			"20260728000300_phase3_admin_fleet_fills_acl.up.sql" {
+			"20260728000400_phase3_admin_fleet_orders_acl.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,

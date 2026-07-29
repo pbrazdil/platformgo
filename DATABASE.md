@@ -336,6 +336,47 @@ contains no committed fill. Any committed fill or database error fails closed;
 no fill value, total above zero, ordering, filter, cursor, or non-empty DTO is
 projected by this boundary.
 
+### Phase 3 admin fleet-orders ACL boundary
+
+Migration `20260728000400_phase3_admin_fleet_orders_acl.up.sql` changes only
+the ACL catalogs for the existing `trading.orders` and
+`trading.order_intents` tables, in that deterministic relation order. It
+removes `PUBLIC`, every direct non-owner table grant, every direct non-owner
+column grant, grant options, and dependent same-object grant chains, including
+grants inherited from hostile owner defaults. It then restores exactly:
+
+- `platformgo_api`: `SELECT` on `trading.orders`; `SELECT, INSERT` on
+  `trading.order_intents`.
+- `platformgo_engine`: `SELECT, INSERT, UPDATE` on `trading.orders`; `SELECT`
+  on `trading.order_intents`.
+
+All restored grants are non-grantable. The migration does not alter the
+owner's default-privilege template, the runtime schema revision, row data, or
+relation files. It performs no heap rewrite, scan, backfill, or economic
+mutation. Privilege changes and the migration journal commit in one
+transaction under the migrator's five-second `lock_timeout` and the
+migration's ten-second `statement_timeout`. A timeout on the second relation
+therefore rolls back the first relation's ACL delta as well.
+Before changing ACLs, deterministic `SHARE` locks fence transactions that
+already executed DML under a privilege being revoked. An open
+`ROW EXCLUSIVE` writer causes a bounded pre-commit rollback; after that writer
+is drained or rolled back, the whole migration is retried.
+
+The internal application reader executes one PostgreSQL statement:
+
+```sql
+SELECT
+    EXISTS (SELECT 1 FROM trading.orders)
+    OR EXISTS (SELECT 1 FROM trading.order_intents)
+```
+
+Both predicates share one MVCC snapshot. The exact empty page is returned only
+when neither a materialized order nor an immutable admitted intent exists.
+Every order or intent, including a rejected or not-yet-materialized intent,
+fails closed with a typed unsupported-state error. This boundary reads no
+economic value and does not establish non-empty DTO fields, totals above zero,
+ordering, filters, cursors, or an external admin route.
+
 ### Phase 3 frozen-effective-leverage migration boundary
 
 Migration `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` is the
