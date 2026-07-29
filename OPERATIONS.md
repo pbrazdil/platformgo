@@ -146,6 +146,43 @@ changed only while every database that has received it is explicitly
 disposable, local/test-only, unpublished, and unshared. Once protected or
 shared, its path and bytes are immutable and every correction is forward-only.
 
+### Phase 3 admin fleet-positions ACL upgrade
+
+Migration `20260729000100_phase3_admin_fleet_positions_acl.up.sql` is the
+forward-only ACL-only no-overlap cutover for `trading.positions`. Stop and
+drain old API and engine processes before applying it. Keep them stopped until
+the exact journal/checksum, complete position ACL, position relation state, and
+unchanged fill state are classified. The migration performs no row-data
+change, heap rewrite, scan, backfill, runtime schema-revision bump, or
+`trading.fills` ACL change.
+
+Apply under the migrator's five-second `lock_timeout`; the SQL sets a
+ten-second `statement_timeout` and takes `SHARE` on `trading.positions` before
+revocation. The lock intentionally conflicts with a pre-revocation
+`ROW EXCLUSIVE` writer so a position update authorized before the cutover
+cannot commit afterward. A `55P03` failure is a definite pre-commit rollback.
+Before retrying, prove the filename is absent, the complete raw position table
+and column ACL is unchanged, the canonical explicit-column position digest
+and filenode are unchanged, and the fill digest, filenode, and raw ACL are
+unchanged. Drain or roll back the writer, then retry the whole migration.
+
+After commit, verify the exact filename/checksum and complete raw position
+table plus column ACL. The only explicit non-owner privileges are
+non-grantable API `SELECT` and engine `SELECT, INSERT, UPDATE`. Prove API
+`INSERT`, `UPDATE`, `DELETE`, and `TRUNCATE` remain denied; engine `DELETE` and
+`TRUNCATE` remain denied; and one API-role statement can read both positions
+and fills. A prior binary started cold must reject the newer migration tip.
+
+A connection loss or missing `COMMIT` acknowledgment is an unknown outcome,
+not proof of rollback and not authorization to retry. Keep every runtime
+stopped and reconnect with the migrator identity. Compare the exact
+filename/checksum, complete raw position ACL, canonical position digest and
+filenode, and unchanged fill digest, filenode, and ACL. A journal, ACL, or
+relation-state disagreement remains halted for a reviewed forward repair or a
+complete verified pre-migration restore. Never delete the journal row, edit
+frozen migration bytes, reset a persistent database, or selectively restore
+ACL catalogs.
+
 ### Phase 3 command market-sequence binding upgrade
 
 Migration
