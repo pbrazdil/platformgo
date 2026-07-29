@@ -1186,6 +1186,7 @@ func (store *CompatibilityStore) LatestFillExecution(
 		intentID             *string
 		intentAccountID      *string
 		intentCommandAccount *string
+		registeredScale      *int16
 	)
 	if err := store.pool.QueryRow(ctx, `
 		SELECT
@@ -1196,6 +1197,7 @@ func (store *CompatibilityStore) LatestFillExecution(
 			fill.position_effect,
 			trim_scale(fill.realized_pnl)::text,
 			fill.settlement_currency,
+			currency_scale.scale,
 			trim_scale(fill.effective_leverage)::text,
 			fill.logical_time,
 			orders.account_id,
@@ -1210,6 +1212,8 @@ func (store *CompatibilityStore) LatestFillExecution(
 		    ON intent.order_id = fill.order_id
 		  LEFT JOIN trading.commands AS intent_command
 		    ON intent_command.command_id = intent.command_id
+		  LEFT JOIN trading.currency_scales AS currency_scale
+		    ON currency_scale.currency = fill.settlement_currency
 		 WHERE fill.account_id = $1
 		 ORDER BY fill.logical_time DESC, fill.fill_id DESC
 		 LIMIT 1`,
@@ -1222,6 +1226,7 @@ func (store *CompatibilityStore) LatestFillExecution(
 		&view.TradeType,
 		&view.RealizedPnL,
 		&view.SettlementCurrency,
+		&registeredScale,
 		&view.Leverage,
 		&logicalTime,
 		&orderAccountID,
@@ -1241,6 +1246,12 @@ func (store *CompatibilityStore) LatestFillExecution(
 	if (view.RealizedPnL == nil) != (view.SettlementCurrency == nil) {
 		return edge.FillExecutionView{}, fmt.Errorf(
 			"read latest fill execution: incomplete realized PnL",
+		)
+	}
+	if err := validateFillRealizedMoney(&view, registeredScale); err != nil {
+		return edge.FillExecutionView{}, fmt.Errorf(
+			"read latest fill execution: %w",
+			err,
 		)
 	}
 	reason, err := fillExecutionReason(
@@ -1263,15 +1274,8 @@ func (store *CompatibilityStore) LatestFillExecution(
 	return view, nil
 }
 
-// FillExecutionFilter is the source-proven subset of fill-history filters.
-// TradeID names the external contract field that filters the durable fill ID.
-type FillExecutionFilter struct {
-	Side      string
-	TradeID   string
-	Limit     int
-	Cursor    string
-	Direction string
-}
+// FillExecutionFilter remains an alias for callers of the pre-HTTP store API.
+type FillExecutionFilter = edge.FillExecutionFilter
 
 type fillHistoryCursor struct {
 	logicalTime int64
@@ -1359,6 +1363,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			page.position_effect,
 			trim_scale(page.realized_pnl)::text,
 			page.settlement_currency,
+			currency_scale.scale,
 			trim_scale(page.effective_leverage)::text,
 			page.logical_time,
 			orders.account_id,
@@ -1375,6 +1380,8 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		    ON intent.order_id = page.order_id
 		  LEFT JOIN trading.commands AS intent_command
 		    ON intent_command.command_id = intent.command_id
+		  LEFT JOIN trading.currency_scales AS currency_scale
+		    ON currency_scale.currency = page.settlement_currency
 		 ORDER BY page.logical_time DESC NULLS LAST,
 		          page.fill_id DESC NULLS LAST`
 	args := []any{
@@ -1419,6 +1426,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				page.position_effect,
 				trim_scale(page.realized_pnl)::text,
 				page.settlement_currency,
+				currency_scale.scale,
 				trim_scale(page.effective_leverage)::text,
 				page.logical_time,
 				orders.account_id,
@@ -1435,6 +1443,8 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			    ON intent.order_id = page.order_id
 			  LEFT JOIN trading.commands AS intent_command
 			    ON intent_command.command_id = intent.command_id
+			  LEFT JOIN trading.currency_scales AS currency_scale
+			    ON currency_scale.currency = page.settlement_currency
 			 ORDER BY page.logical_time DESC NULLS LAST,
 			          page.fill_id DESC NULLS LAST`
 		if !forward {
@@ -1473,6 +1483,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 					page.position_effect,
 					trim_scale(page.realized_pnl)::text,
 					page.settlement_currency,
+					currency_scale.scale,
 					trim_scale(page.effective_leverage)::text,
 					page.logical_time,
 					orders.account_id,
@@ -1489,6 +1500,8 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				    ON intent.order_id = page.order_id
 				  LEFT JOIN trading.commands AS intent_command
 				    ON intent_command.command_id = intent.command_id
+				  LEFT JOIN trading.currency_scales AS currency_scale
+				    ON currency_scale.currency = page.settlement_currency
 				 ORDER BY page.logical_time ASC NULLS LAST,
 				          page.fill_id ASC NULLS LAST`
 		}
@@ -1511,20 +1524,21 @@ func (store *CompatibilityStore) FilterFillExecutions(
 	for rows.Next() {
 		var row fillHistoryRow
 		var (
-			fillID         *string
-			orderID        *string
-			positionID     *string
-			side           *string
-			positionEffect *string
-			realizedPnL    *string
-			settlement     *string
-			leverage       *string
-			logicalTime    *int64
-			orderAccount   *string
-			bracketLeg     *string
-			intentID       *string
-			intentAccount  *string
-			commandAccount *string
+			fillID          *string
+			orderID         *string
+			positionID      *string
+			side            *string
+			positionEffect  *string
+			realizedPnL     *string
+			settlement      *string
+			registeredScale *int16
+			leverage        *string
+			logicalTime     *int64
+			orderAccount    *string
+			bracketLeg      *string
+			intentID        *string
+			intentAccount   *string
+			commandAccount  *string
 		)
 		if scanErr := rows.Scan(
 			&fillID,
@@ -1534,6 +1548,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			&positionEffect,
 			&realizedPnL,
 			&settlement,
+			&registeredScale,
 			&leverage,
 			&logicalTime,
 			&orderAccount,
@@ -1573,6 +1588,15 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			(row.view.SettlementCurrency == nil) {
 			return edge.FillExecutionPage{}, fmt.Errorf(
 				"scan filtered fill execution: incomplete realized PnL",
+			)
+		}
+		if moneyErr := validateFillRealizedMoney(
+			&row.view,
+			registeredScale,
+		); moneyErr != nil {
+			return edge.FillExecutionPage{}, fmt.Errorf(
+				"scan filtered fill execution: %w",
+				moneyErr,
 			)
 		}
 		if tradeTypeErr := validateFillTradeType(
@@ -1641,6 +1665,15 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		}
 	}
 	return page, nil
+}
+
+// Fills returns the accepted account-scoped HTTP fill projection.
+func (store *CompatibilityStore) Fills(
+	ctx context.Context,
+	accountID string,
+	filter edge.FillExecutionFilter,
+) (edge.FillExecutionPage, error) {
+	return store.FilterFillExecutions(ctx, accountID, filter)
 }
 
 func encodeFillHistoryCursor(row fillHistoryRow) string {
@@ -1740,6 +1773,36 @@ func validateFillTradeType(tradeType string) error {
 	default:
 		return fmt.Errorf("unsupported durable fill position effect %q", tradeType)
 	}
+}
+
+func validateFillRealizedMoney(
+	view *edge.FillExecutionView,
+	registeredScale *int16,
+) error {
+	if view.RealizedPnL == nil && view.SettlementCurrency == nil {
+		return nil
+	}
+	if view.RealizedPnL == nil ||
+		view.SettlementCurrency == nil ||
+		registeredScale == nil ||
+		*registeredScale < 0 ||
+		*registeredScale > 18 {
+		return errors.New("realized PnL currency authority is unavailable")
+	}
+	currency, err := domain.NewCurrency(
+		*view.SettlementCurrency,
+		uint8(*registeredScale),
+	)
+	if err != nil {
+		return fmt.Errorf("invalid realized PnL currency: %w", err)
+	}
+	money, err := domain.NewMoney(*view.RealizedPnL, currency)
+	if err != nil {
+		return fmt.Errorf("invalid realized PnL: %w", err)
+	}
+	canonical := money.Decimal().String()
+	view.RealizedPnL = &canonical
+	return nil
 }
 
 // Funding returns one exact, newest-first account funding page.

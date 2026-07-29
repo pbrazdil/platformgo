@@ -1,15 +1,21 @@
 package postgres_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
+	"github.com/upcomers-org/platformgo/internal/application"
+	"github.com/upcomers-org/platformgo/internal/edge"
 	"github.com/upcomers-org/platformgo/internal/engine"
 	"github.com/upcomers-org/platformgo/testkit"
 )
@@ -145,6 +151,141 @@ func TestFillFilledAtIsEngineExecutionTimeNotInsertNow(t *testing.T) {
 	}
 }
 
+func TestFilterFillExecutionsRejectsRealizedPnLBeyondRegisteredCurrencyScale(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("migrate fill money-scale database: %v", err)
+	}
+
+	const accountID = "urn:xb:account:fill-money-scale"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO identity.users (
+			user_id, login, normalized_login
+		) VALUES (
+			'urn:xb:user:fill-money-scale',
+			'fill-money-scale',
+			'fill-money-scale'
+		);
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'BTC-PERP', 1, 2, 3, 'USDC', 2,
+			0.1, 0.05, 10, -0.0001, 0.0005
+		);
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:fill-money-scale', 'NETTING');
+		INSERT INTO trading.orders (
+			order_id, account_id, instrument_id, side, order_type,
+			time_in_force, status, quantity, filled_quantity,
+			average_fill_price, triggered, reduce_only, has_rested,
+			version
+		) VALUES (
+			'019fa844-26c0-7000-8000-000000000201',
+			'urn:xb:account:fill-money-scale',
+			'BTC-PERP', 'SELL', 'MARKET', 'IOC', 'FILLED',
+			0.01, 0.01, 60000, false, true, false, 1
+		);
+		INSERT INTO trading.fills (
+			fill_id, order_id, input_id, account_id, instrument_id,
+			side, price, quantity, position_id, position_effect,
+			realized_pnl, settlement_currency, liquidity_side,
+			logical_time
+		) VALUES (
+			'019fa844-26c0-7000-8000-000000000202',
+			'019fa844-26c0-7000-8000-000000000201',
+			'019fa844-26c0-7000-8000-000000000203',
+			'urn:xb:account:fill-money-scale',
+			'BTC-PERP', 'SELL', 60000, 0.01,
+			'019fa844-26c0-7000-8000-000000000204',
+			'close', 1.234, 'USDC', 'TAKER',
+			1784901600000000202
+		)`); err != nil {
+		t.Fatalf("seed over-scale realized PnL: %v", err)
+	}
+
+	apiPool := runtimeRoleLoginPool(
+		t,
+		pool,
+		"platformgo_fill_money_scale_api_login",
+		"platformgo_api",
+	)
+	page, err := platformpostgres.NewCompatibilityStore(apiPool).
+		FilterFillExecutions(
+			ctx,
+			accountID,
+			platformpostgres.FillExecutionFilter{Limit: 10},
+		)
+	if err == nil || len(page.Items) != 0 || page.Total != 0 {
+		t.Fatalf(
+			"over-scale fill page = %#v, err=%v; want fail-closed zero page",
+			page,
+			err,
+		)
+	}
+
+	authenticator, err := edge.NewHMACAuthenticator(
+		edge.HMACAuthenticatorConfig{
+			ClientTokenSecret: []byte(
+				"phase3-fill-http-money-secret-0123456789abcdef",
+			),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create fill HTTP authenticator: %v", err)
+	}
+	identity, err := application.NewIdentity(
+		platformpostgres.NewCompatibilityStore(apiPool),
+		authenticator,
+		application.IdentityConfig{
+			Entropy: bytes.NewReader(bytes.Repeat([]byte{29}, 64)),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create fill HTTP identity: %v", err)
+	}
+	token, err := authenticator.SignClientToken(edge.ClientClaims{
+		Subject:  "urn:xb:user:fill-money-scale",
+		Audience: string(edge.AudienceClient),
+		Expires:  4_102_444_800,
+		Accounts: []string{accountID},
+	})
+	if err != nil {
+		t.Fatalf("sign fill HTTP token: %v", err)
+	}
+	server := edge.NewServer(edge.ServerConfig{
+		Authenticator: authenticator,
+		Identity:      identity,
+		Trading:       platformpostgres.NewCompatibilityStore(apiPool),
+	}).Handler()
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/v1/accounts/"+accountID+"/fills",
+		nil,
+	)
+	request.Header.Set("authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable ||
+		strings.Contains(response.Body.String(), "1.234") ||
+		strings.Contains(response.Body.String(), `"items"`) {
+		t.Fatalf(
+			"over-scale HTTP response status=%d body=%s; want opaque 503",
+			response.Code,
+			response.Body.String(),
+		)
+	}
+}
+
 // Ported from:
 //
 //	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
@@ -154,9 +295,8 @@ func TestFillFilledAtIsEngineExecutionTimeNotInsertNow(t *testing.T) {
 // Adaptations:
 //   - Deterministic UUID fill IDs and immutable engine fills replace the
 //     legacy mirror's free-form fill IDs.
-//   - The current narrow Go fill projection remains internal; this slice
-//     proves its pagination boundary without activating the inventory-only
-//     external fills route or inventing unavailable catalog metadata.
+//   - The current narrow Go fill projection is exposed through its reviewed
+//     owner-scoped HTTP route without inventing unavailable catalog metadata.
 //   - An opaque keyset cursor replaces the source query dispatcher's cursor.
 //
 // Assertions preserved:
@@ -189,6 +329,13 @@ func TestFillsHistoryReadsAndPaginates(t *testing.T) {
 		"019fa844-26c0-7000-8000-000000000103",
 	}
 	if _, err := pool.Exec(ctx, `
+		INSERT INTO identity.users (
+			user_id, login, normalized_login
+		) VALUES (
+			'urn:xb:user:fill-pagination',
+			'fill-pagination',
+			'fill-pagination'
+		);
 		INSERT INTO trading.instruments (
 			instrument_id, revision, price_scale, quantity_scale,
 			settlement_currency, settlement_currency_scale,
@@ -244,6 +391,35 @@ func TestFillsHistoryReadsAndPaginates(t *testing.T) {
 				'increase', 'TAKER', 1784901600000000000
 			)`); err != nil {
 		t.Fatalf("seed durable fill pagination: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.accounts (account_id, oms_mode)
+		VALUES ('urn:xb:account:fill-pagination-other', 'NETTING');
+		INSERT INTO trading.orders (
+			order_id, account_id, instrument_id, side, order_type,
+			time_in_force, status, quantity, filled_quantity,
+			average_fill_price, triggered, reduce_only, has_rested,
+			version
+		) VALUES (
+			'019fa844-26c0-7000-8000-000000000141',
+			'urn:xb:account:fill-pagination-other',
+			'BTC-PERP', 'BUY', 'MARKET', 'IOC', 'FILLED',
+			0.01, 0.01, 60000, false, false, false, 1
+		);
+		INSERT INTO trading.fills (
+			fill_id, order_id, input_id, account_id, instrument_id,
+			side, price, quantity, position_id, position_effect,
+			liquidity_side, logical_time
+		) VALUES (
+			'019fa844-26c0-7000-8000-000000000142',
+			'019fa844-26c0-7000-8000-000000000141',
+			'019fa844-26c0-7000-8000-000000000143',
+			'urn:xb:account:fill-pagination-other',
+			'BTC-PERP', 'BUY', 60000, 0.01,
+			'019fa844-26c0-7000-8000-000000000144',
+			'open', 'TAKER', 1784901600000000000
+		)`); err != nil {
+		t.Fatalf("seed foreign fill pagination authority: %v", err)
 	}
 
 	apiPool := runtimeRoleLoginPool(
@@ -405,6 +581,201 @@ func TestFillsHistoryReadsAndPaginates(t *testing.T) {
 	)
 	if err == nil || len(invalid.Items) != 0 || invalid.Total != 0 {
 		t.Fatalf("invalid fill cursor page = %#v, error %v", invalid, err)
+	}
+
+	authenticator, err := edge.NewHMACAuthenticator(
+		edge.HMACAuthenticatorConfig{
+			ClientTokenSecret: []byte(
+				"phase3-fill-http-page-secret-0123456789abcdef",
+			),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create fill page authenticator: %v", err)
+	}
+	identity, err := application.NewIdentity(
+		store,
+		authenticator,
+		application.IdentityConfig{
+			Entropy: bytes.NewReader(bytes.Repeat([]byte{31}, 64)),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create fill page identity: %v", err)
+	}
+	token, err := authenticator.SignClientToken(edge.ClientClaims{
+		Subject:  "urn:xb:user:fill-pagination",
+		Audience: string(edge.AudienceClient),
+		Expires:  4_102_444_800,
+		Accounts: []string{accountID},
+	})
+	if err != nil {
+		t.Fatalf("sign fill page token: %v", err)
+	}
+	server := edge.NewServer(edge.ServerConfig{
+		Authenticator: authenticator,
+		Identity:      identity,
+		Trading:       platformpostgres.NewCompatibilityStore(apiPool),
+	}).Handler()
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/v1/accounts/"+accountID+"/fills?side=buy&limit=2",
+		nil,
+	)
+	request.Header.Set("authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf(
+			"fill page HTTP status=%d body=%s",
+			response.Code,
+			response.Body.String(),
+		)
+	}
+	var httpPage edge.FillExecutionPage
+	if err := json.Unmarshal(response.Body.Bytes(), &httpPage); err != nil {
+		t.Fatalf("decode fill page HTTP body: %v", err)
+	}
+	if len(httpPage.Items) != 2 ||
+		httpPage.Total != 3 ||
+		httpPage.NextCursor == nil ||
+		httpPage.Items[0].FillID != fillIDs[2] ||
+		httpPage.Items[1].FillID != fillIDs[1] {
+		t.Fatalf("fill page HTTP body = %#v", httpPage)
+	}
+	secondRequest := httptest.NewRequest(
+		http.MethodGet,
+		"/v1/accounts/"+accountID+"/fills?side=buy&limit=2&cursor="+
+			*httpPage.NextCursor,
+		nil,
+	)
+	secondRequest.Header.Set("authorization", "Bearer "+token)
+	secondResponse := httptest.NewRecorder()
+	server.ServeHTTP(secondResponse, secondRequest)
+	if secondResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"second fill page HTTP status=%d body=%s",
+			secondResponse.Code,
+			secondResponse.Body.String(),
+		)
+	}
+	var secondHTTPPage edge.FillExecutionPage
+	if err := json.Unmarshal(
+		secondResponse.Body.Bytes(),
+		&secondHTTPPage,
+	); err != nil {
+		t.Fatalf("decode second fill page HTTP body: %v", err)
+	}
+	if len(secondHTTPPage.Items) != 1 ||
+		secondHTTPPage.Items[0].FillID != fillIDs[0] ||
+		secondHTTPPage.Total != 3 ||
+		secondHTTPPage.PrevCursor == nil {
+		t.Fatalf("second fill page HTTP body = %#v", secondHTTPPage)
+	}
+
+	foreign := httptest.NewRequest(
+		http.MethodGet,
+		"/v1/accounts/urn:xb:account:fill-pagination-other/fills",
+		nil,
+	)
+	foreign.Header.Set("authorization", "Bearer "+token)
+	foreignResponse := httptest.NewRecorder()
+	server.ServeHTTP(foreignResponse, foreign)
+	if foreignResponse.Code != http.StatusForbidden ||
+		strings.Contains(foreignResponse.Body.String(), "000000000142") {
+		t.Fatalf(
+			"foreign fill HTTP status=%d body=%s",
+			foreignResponse.Code,
+			foreignResponse.Body.String(),
+		)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.fills (
+			fill_id, order_id, input_id, account_id, instrument_id,
+			side, price, quantity, position_id, position_effect,
+			liquidity_side, logical_time
+		) VALUES (
+			'019fa844-26c0-7000-8000-000000000100',
+			'019fa844-26c0-7000-8000-000000000111',
+			'019fa844-26c0-7000-8000-000000000120',
+			'urn:xb:account:fill-pagination',
+			'BTC-PERP', 'BUY', 60000, 0.01,
+			'019fa844-26c0-7000-8000-000000000131',
+			'increase', 'TAKER', 1784901600000000000
+		)`); err != nil {
+		t.Fatalf("commit fill below existing cursor: %v", err)
+	}
+	movingContinuation, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{
+			Side:   "buy",
+			Limit:  10,
+			Cursor: *pageOne.NextCursor,
+		},
+	)
+	if err != nil {
+		t.Fatalf("continue moving fill page: %v", err)
+	}
+	if movingContinuation.Total != 4 ||
+		len(movingContinuation.Items) != 2 ||
+		movingContinuation.Items[0].FillID != fillIDs[0] ||
+		movingContinuation.Items[1].FillID !=
+			"019fa844-26c0-7000-8000-000000000100" {
+		t.Fatalf("moving continuation after older commit = %#v", movingContinuation)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.fills (
+			fill_id, order_id, input_id, account_id, instrument_id,
+			side, price, quantity, position_id, position_effect,
+			liquidity_side, logical_time
+		) VALUES (
+			'019fa844-26c0-7000-8000-000000000104',
+			'019fa844-26c0-7000-8000-000000000111',
+			'019fa844-26c0-7000-8000-000000000124',
+			'urn:xb:account:fill-pagination',
+			'BTC-PERP', 'BUY', 60000, 0.01,
+			'019fa844-26c0-7000-8000-000000000131',
+			'increase', 'TAKER', 1784901600000000000
+		)`); err != nil {
+		t.Fatalf("commit fill above existing cursor: %v", err)
+	}
+	movingContinuation, err = store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{
+			Side:   "buy",
+			Limit:  10,
+			Cursor: *pageOne.NextCursor,
+		},
+	)
+	if err != nil {
+		t.Fatalf("continue moving page after newer commit: %v", err)
+	}
+	if movingContinuation.Total != 5 ||
+		len(movingContinuation.Items) != 2 {
+		t.Fatalf("moving continuation after newer commit = %#v", movingContinuation)
+	}
+	for _, fill := range movingContinuation.Items {
+		if fill.FillID == "019fa844-26c0-7000-8000-000000000104" {
+			t.Fatalf("newer fill crossed prior cursor: %#v", movingContinuation)
+		}
+	}
+	freshMovingPage, err := store.FilterFillExecutions(
+		ctx,
+		accountID,
+		platformpostgres.FillExecutionFilter{Side: "buy", Limit: 1},
+	)
+	if err != nil {
+		t.Fatalf("reload moving first page: %v", err)
+	}
+	if freshMovingPage.Total != 5 ||
+		len(freshMovingPage.Items) != 1 ||
+		freshMovingPage.Items[0].FillID !=
+			"019fa844-26c0-7000-8000-000000000104" {
+		t.Fatalf("fresh moving page = %#v", freshMovingPage)
 	}
 }
 
