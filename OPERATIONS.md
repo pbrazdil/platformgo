@@ -242,6 +242,49 @@ disagreement requires a reviewed forward repair or complete verified
 pre-migration restore. Never delete the journal row, edit frozen migration
 bytes, reset a persistent database, or selectively restore ACL catalogs.
 
+### Phase 3 durable-outbox ACL upgrade
+
+Migration `20260729000300_phase3_outbox_acl.up.sql` is a forward-only,
+ACL-only no-overlap cutover from the exact 32-file risk-monitor tip to the
+33-file outbox-ACL tip. Stop and drain API admission, the engine, and the
+outbox publisher before applying it. Keep every runtime stopped until the
+exact journal/checksum, complete outbox table and column ACL, outbox relation
+state, existing command-binding triggers, owner defaults, and neighboring
+inbox ACL are classified.
+
+Apply under the migrator's five-second `lock_timeout`; the SQL sets a
+ten-second `statement_timeout` and takes `SHARE` on `messaging.outbox` before
+revocation. That lock intentionally conflicts with a pre-revocation
+`ROW EXCLUSIVE` writer. SQLSTATE `55P03` is a definite pre-commit rollback:
+prove the new filename is absent and the prior ACL, canonical explicit-column
+row digest, relation filenode, indexes, constraints, triggers, defaults, and
+inbox ACL are unchanged. Drain or roll back the writer, then retry the whole
+migration.
+
+After commit, verify migration count 33 and the exact filename/checksum. The
+only explicit non-owner privileges on `messaging.outbox` are:
+
+- API table `SELECT` plus column `INSERT` on `message_id`, `subject`,
+  `schema_version`, and `payload`;
+- engine table `SELECT, INSERT`;
+- outbox table `SELECT` plus column `UPDATE` on `attempts`,
+  `next_attempt_at`, `claimed_at`, `published_at`, `publish_sequence`, and
+  `last_error`.
+
+Every grant is non-grantable. Prove all unlisted roles, `PUBLIC`, dependent
+grantees, and unintended operations receive SQLSTATE `42501`; also prove each
+intended role can still perform only its production operation. This migration
+does not add a notification trigger, change the current 100ms worker poll, or
+change producer, claim, ordering, retry, acknowledgment, or publication
+semantics.
+
+A connection loss or missing `COMMIT` acknowledgment is an unknown outcome.
+Keep every runtime stopped and compare the exact filename/checksum and 33-file
+tip with the complete raw ACL and preserved relation/catalog evidence above.
+A mixed state requires a reviewed forward repair or a complete verified
+pre-migration restore. Never delete the journal row, edit frozen migration
+bytes, reset a persistent database, or selectively restore ACL catalogs.
+
 ### Phase 3 command market-sequence binding upgrade
 
 Migration
