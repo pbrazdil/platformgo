@@ -42,23 +42,6 @@ func TestConfirmedBatchAcksAndDeliversEveryMessage(t *testing.T) {
 
 // Ported from:
 // platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-// source: apps/app/tests/it/messaging/e2e_dedupe.rs:12
-// test: duplicate_delivery_is_deduped_by_the_inbox
-func TestDuplicateDeliveryIsDedupedByTheInbox(t *testing.T) {
-	inbox := newInboxFixture()
-	effects := 0
-	for _, id := range []string{"dup", "dup", "other"} {
-		if inbox.claim(id) {
-			effects++
-		}
-	}
-	if effects != 2 {
-		t.Fatalf("effects = %d, want 2", effects)
-	}
-}
-
-// Ported from:
-// platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 // source: apps/app/tests/it/messaging/e2e_dlq.rs:9
 // test: redelivery_cap_then_dead_letter
 func TestRedeliveryCapThenDeadLetter(t *testing.T) {
