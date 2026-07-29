@@ -121,6 +121,12 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 	if !contains(manifest.ImplementedHTTPRoutes, "POST /v1/me/api-keys") {
 		t.Fatal("POST /v1/me/api-keys missing from compatibility manifest")
 	}
+	if !contains(
+		manifest.ImplementedHTTPRoutes,
+		"GET /v1/accounts/{accountId}/fills",
+	) {
+		t.Fatal("GET account fills missing from compatibility manifest")
+	}
 }
 
 func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
@@ -172,6 +178,49 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 		t.Fatalf("funding contract status = %v", funding["x-platformgo-contract-status"])
 	}
 	assertOperationSecurity(t, funding, "bearer")
+	fills := assertMethod(t, client, "/v1/accounts/{accountId}/fills", "get")
+	assertPointer(t, client, "components", "schemas", "FillExecutionView")
+	assertPointer(t, client, "components", "schemas", "FillExecutionPage")
+	assertResponse(t, fills, "200")
+	assertResponse(t, fills, "400")
+	assertResponse(t, fills, "401")
+	assertResponse(t, fills, "403")
+	assertResponse(t, fills, "429")
+	assertResponse(t, fills, "503")
+	if fills["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
+		t.Fatalf("fills contract status = %v", fills["x-platformgo-contract-status"])
+	}
+	assertOperationSecurity(t, fills, "bearer")
+	assertOperationParameters(
+		t,
+		fills,
+		"accountId",
+		"limit",
+		"cursor",
+		"direction",
+		"side",
+		"tradeId",
+	)
+	schemas := client["components"].(map[string]any)["schemas"].(map[string]any)
+	assertRequiredFields(
+		t,
+		schemas["FillExecutionView"].(map[string]any),
+		"fillId",
+		"orderId",
+		"positionId",
+		"side",
+		"tradeType",
+		"reason",
+		"realizedPnl",
+		"settlementCurrency",
+		"filledAt",
+	)
+	assertRequiredFields(
+		t,
+		schemas["FillExecutionPage"].(map[string]any),
+		"items",
+		"total",
+	)
 	order := assertMethod(t, client, "/v1/accounts/{accountId}/orders", "post")
 	assertIdempotencyHeader(t, order)
 
@@ -193,6 +242,57 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 	}
 	assertIdempotencyHeader(t, echo)
 	assertOptionalRetryAfterHeader(t, echo)
+}
+
+func assertOperationParameters(
+	t *testing.T,
+	operation map[string]any,
+	wanted ...string,
+) {
+	t.Helper()
+	raw, ok := operation["parameters"].([]any)
+	if !ok {
+		t.Fatalf("operation parameters = %v", operation["parameters"])
+	}
+	found := make(map[string]bool, len(raw))
+	for _, value := range raw {
+		parameter, ok := value.(map[string]any)
+		if !ok {
+			t.Fatalf("operation parameter = %v", value)
+		}
+		name, _ := parameter["name"].(string)
+		found[name] = true
+	}
+	for _, name := range wanted {
+		if !found[name] {
+			t.Fatalf("operation parameter %q missing from %v", name, found)
+		}
+	}
+}
+
+func assertRequiredFields(
+	t *testing.T,
+	schema map[string]any,
+	wanted ...string,
+) {
+	t.Helper()
+	raw, ok := schema["required"].([]any)
+	if !ok {
+		t.Fatalf("schema required fields = %v", schema["required"])
+	}
+	found := make(map[string]bool, len(raw))
+	for _, value := range raw {
+		name, ok := value.(string)
+		if !ok {
+			t.Fatalf("schema required field = %v", value)
+		}
+		found[name] = true
+	}
+	for _, name := range wanted {
+		if !found[name] {
+			t.Fatalf("required field %q missing from %v", name, found)
+		}
+	}
 }
 
 func assertIdempotencyHeader(t *testing.T, operation map[string]any) {
