@@ -1,44 +1,6 @@
 package platform
 
-import (
-	"reflect"
-	"testing"
-)
-
-// Ported from:
-// platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-// source: apps/app/tests/it/messaging/e2e_bus.rs:11
-// test: publish_subscribe_roundtrip_through_kernel_init
-func TestPublishSubscribeRoundtripThroughKernelInit(t *testing.T) {
-	bus := newMessageBus()
-	id := bus.publish("test.order.created", []byte(`"payload"`))
-	message, ok := bus.next()
-	if !ok || message.ID != id || message.Topic != "test.order.created" {
-		t.Fatalf("message = %#v, present=%v", message, ok)
-	}
-}
-
-// Ported from:
-// platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-// source: apps/app/tests/it/messaging/e2e_bus.rs:34
-// test: confirmed_batch_acks_and_delivers_every_message
-func TestConfirmedBatchAcksAndDeliversEveryMessage(t *testing.T) {
-	bus := newMessageBus()
-	ids := bus.publishBatch("test.batch.event", [][]byte{
-		[]byte("event-0"), []byte("event-1"), []byte("event-2"),
-	})
-	var delivered []string
-	for {
-		message, ok := bus.next()
-		if !ok {
-			break
-		}
-		delivered = append(delivered, message.ID)
-	}
-	if !reflect.DeepEqual(delivered, ids) {
-		t.Fatalf("delivered IDs = %v, confirmed IDs = %v", delivered, ids)
-	}
-}
+import "testing"
 
 // Ported from:
 // platform: 50141367492be46ebf5623f6191a14b94af2f2bd

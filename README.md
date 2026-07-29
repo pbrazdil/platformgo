@@ -49,6 +49,18 @@ effects with two inbox receipts, and are synchronously acknowledged only after
 the inbox transaction returns. This does not claim a generic production
 projector, transport-level exactly-once delivery, restart recovery, conflicting
 payload detection, or idempotency of any economic effect.
+The pinned bus roundtrip and confirmed-batch behaviors are separately accepted
+only at a non-economic JetStream adapter boundary. One test-constructed
+operational message round-trips through the production Publisher, while three
+distinct operational messages are published sequentially, receive positive
+broker acknowledgments, deliver the exact expected IDs, subjects, and payloads,
+and are synchronously acknowledged. The directly constructed `OutboxMessage`
+values are test fixtures; this acceptance neither proves nor authorizes
+production publication without a committed PostgreSQL outbox. It does not
+establish an atomic batch API, delivery ordering, outbox transactions or
+marking, partial-failure or retry semantics, unknown-outcome handling,
+redelivery, inbox or business effects, restart recovery, exactly-once
+transport, runtime composition, or economic idempotency.
 Exact client funding history is also landed with immutable PostgreSQL
 projection integrity, nanosecond keyset pagination, exact aggregation,
 least-privilege reads, populated-schema upgrade coverage, and separate
