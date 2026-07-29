@@ -41,6 +41,14 @@ the production PostgreSQL store and real JetStream: one direct batch publishes
 one pending operational message with its exact subject and stable outbox ID,
 records the JetStream acknowledgment sequence, and permits a synchronously
 confirmed durable-consumer acknowledgment.
+The pinned inbox-deduplication behavior is separately accepted at its narrow
+non-economic boundary. Three real JetStream deliveries carrying application
+IDs `dup`, `dup`, and `other` pass through one production PostgreSQL
+`MessagingStore.ApplyInbox` consumer scope, commit exactly two test projection
+effects with two inbox receipts, and are synchronously acknowledged only after
+the inbox transaction returns. This does not claim a generic production
+projector, transport-level exactly-once delivery, restart recovery, conflicting
+payload detection, or idempotency of any economic effect.
 Exact client funding history is also landed with immutable PostgreSQL
 projection integrity, nanosecond keyset pagination, exact aggregation,
 least-privilege reads, populated-schema upgrade coverage, and separate
