@@ -285,6 +285,41 @@ A mixed state requires a reviewed forward repair or a complete verified
 pre-migration restore. Never delete the journal row, edit frozen migration
 bytes, reset a persistent database, or selectively restore ACL catalogs.
 
+### Phase 3 command-admission ACL and truncate upgrade
+
+Migration `20260729000400_phase3_command_admission_acl.up.sql` is a
+forward-only, ACL/trigger-only no-overlap cutover from the exact 33-file
+outbox-ACL tip to the 34-file command-admission-ACL tip. Stop and drain API
+admission and the engine before applying it; keep the outbox worker stopped
+until the complete command ACL has been verified.
+
+The migration runs under the migrator's five-second `lock_timeout` and its own
+ten-second `statement_timeout`. It acquires the configured shard's engine-owner
+advisory lock, then the exclusive command-admission gate, then `SHARE` on
+`trading.commands`, `trading.idempotency_records`, and
+`trading.command_replay_responses` in that order. SQLSTATE `55P03` is a
+definite pre-commit rollback: prove the new journal row is absent and all three
+relations retain their prior ACLs, triggers, explicit-column digests, and
+filenodes. Drain or roll back the blocker, then retry the whole migration.
+
+After commit, verify migration count 34 and the exact filename/checksum. Verify
+all three enabled `BEFORE TRUNCATE FOR EACH STATEMENT` guards, owner
+`TRUNCATE ... CASCADE` rejection with SQLSTATE `55000`, and the exact
+non-grantable runtime allowlist documented in `DATABASE.md`. Prove `PUBLIC`,
+unexpected roles, and delegated grant chains have no table or column
+privileges, while API admission, engine completion, and outbox command reads
+still succeed. Confirm rows, filenodes, neighboring order intents/outbox rows,
+owner defaults, and role memberships are unchanged.
+
+A connection loss or missing `COMMIT` acknowledgment is an unknown outcome,
+not proof of rollback. Keep every runtime stopped and reconcile the exact
+filename/checksum, 34-file tip, all raw ACLs and grant options, the three
+truncate trigger definitions, relation digests/filenodes, neighboring
+admission state, and owner defaults. A mixed state requires a reviewed forward
+repair or complete verified pre-migration restore. Never edit the frozen
+migration, delete its journal row, reset a persistent database, or selectively
+restore ACL catalogs.
+
 ### Phase 3 command market-sequence binding upgrade
 
 Migration

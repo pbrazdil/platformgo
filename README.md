@@ -94,6 +94,13 @@ and reconciliation. No additional engine/domain/realtime delivery effect is
 created beyond command admission and duplicate audit. This intentionally does
 not claim the pinned Rust
 synchronous application error, its `free margin` message, or an HTTP status.
+The current Phase 3 candidate also repairs command-admission replay authority:
+a forward-only PostgreSQL 19 Beta 2 migration fences engine and API writers,
+removes hostile inherited table and column privileges from commands,
+idempotency records, and immutable replay responses, and adds statement-level
+truncate guards without changing rows or relation storage. Focused hostile
+upgrade, rollback/retry, and executable replay-protection tests are green;
+full stable-candidate validation and exact-SHA review remain pending.
 Exact client funding history is also landed with immutable PostgreSQL
 projection integrity, nanosecond keyset pagination, exact aggregation,
 least-privilege reads, populated-schema upgrade coverage, and separate
@@ -497,6 +504,12 @@ This repository is not yet a production-capable replacement.
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
 ## Validation snapshot
+
+The current command-admission ACL candidate is green on focused PostgreSQL 19
+Beta 2 hostile-default, populated-upgrade, timeout/rollback/retry, executable
+replay-destruction, and least-privilege tests. Full stable-candidate policy,
+format, lint, vulnerability, test, race, repeat, exact-SHA specialist, hosted
+CI, and merge gates remain pending.
 
 The landed Phase 3 slices have passed repository-wide formatting, lint, unit,
 race, repeat, vulnerability, module-consistency, and policy checks. Historical

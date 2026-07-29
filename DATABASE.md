@@ -491,6 +491,45 @@ table and column ACL, canonical explicit-column outbox digest, relation
 filenode, indexes, constraints, triggers, owner defaults, and neighboring
 inbox ACL before retrying or selecting a binary.
 
+### Phase 3 command-admission ACL and truncate boundary
+
+Migration `20260729000400_phase3_command_admission_acl.up.sql` advances the
+immutable journal from the 33-file outbox-ACL tip to the 34-file
+command-admission-ACL tip. It repairs inherited hostile default privileges on
+`trading.commands`, `trading.idempotency_records`, and
+`trading.command_replay_responses`, and adds statement-level `BEFORE TRUNCATE`
+guards to all three durable authorities.
+
+The no-overlap cutover first acquires the configured shard's engine-owner
+advisory lock, then the exclusive command-admission gate, then `SHARE` relation
+locks in the fixed order commands, idempotency records, replay responses. This
+matches runtime drain and writer ownership: engine shutdown drains admission
+before releasing ownership, and no pre-revocation writer can commit after the
+ACL journal is published. The migrator's five-second `lock_timeout` is shorter
+than the migration's ten-second `statement_timeout`.
+
+The migration removes `PUBLIC`, every explicit non-owner table and column
+grant, all grant options, and dependent same-object grant chains. It restores
+only non-grantable production privileges:
+
+- `platformgo_api`: table `SELECT, INSERT` on all three relations;
+- `platformgo_engine`: table `SELECT` on all three relations, column `UPDATE`
+  on `commands(status, result, completed_at)`, and column `UPDATE` on
+  `idempotency_records(state, response_status, response_headers,
+  response_body)`;
+- `platformgo_outbox`: column `SELECT` on the seven immutable command-envelope
+  fields it reads.
+
+This is an ACL/trigger-catalog-only correction. It performs no row update,
+backfill, heap rewrite, runtime-schema revision change, role-membership change,
+or owner-default change. A definite pre-commit timeout leaves the 33-file
+journal, data, filenodes, triggers, and prior ACLs intact for a complete retry.
+A missing `COMMIT` acknowledgment is an unknown outcome: keep API, engine, and
+outbox runtimes stopped and reconcile the exact filename/checksum, 34-file
+tip, full raw table/column ACLs, all three truncate guards, explicit-column
+digests, relation filenodes, neighboring intent/outbox state, and owner
+defaults before retrying or selecting a binary.
+
 ### Phase 3 frozen-effective-leverage migration boundary
 
 Migration `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` is the
