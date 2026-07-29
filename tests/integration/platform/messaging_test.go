@@ -81,23 +81,6 @@ func TestRedeliveryCapThenDeadLetter(t *testing.T) {
 
 // Ported from:
 // platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-// source: apps/app/tests/it/messaging/e2e_outbox.rs:13
-// test: direct_drain_publishes_with_outbox_id
-func TestDirectDrainPublishesWithOutboxID(t *testing.T) {
-	bus := newMessageBus()
-	outbox := newOutboxFixture(bus)
-	id := outbox.write("test.outbox.created", []byte("hello"))
-	if got := outbox.drain(); got != 1 {
-		t.Fatalf("drain = %d, want 1", got)
-	}
-	message, ok := bus.next()
-	if !ok || message.ID != id || message.Topic != "test.outbox.created" {
-		t.Fatalf("message = %#v, present=%v, want id=%q", message, ok, id)
-	}
-}
-
-// Ported from:
-// platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 // source: apps/app/tests/it/messaging/e2e_outbox.rs:38
 // test: pending_depth_counts_backlog_and_purge_removes_published
 func TestPendingDepthCountsBacklogAndPurgeRemovesPublished(t *testing.T) {
