@@ -117,8 +117,9 @@ source-port acceptance.
 
 The fill-history foundation is also landed: its indexed newest-execution read
 preserves the immutable engine execution time exactly, and its first
-source-derived behavior has separate port-ledger acceptance. The external
-fills route remains inventory. The landed filtering slice adds account-scoped,
+source-derived behavior has separate port-ledger acceptance. The authenticated
+external fills route now separately exposes the accepted narrow current-Go
+projection. The landed filtering slice adds account-scoped,
 case-insensitive side filtering and exact fill-ID filtering over immutable
 fills, with a filtered total from the same PostgreSQL statement and separate
 port-ledger acceptance. Each fill's immutable order reference now also projects
@@ -289,7 +290,8 @@ fill, order, intent, and command accounts disagree or when a stored bracket leg
 is empty, padded, case-shifted, or unknown. Fresh least-privilege API-role
 connections return the same immutable reasons without changing any durable
 economic, audit, checkpoint, receipt, or outbox state. Its pinned source
-behavior is separately accepted; the external fills route remains inventory.
+behavior is separately accepted. The authenticated external route now
+separately exposes that same fail-closed reason projection.
 
 The landed idempotency scope-gate slice proves the pinned broker behavior
 through the production HTTP handler and PostgreSQL 19 Beta 2: an exact

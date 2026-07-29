@@ -127,6 +127,9 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 	) {
 		t.Fatal("GET account fills missing from compatibility manifest")
 	}
+	if !foundDeviations["fills-http-preserves-current-go-projection"] {
+		t.Fatal("implemented GET account fills must declare its projection deviation")
+	}
 }
 
 func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
