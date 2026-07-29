@@ -1,6 +1,7 @@
 package compatibility_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -38,6 +39,334 @@ func TestOutboxWorkerDrainsThenExitsOnShutdown(t *testing.T) {
 // test: worker_runs_outbox_publisher
 func TestWorkerRunsOutboxPublisherWithHealth(t *testing.T) {
 	runOutboxWorkerProof(t, []string{"outbox-publisher"}, true)
+}
+
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/messaging/e2e_outbox.rs:104
+//	test: coalesced_doorbell_still_drains_on_commit
+//
+// Adaptations:
+//   - The owner-approved Go behavior is the production outbox worker's fixed
+//     100 ms PostgreSQL poll; this test does not claim LISTEN/NOTIFY, 50 ms
+//     coalescing, or a configurable 30 s fallback poll.
+//   - The source bus subscription is replaced by a production JetStream
+//     durable consumer created before the PostgreSQL commit.
+//   - The source's generic topic is represented by the non-economic ops.v1
+//     namespace, and arbitrary startup sleeps are replaced by /readyz.
+//
+// Assertions preserved:
+//   - Committing one outbox row causes the running publisher to deliver it.
+//   - Delivery completes within the source's five-second receive bound and
+//     remains below the source's ten-second elapsed-time assertion.
+//   - The delivered message retains the committed row's exact ID and subject.
+//   - The durable consumer acknowledgment succeeds.
+//
+// Strengthening:
+//   - The real production worker records the positive JetStream sequence,
+//     clears its claim, and durably marks the same PostgreSQL row published.
+func TestCoalescedDoorbellStillDrainsOnCommit(t *testing.T) {
+	databaseURL := os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN")
+	natsURL := os.Getenv("PLATFORMGO_TEST_NATS_URL")
+	if databaseURL == "" || natsURL == "" {
+		t.Skip("PostgreSQL 19 and NATS integration URLs are required")
+	}
+	ctx, cancelTest := context.WithTimeout(
+		context.Background(),
+		30*time.Second,
+	)
+	defer cancelTest()
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	var postgresMajor int
+	if err := pool.QueryRow(ctx, `
+		SELECT current_setting('server_version_num')::integer / 10000`,
+	).Scan(&postgresMajor); err != nil {
+		t.Fatalf("read PostgreSQL version: %v", err)
+	}
+	if postgresMajor != 19 {
+		t.Fatalf("PostgreSQL major = %d, want 19", postgresMajor)
+	}
+	if err := resetCompatibilityDatabase(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if err := platformpostgres.NewMigrator(
+		pool,
+		migrations.Files,
+	).MigrateAndProvision(ctx, 7); err != nil {
+		t.Fatal(err)
+	}
+	outboxDatabaseURL := provisionRuntimeLogin(
+		t,
+		ctx,
+		pool,
+		databaseURL,
+		"platformgo_outbox",
+	)
+	const startupBarrierID = "019f94e0-7572-4df4-a2b9-08f2acbe6cf4"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO messaging.outbox (
+			message_id,
+			subject,
+			schema_version,
+			payload
+		) VALUES (
+			$1,
+			'ops.v1.outbox.poll-startup-barrier',
+			1,
+			'{"kind":"poll-startup-barrier"}'
+		)`,
+		startupBarrierID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	connection, err := nats.Connect(natsURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	js, err := jetstream.New(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := js.DeleteStream(ctx, platformnats.OpsStream); err != nil &&
+		!errors.Is(err, jetstream.ErrStreamNotFound) {
+		t.Fatalf("reset OPS stream: %v", err)
+	}
+	defer func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cleanupCancel()
+		_ = js.DeleteStream(cleanupContext, platformnats.OpsStream)
+	}()
+
+	workerContext, cancelWorker := context.WithCancel(ctx)
+	healthAddress := unusedAddress(t)
+	workerResult := make(chan error, 1)
+	workerFinished := false
+	defer func() {
+		cancelWorker()
+		if workerFinished {
+			return
+		}
+		select {
+		case <-workerResult:
+		case <-time.After(10 * time.Second):
+			t.Errorf("outbox worker cleanup timed out")
+		}
+	}()
+	go func() {
+		workerResult <- platformruntime.RunWorkers(
+			workerContext,
+			platformruntime.Config{
+				DatabaseURL:      outboxDatabaseURL,
+				NATSURL:          natsURL,
+				NATSStreamLimits: runtimeTestStreamLimits(),
+				HealthAddress:    healthAddress,
+				ShardID:          7,
+			},
+			[]string{"outbox-publisher"},
+		)
+	}()
+	waitForReady(t, "http://"+healthAddress+"/readyz")
+	startupDeadline := time.NewTimer(5 * time.Second)
+	defer startupDeadline.Stop()
+	startupPoll := time.NewTicker(10 * time.Millisecond)
+	defer startupPoll.Stop()
+	for {
+		var startupPublished bool
+		queryErr := pool.QueryRow(ctx, `
+			SELECT published_at IS NOT NULL
+			  FROM messaging.outbox
+			 WHERE message_id = $1`,
+			startupBarrierID,
+		).Scan(&startupPublished)
+		if queryErr == nil && startupPublished {
+			break
+		}
+		select {
+		case <-startupDeadline.C:
+			t.Fatalf(
+				"outbox startup barrier did not publish: published=%t error=%v",
+				startupPublished,
+				queryErr,
+			)
+		case <-startupPoll.C:
+		}
+	}
+
+	stream, err := js.Stream(ctx, platformnats.OpsStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		messageID = "019f94e0-7572-4df4-a2b9-08f2acbe6cf5"
+		subject   = "ops.v1.outbox.coalesced"
+	)
+	payload := []byte(`"hello"`)
+	consumer, err := stream.CreateOrUpdateConsumer(
+		ctx,
+		jetstream.ConsumerConfig{
+			Name:          "phase3-outbox-poll-acceptance",
+			Durable:       "phase3-outbox-poll-acceptance",
+			DeliverPolicy: jetstream.DeliverAllPolicy,
+			AckPolicy:     jetstream.AckExplicitPolicy,
+			FilterSubject: subject,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback(context.Background())
+		}
+	}()
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO messaging.outbox (
+			message_id,
+			subject,
+			schema_version,
+			payload
+		) VALUES ($1, $2, 1, $3)`,
+		messageID,
+		subject,
+		payload,
+	); err != nil {
+		t.Fatal(err)
+	}
+	commitStarted := time.Now()
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tx = nil
+
+	messageResult := make(chan jetstream.Msg, 1)
+	messageError := make(chan error, 1)
+	go func() {
+		batch, fetchErr := consumer.Fetch(
+			1,
+			jetstream.FetchMaxWait(5*time.Second),
+		)
+		if fetchErr != nil {
+			messageError <- fetchErr
+			return
+		}
+		for message := range batch.Messages() {
+			messageResult <- message
+			return
+		}
+		if batchErr := batch.Error(); batchErr != nil {
+			messageError <- batchErr
+			return
+		}
+		messageError <- errors.New("JetStream consumer returned an empty batch")
+	}()
+	var delivered jetstream.Msg
+	receiveDeadline := time.NewTimer(5 * time.Second)
+	defer receiveDeadline.Stop()
+	select {
+	case delivered = <-messageResult:
+	case receiveErr := <-messageError:
+		t.Fatalf("outbox publication: %v", receiveErr)
+	case workerErr := <-workerResult:
+		workerFinished = true
+		t.Fatalf("outbox worker exited before publication: %v", workerErr)
+	case <-receiveDeadline.C:
+		t.Fatal("committed outbox row was not delivered within five seconds")
+	}
+	elapsed := time.Since(commitStarted)
+	if elapsed >= 10*time.Second {
+		t.Fatalf("commit-to-delivery elapsed = %s, want <10s", elapsed)
+	}
+	if delivered.Subject() != subject {
+		t.Fatalf("delivered subject = %q, want %q", delivered.Subject(), subject)
+	}
+	if got := delivered.Headers().Get(nats.MsgIdHdr); got != messageID {
+		t.Fatalf("Nats-Msg-Id = %q, want %q", got, messageID)
+	}
+	if !bytes.Equal(delivered.Data(), payload) {
+		t.Fatalf("delivered payload = %q, want %q", delivered.Data(), payload)
+	}
+	metadata, err := delivered.Metadata()
+	if err != nil {
+		t.Fatalf("read delivered metadata: %v", err)
+	}
+	if metadata.Sequence.Stream == 0 {
+		t.Fatal("delivered JetStream sequence is zero")
+	}
+	if err := delivered.DoubleAck(ctx); err != nil {
+		t.Fatalf("acknowledge durable JetStream delivery: %v", err)
+	}
+
+	publishDeadline := time.NewTimer(5 * time.Second)
+	defer publishDeadline.Stop()
+	publishPoll := time.NewTicker(10 * time.Millisecond)
+	defer publishPoll.Stop()
+	for {
+		var (
+			published       bool
+			publishSequence uint64
+			claimed         bool
+		)
+		queryErr := pool.QueryRow(ctx, `
+			SELECT published_at IS NOT NULL,
+			       COALESCE(publish_sequence, 0),
+			       claimed_at IS NOT NULL
+			  FROM messaging.outbox
+			 WHERE message_id = $1`,
+			messageID,
+		).Scan(&published, &publishSequence, &claimed)
+		if queryErr == nil &&
+			published &&
+			publishSequence > 0 &&
+			!claimed {
+			if publishSequence != metadata.Sequence.Stream {
+				t.Fatalf(
+					"recorded publish sequence = %d, delivered = %d",
+					publishSequence,
+					metadata.Sequence.Stream,
+				)
+			}
+			break
+		}
+		select {
+		case <-publishDeadline.C:
+			t.Fatalf(
+				"outbox publication state did not converge: "+
+					"published=%t sequence=%d claimed=%t error=%v",
+				published,
+				publishSequence,
+				claimed,
+				queryErr,
+			)
+		case <-publishPoll.C:
+		}
+	}
+
+	cancelWorker()
+	select {
+	case workerErr := <-workerResult:
+		workerFinished = true
+		if workerErr != nil {
+			t.Fatalf("outbox worker shutdown: %v", workerErr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("outbox worker did not stop after cancellation")
+	}
 }
 
 func runOutboxWorkerProof(
