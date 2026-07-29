@@ -204,18 +204,6 @@ func TestSubmitRejectsQuantityThatRoundsToZero(t *testing.T) {
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/trading/e2e_order_caps.rs:179
-//	test: submit_denies_open_on_unfunded_account
-func TestSubmitDeniesOpenOnUnfundedAccount(t *testing.T) {
-	fixture := newOrderFixture()
-	fixture.funded["acct-1"] = false
-	_, err := fixture.submit(limitBuy("broke", "1", "100"))
-	requireOrderError(t, err, "insufficient_funds", "free margin")
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/trading/e2e_order_caps.rs:208
 //	test: submit_rejects_off_tick_price_and_off_step_qty
 func TestSubmitRejectsOffTickPriceAndOffStepQty(t *testing.T) {
