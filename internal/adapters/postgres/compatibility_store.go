@@ -1243,6 +1243,12 @@ func (store *CompatibilityStore) LatestFillExecution(
 			err,
 		)
 	}
+	if err := validateFillLeverage(&view); err != nil {
+		return edge.FillExecutionView{}, fmt.Errorf(
+			"read latest fill execution: %w",
+			err,
+		)
+	}
 	if (view.RealizedPnL == nil) != (view.SettlementCurrency == nil) {
 		return edge.FillExecutionView{}, fmt.Errorf(
 			"read latest fill execution: incomplete realized PnL",
@@ -1584,6 +1590,14 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		row.view.SettlementCurrency = settlement
 		row.view.Leverage = leverage
 		row.logicalTime = *logicalTime
+		if leverageErr := validateFillLeverage(
+			&row.view,
+		); leverageErr != nil {
+			return edge.FillExecutionPage{}, fmt.Errorf(
+				"scan filtered fill execution: %w",
+				leverageErr,
+			)
+		}
 		if (row.view.RealizedPnL == nil) !=
 			(row.view.SettlementCurrency == nil) {
 			return edge.FillExecutionPage{}, fmt.Errorf(
@@ -1773,6 +1787,19 @@ func validateFillTradeType(tradeType string) error {
 	default:
 		return fmt.Errorf("unsupported durable fill position effect %q", tradeType)
 	}
+}
+
+func validateFillLeverage(view *edge.FillExecutionView) error {
+	if view.Leverage == nil {
+		return nil
+	}
+	leverage, err := domain.NewRatio(*view.Leverage)
+	if err != nil || leverage.Decimal().Sign() <= 0 {
+		return errors.New("invalid effective leverage")
+	}
+	canonical := leverage.Decimal().String()
+	view.Leverage = &canonical
+	return nil
 }
 
 func validateFillRealizedMoney(
