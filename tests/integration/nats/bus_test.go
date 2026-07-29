@@ -3,6 +3,8 @@ package nats_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -16,6 +18,294 @@ import (
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	"github.com/upcomers-org/platformgo/internal/engine"
 )
+
+// Ported from:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/messaging/e2e_dlq.rs:9
+//	test: redelivery_cap_then_dead_letter
+//
+// Adaptations:
+//   - The source RabbitMQ subscription is replaced by an isolated durable
+//     JetStream consumer on an exact non-economic ops.v1 subject.
+//   - The source subscription sleep is replaced by creating the consumer
+//     before publication; deterministic IDs replace random fixture identity.
+//   - RabbitMQ's redelivered flag is represented by JetStream NumDelivered.
+//   - The quarantine record and capture helper are test-owned adapter
+//     translations composed through the production Publisher. Direct
+//     OutboxMessage construction is test fixture setup only; it does not prove
+//     or authorize a production DLQ consumer, runtime retry policy, PostgreSQL
+//     outbox workflow, or atomic source-to-quarantine move.
+//
+// Assertions preserved:
+//   - The first delivery has the published subject and is not a redelivery.
+//   - An explicit requeueing negative acknowledgment produces one redelivery.
+//   - Dead-letter capture succeeds before the source delivery is acknowledged.
+//   - The dead-lettered message is not delivered again by the source consumer.
+//
+// Strengthening from MESSAGING.md:
+//   - The durable capture preserves original identity, subject, stream
+//     sequence, attempt, payload, and failure reason under a distinct stable
+//     transport ID, and remains available to a fresh repair consumer.
+func TestRedeliveryCapThenDeadLetter(t *testing.T) {
+	const (
+		sourceSubject = "ops.v1.bus.dlq.source"
+		deadSubject   = "ops.v1.bus.dlq.captured"
+		reason        = "test: persistent handler failure"
+	)
+	ctx, js, sourceConsumer := sourceBusFixture(
+		t,
+		"source-bus-dlq",
+		sourceSubject,
+	)
+	publisher := platformnats.NewPublisher(js)
+	originalID := engine.IDFromSequence(engine.ID{}, 91)
+	deadLetterID := engine.IDFromSequence(engine.ID{}, 92)
+	payload := []byte(`"poison"`)
+
+	publishedSequence, err := publisher.Publish(
+		ctx,
+		platformpostgres.OutboxMessage{
+			MessageID:     originalID,
+			Subject:       sourceSubject,
+			SchemaVersion: 1,
+			Payload:       payload,
+		},
+	)
+	if err != nil || publishedSequence == 0 {
+		t.Fatalf(
+			"publish poison = sequence %d, error %v",
+			publishedSequence,
+			err,
+		)
+	}
+
+	first := fetchSourceBusMessages(t, ctx, sourceConsumer, 1)[0]
+	firstMetadata := requireSourceDelivery(
+		t,
+		first,
+		originalID,
+		sourceSubject,
+		payload,
+		publishedSequence,
+		1,
+	)
+	if err := first.Nak(); err != nil {
+		t.Fatalf("negative-ack first delivery: %v", err)
+	}
+
+	second := fetchSourceBusMessages(t, ctx, sourceConsumer, 1)[0]
+	secondMetadata := requireSourceDelivery(
+		t,
+		second,
+		originalID,
+		sourceSubject,
+		payload,
+		publishedSequence,
+		2,
+	)
+	if secondMetadata.Sequence.Consumer <= firstMetadata.Sequence.Consumer {
+		t.Fatalf(
+			"redelivery consumer sequence = %d, want greater than %d",
+			secondMetadata.Sequence.Consumer,
+			firstMetadata.Sequence.Consumer,
+		)
+	}
+
+	deadLetterSequence, err := captureSourceBusDeadLetter(
+		ctx,
+		publisher,
+		second,
+		deadLetterID,
+		deadSubject,
+		reason,
+	)
+	if err != nil || deadLetterSequence <= publishedSequence {
+		t.Fatalf(
+			"dead-letter capture = sequence %d, error %v; want greater than source %d",
+			deadLetterSequence,
+			err,
+			publishedSequence,
+		)
+	}
+
+	stream, err := js.Stream(ctx, platformnats.OpsStream)
+	if err != nil {
+		t.Fatalf("load ops stream after dead-letter capture: %v", err)
+	}
+	recreatedSource, err := stream.CreateOrUpdateConsumer(
+		ctx,
+		jetstream.ConsumerConfig{
+			Name:          "source-bus-dlq",
+			Durable:       "source-bus-dlq",
+			DeliverPolicy: jetstream.DeliverAllPolicy,
+			AckPolicy:     jetstream.AckExplicitPolicy,
+			FilterSubject: sourceSubject,
+		},
+	)
+	if err != nil {
+		t.Fatalf("recreate source consumer: %v", err)
+	}
+	sourceInfo, err := recreatedSource.Info(ctx)
+	if err != nil {
+		t.Fatalf("read recreated source consumer state: %v", err)
+	}
+	if sourceInfo.NumPending != 0 || sourceInfo.NumAckPending != 0 {
+		t.Fatalf(
+			"settled source consumer = pending %d ack-pending %d, want 0 and 0",
+			sourceInfo.NumPending,
+			sourceInfo.NumAckPending,
+		)
+	}
+	if message, err := recreatedSource.Next(
+		jetstream.FetchMaxWait(300 * time.Millisecond),
+	); message != nil || (!errors.Is(err, gonats.ErrTimeout) &&
+		!errors.Is(err, jetstream.ErrNoMessages)) {
+		t.Fatalf(
+			"source delivery after dead-letter = message %#v, error %v",
+			message,
+			err,
+		)
+	}
+
+	repairConsumer, err := stream.CreateOrUpdateConsumer(
+		ctx,
+		jetstream.ConsumerConfig{
+			Name:          "source-bus-dlq-repair",
+			Durable:       "source-bus-dlq-repair",
+			DeliverPolicy: jetstream.DeliverAllPolicy,
+			AckPolicy:     jetstream.AckExplicitPolicy,
+			FilterSubject: deadSubject,
+		},
+	)
+	if err != nil {
+		t.Fatalf("create dead-letter repair consumer: %v", err)
+	}
+	captured := fetchSourceBusMessages(t, ctx, repairConsumer, 1)[0]
+	if captured.Subject() != deadSubject {
+		t.Fatalf(
+			"captured subject = %q, want %q",
+			captured.Subject(),
+			deadSubject,
+		)
+	}
+	if got := captured.Headers().Get(gonats.MsgIdHdr); got != deadLetterID.String() {
+		t.Fatalf(
+			"captured Nats-Msg-Id = %q, want %q",
+			got,
+			deadLetterID,
+		)
+	}
+	capturedMetadata, err := captured.Metadata()
+	if err != nil {
+		t.Fatalf("read captured delivery metadata: %v", err)
+	}
+	if capturedMetadata.Sequence.Stream != deadLetterSequence {
+		t.Fatalf(
+			"captured stream sequence = %d, want %d",
+			capturedMetadata.Sequence.Stream,
+			deadLetterSequence,
+		)
+	}
+	var record sourceBusDeadLetterRecord
+	if err := json.Unmarshal(captured.Data(), &record); err != nil {
+		t.Fatalf("decode captured dead-letter record: %v", err)
+	}
+	if record.OriginalMessageID != originalID.String() ||
+		record.OriginalSubject != sourceSubject ||
+		record.OriginalStreamSequence != publishedSequence ||
+		record.DeliveryAttempt != 2 ||
+		record.Reason != reason ||
+		!bytes.Equal(record.Payload, payload) {
+		t.Fatalf("captured dead-letter record = %+v", record)
+	}
+	if err := captured.DoubleAck(ctx); err != nil {
+		t.Fatalf("acknowledge captured dead-letter record: %v", err)
+	}
+}
+
+func TestSourceBusDeadLetterCaptureFailureLeavesDeliveryUnsettled(
+	t *testing.T,
+) {
+	const sourceSubject = "ops.v1.bus.dlq.failure-source"
+	ctx, js, sourceConsumer := sourceBusFixture(
+		t,
+		"source-bus-dlq-failure",
+		sourceSubject,
+	)
+	publisher := platformnats.NewPublisher(js)
+	originalID := engine.IDFromSequence(engine.ID{}, 93)
+	deadLetterID := engine.IDFromSequence(engine.ID{}, 94)
+	payload := []byte(`"poison"`)
+
+	publishedSequence, err := publisher.Publish(
+		ctx,
+		platformpostgres.OutboxMessage{
+			MessageID:     originalID,
+			Subject:       sourceSubject,
+			SchemaVersion: 1,
+			Payload:       payload,
+		},
+	)
+	if err != nil || publishedSequence == 0 {
+		t.Fatalf(
+			"publish poison = sequence %d, error %v",
+			publishedSequence,
+			err,
+		)
+	}
+	first := fetchSourceBusMessages(t, ctx, sourceConsumer, 1)[0]
+	requireSourceDelivery(
+		t,
+		first,
+		originalID,
+		sourceSubject,
+		payload,
+		publishedSequence,
+		1,
+	)
+
+	if sequence, err := captureSourceBusDeadLetter(
+		ctx,
+		publisher,
+		first,
+		deadLetterID,
+		"ops.v2.bus.dlq.unroutable",
+		"test: capture unavailable",
+	); err == nil || sequence != 0 {
+		t.Fatalf(
+			"unroutable capture = sequence %d, error %v, want zero and error",
+			sequence,
+			err,
+		)
+	}
+	info, err := sourceConsumer.Info(ctx)
+	if err != nil {
+		t.Fatalf("read source consumer after capture failure: %v", err)
+	}
+	if info.NumAckPending != 1 {
+		t.Fatalf(
+			"source ack-pending after capture failure = %d, want 1",
+			info.NumAckPending,
+		)
+	}
+	if err := first.Nak(); err != nil {
+		t.Fatalf("negative-ack unsettled source delivery: %v", err)
+	}
+	second := fetchSourceBusMessages(t, ctx, sourceConsumer, 1)[0]
+	requireSourceDelivery(
+		t,
+		second,
+		originalID,
+		sourceSubject,
+		payload,
+		publishedSequence,
+		2,
+	)
+	if err := second.DoubleAck(ctx); err != nil {
+		t.Fatalf("acknowledge cleanup redelivery: %v", err)
+	}
+}
 
 // Ported from:
 //
@@ -329,4 +619,99 @@ func requireSameSourceBusIDs(
 	if len(actual) != 3 || !reflect.DeepEqual(actual, want) {
 		t.Fatalf("%s IDs = %v, want %v with cardinality 3", label, actual, want)
 	}
+}
+
+type sourceBusDeadLetterRecord struct {
+	OriginalMessageID      string          `json:"originalMessageId"`
+	OriginalSubject        string          `json:"originalSubject"`
+	OriginalStreamSequence uint64          `json:"originalStreamSequence"`
+	DeliveryAttempt        uint64          `json:"deliveryAttempt"`
+	Reason                 string          `json:"reason"`
+	Payload                json.RawMessage `json:"payload"`
+}
+
+func requireSourceDelivery(
+	t *testing.T,
+	message jetstream.Msg,
+	messageID engine.ID,
+	subject string,
+	payload []byte,
+	streamSequence uint64,
+	deliveryAttempt uint64,
+) *jetstream.MsgMetadata {
+	t.Helper()
+	if message.Subject() != subject {
+		t.Fatalf("delivered subject = %q, want %q", message.Subject(), subject)
+	}
+	if got := message.Headers().Get(gonats.MsgIdHdr); got != messageID.String() {
+		t.Fatalf("delivered Nats-Msg-Id = %q, want %q", got, messageID)
+	}
+	if !bytes.Equal(message.Data(), payload) {
+		t.Fatalf("delivered payload = %q, want %q", message.Data(), payload)
+	}
+	metadata, err := message.Metadata()
+	if err != nil {
+		t.Fatalf("read delivered metadata: %v", err)
+	}
+	if metadata.Sequence.Stream != streamSequence ||
+		metadata.NumDelivered != deliveryAttempt {
+		t.Fatalf(
+			"delivery metadata = stream %d attempt %d, want %d and %d",
+			metadata.Sequence.Stream,
+			metadata.NumDelivered,
+			streamSequence,
+			deliveryAttempt,
+		)
+	}
+	return metadata
+}
+
+func captureSourceBusDeadLetter(
+	ctx context.Context,
+	publisher *platformnats.Publisher,
+	message jetstream.Msg,
+	deadLetterID engine.ID,
+	deadLetterSubject string,
+	reason string,
+) (uint64, error) {
+	metadata, err := message.Metadata()
+	if err != nil {
+		return 0, fmt.Errorf("read source delivery metadata: %w", err)
+	}
+	originalMessageID := message.Headers().Get(gonats.MsgIdHdr)
+	if originalMessageID == "" {
+		return 0, errors.New("capture dead letter: original message ID is required")
+	}
+	if originalMessageID == deadLetterID.String() {
+		return 0, errors.New(
+			"capture dead letter: transport ID must differ from original ID",
+		)
+	}
+	record, err := json.Marshal(sourceBusDeadLetterRecord{
+		OriginalMessageID:      originalMessageID,
+		OriginalSubject:        message.Subject(),
+		OriginalStreamSequence: metadata.Sequence.Stream,
+		DeliveryAttempt:        metadata.NumDelivered,
+		Reason:                 reason,
+		Payload:                append(json.RawMessage(nil), message.Data()...),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("encode dead-letter record: %w", err)
+	}
+	sequence, err := publisher.Publish(
+		ctx,
+		platformpostgres.OutboxMessage{
+			MessageID:     deadLetterID,
+			Subject:       deadLetterSubject,
+			SchemaVersion: 1,
+			Payload:       record,
+		},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("publish dead-letter record: %w", err)
+	}
+	if err := message.DoubleAck(ctx); err != nil {
+		return sequence, fmt.Errorf("acknowledge source delivery: %w", err)
+	}
+	return sequence, nil
 }

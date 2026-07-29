@@ -61,6 +61,18 @@ establish an atomic batch API, delivery ordering, outbox transactions or
 marking, partial-failure or retry semantics, unknown-outcome handling,
 redelivery, inbox or business effects, restart recovery, exactly-once
 transport, runtime composition, or economic idempotency.
+The pinned redelivery and dead-letter behavior is separately accepted at a
+test-owned, non-economic JetStream adapter boundary. One operational message
+is delivered once, explicitly negatively acknowledged, and redelivered with
+the same identity, subject, payload, and stream sequence. A distinct,
+positively acknowledged test quarantine record preserves its provenance and
+exact failure reason before the source delivery is synchronously acknowledged;
+the same durable source consumer has no third delivery, while a fresh repair
+consumer can read the record. This is not a production consumer, automatic
+retry cap, generic quarantine policy, PostgreSQL outbox/inbox or
+commit-before-ack proof, atomic move, crash/restart or unknown-outcome
+recovery, operator repair/replay procedure, exactly-once guarantee,
+engine-input poison policy, source-record deletion, or economic-effect claim.
 Exact client funding history is also landed with immutable PostgreSQL
 projection integrity, nanosecond keyset pagination, exact aggregation,
 least-privilege reads, populated-schema upgrade coverage, and separate
@@ -436,8 +448,8 @@ Phase 3 is not complete. The runtime must still:
 - obtain separate port-ledger acceptance for each additional source behavior
   proven by subsequent implementation slices.
 
-The source ledger contains all 2,748 pinned tests. It records 83 independently
-reviewed green source tests; 2,568 remain explicitly unreviewed
+The source ledger contains all 2,748 pinned tests. It records 87 independently
+reviewed green source tests; 2,564 remain explicitly unreviewed
 placeholder ports, and 97 implementation-only tests are reviewed and excluded
 with decision records. Ledger acceptance remains separate from implementation,
 as required by repository governance.
