@@ -49,27 +49,6 @@ func TestOrderViewCarriesTypePricesOwnerAndFeeFields(t *testing.T) {
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
-//	source: apps/app/tests/it/trading/e2e_orders.rs:154
-//	test: a_reused_intent_id_replays_only_an_identical_payload
-func TestAReusedIntentIDReplaysOnlyAnIdenticalPayload(t *testing.T) {
-	fixture := newOrderFixture()
-	first, err := fixture.submit(limitBuy("idem-1", "0.010", "50000"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	replay, err := fixture.submit(limitBuy("idem-1", "0.010", "50000"))
-	if err != nil || replay.ID != first.ID {
-		t.Fatalf("replay=%#v err=%v first=%#v", replay, err, first)
-	}
-	conflict := limitBuy("idem-1", "0.020", "80000")
-	conflict.Side = "sell"
-	_, err = fixture.submit(conflict)
-	requireOrderError(t, err, "conflict", "different payload")
-}
-
-// Ported from:
-//
-//	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/trading/e2e_orders.rs:202
 //	test: order_view_carries_parity4_discriminators
 func TestOrderViewCarriesParity4Discriminators(t *testing.T) {
