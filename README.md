@@ -531,7 +531,9 @@ The client fills HTTP slice is focused-green on PostgreSQL 19 Beta 2. It proves
 exact owner-scoped wire output and query parsing, equal-time tuple pagination,
 same-statement filtered totals, least-privilege reads, foreign-account
 isolation, and fail-closed rejection of realized PnL beyond the registered
-currency scale. Full stable-candidate and release gates remain pending.
+currency scale. Its full stable-candidate, money, determinism, final
+exact-SHA, seven-check hosted CI, merge, and separate port-ledger
+reconciliation gates passed.
 
 The landed Phase 3 slices have passed repository-wide formatting, lint, unit,
 race, repeat, vulnerability, module-consistency, and policy checks. Historical
