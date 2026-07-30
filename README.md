@@ -642,7 +642,10 @@ review required the new 39th forward migration, fixed filtered/unfiltered
 query templates, per-request custom planning, and executed-plan amplification
 evidence. Those corrections and focused PostgreSQL 19 Beta 2 runtime,
 migration-plan, compatibility-regression, and no-partial-response tests are
-green; full-candidate gates and exact-SHA reviews remain open.
+green. The stable implementation candidate is also green through policy,
+format, lint, full test, race, deterministic repeat, vulnerability, complete
+PostgreSQL 19 Beta 2, and complete compatibility validation. Exact-SHA
+specialist review, hosted CI, and merge remain open.
 
 The landed finite fill-leverage hardening has PostgreSQL 19 Beta 2
 tests defining its corruption-read, no-partial-page, restart, exact 35/36-tip,
