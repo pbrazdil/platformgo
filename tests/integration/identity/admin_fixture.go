@@ -32,11 +32,6 @@ type adminSettings struct {
 	Currencies  []string
 }
 
-type adminCatalogItem struct {
-	ID    string
-	Label string
-}
-
 type adminDoorbell struct {
 	Topic string
 	Key   string
@@ -131,26 +126,6 @@ func (fixture *adminPlaneFixture) readSettings(admin bool) (adminSettings, error
 		return adminSettings{}, errAdminForbidden
 	}
 	return fixture.settings, nil
-}
-
-func (fixture *adminPlaneFixture) permissionCatalog(admin bool) ([]adminCatalogItem, []adminCatalogItem, error) {
-	if !admin {
-		return nil, nil, errAdminForbidden
-	}
-	resourceIDs := []string{
-		"diagnostics", "admins", "users", "roles", "api-keys", "schedules",
-		"accounts", "orders", "instruments", "collections", "tenants",
-	}
-	actionIDs := []string{"read", "write", "create", "delete"}
-	resources := make([]adminCatalogItem, len(resourceIDs))
-	for index, id := range resourceIDs {
-		resources[index] = adminCatalogItem{ID: id, Label: strings.ToUpper(id[:1]) + id[1:]}
-	}
-	actions := make([]adminCatalogItem, len(actionIDs))
-	for index, id := range actionIDs {
-		actions[index] = adminCatalogItem{ID: id, Label: strings.ToUpper(id[:1]) + id[1:]}
-	}
-	return resources, actions, nil
 }
 
 func (fixture *adminPlaneFixture) registerAdmin(login, email, password string) adminOperator {
