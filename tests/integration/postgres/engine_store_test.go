@@ -1431,6 +1431,101 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 			},
 		},
 		{
+			name: "missing funding instrument provenance",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				corruptAsReplicationAuthority(t, pool, `
+					DELETE FROM trading.funding_instrument_provenance`)
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.FundingMismatchCount
+			},
+		},
+		{
+			name: "extra funding instrument provenance",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				corruptAsReplicationAuthority(t, pool, `
+					INSERT INTO trading.funding_instrument_provenance (
+						funding_id, instrument_id, revision,
+						price_scale, quantity_scale
+					) VALUES (
+						'019f9460-4b36-4e9b-8f44-682611f78911',
+						'BTC-PERP', 1, 2, 3
+					)`)
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.FundingMismatchCount
+			},
+		},
+		{
+			name: "wrong funding provenance instrument",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				corruptAsReplicationAuthority(t, pool, `
+					UPDATE trading.funding_instrument_provenance
+					   SET instrument_id = 'ETH-PERP'`)
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.FundingMismatchCount
+			},
+		},
+		{
+			name: "wrong funding provenance revision",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, fixture reconciliationFixture) {
+				applyStoredTrading(
+					t,
+					pool,
+					fixture.store,
+					fixture.state,
+					fixture.ids,
+					fixture.clock,
+					engine.TradingAction{
+						Kind: engine.TradingActionConfigureInstrument,
+						ConfigureInstrument: &engine.ConfigureInstrument{
+							InstrumentID:            "BTC-PERP",
+							Revision:                2,
+							PriceScale:              2,
+							QuantityScale:           3,
+							SettlementCurrency:      "USDC",
+							SettlementCurrencyScale: 2,
+							InitialMarginRate:       "0.1",
+							MaintenanceMarginRate:   "0.05",
+							MaxLeverage:             "10",
+							MakerFeeRate:            "0",
+							TakerFeeRate:            "0",
+						},
+					},
+					platformpostgres.ApplyOptions{},
+				)
+				corruptAsReplicationAuthority(t, pool, `
+					UPDATE trading.funding_instrument_provenance
+					   SET revision = revision + 1`)
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.FundingMismatchCount
+			},
+		},
+		{
+			name: "wrong funding provenance price scale",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				corruptAsReplicationAuthority(t, pool, `
+					UPDATE trading.funding_instrument_provenance
+					   SET price_scale = price_scale + 1`)
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.FundingMismatchCount
+			},
+		},
+		{
+			name: "wrong funding provenance quantity scale",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				corruptAsReplicationAuthority(t, pool, `
+					UPDATE trading.funding_instrument_provenance
+					   SET quantity_scale = quantity_scale + 1`)
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.FundingMismatchCount
+			},
+		},
+		{
 			name: "ledger business identity",
 			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
 				_, err := pool.Exec(context.Background(), `
@@ -1694,6 +1789,27 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 				corruptAsReplicationAuthority(t, pool, `
 					DELETE FROM trading.funding_history_projection
 					 WHERE account_id = 'account-1'`)
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.FundingMismatchCount
+			},
+		},
+		{
+			name: "orphan funding history projection",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				corruptAsReplicationAuthority(t, pool, `
+					INSERT INTO trading.funding_history_projection (
+						funding_id, account_id, instrument_id,
+						position_id, logical_time
+					)
+					SELECT
+						'019f9460-4b36-4e9b-8f44-682611f78912',
+						account_id,
+						instrument_id,
+						position_id,
+						logical_time
+					  FROM trading.funding_history_projection
+					 LIMIT 1`)
 			},
 			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
 				return report.FundingMismatchCount
@@ -3675,7 +3791,7 @@ func TestEngineStoreRecoversDecisionHashV2V3AndExtendsTheChainWithV4(
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260730000200_phase3_currency_scale_authority_fence',
+				'20260730000400_phase3_broker_funding_acl',
 				false
 			),
 			set_config(
@@ -3902,7 +4018,7 @@ func TestEngineStoreRecoversDecisionHashV2V3AndExtendsTheChainWithV4(
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260730000200_phase3_currency_scale_authority_fence',
+				'20260730000400_phase3_broker_funding_acl',
 				false
 			),
 			set_config(

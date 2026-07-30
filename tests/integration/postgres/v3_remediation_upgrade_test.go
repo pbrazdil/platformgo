@@ -153,6 +153,25 @@ func TestFillEffectiveLeverageV3RemediationUpgrade(t *testing.T) {
 		)
 	}
 
+	currentTip := platformpostgres.NewMigrator(
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	)
+	if err := currentTip.Migrate(ctx); err != nil {
+		t.Fatalf("advance remediated v3 database to current schema: %v", err)
+	}
+	if err := currentTip.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify current schema after v3 remediation: %v", err)
+	}
+	afterCurrentCutover := inspectV3RemediationDatabase(t, pool)
+	if afterCurrentCutover.durable() != afterSuccessfulCutover.durable() {
+		t.Fatalf(
+			"current schema cutover changed remediated durable history:\n before %+v\n after  %+v",
+			afterSuccessfulCutover.durable(),
+			afterCurrentCutover.durable(),
+		)
+	}
+
 	currentStore := platformpostgres.NewEngineStore(pool)
 	currentRecovered, err := currentStore.RecoverTradingState(
 		ctx,
@@ -236,7 +255,7 @@ func TestFillEffectiveLeverageV3RemediationUpgrade(t *testing.T) {
 	requirePostDuplicateV3RemediationState(
 		t,
 		afterDuplicateDelivery,
-		afterSuccessfulCutover,
+		afterCurrentCutover,
 		postDuplicateState,
 	)
 

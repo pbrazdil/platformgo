@@ -34,6 +34,7 @@
     "broker-account-read-preserves-current-go-summary-and-tenant-authority",
     "broker-balances-preserves-current-go-projection-and-tenant-authority",
     "broker-fills-preserves-current-go-projection-and-tenant-authority",
+    "broker-funding-preserves-current-go-projection-and-tenant-authority",
     "client-api-key-creation-requires-idempotency-key",
     "fill-trade-type-is-always-classified",
     "fills-http-preserves-current-go-projection",
@@ -66,6 +67,7 @@
     "GET /broker/v1/accounts/{accountId}",
     "GET /broker/v1/accounts/{accountId}/balances",
     "GET /broker/v1/accounts/{accountId}/fills",
+    "GET /broker/v1/accounts/{accountId}/funding",
     "POST /broker/v1/echo",
     "POST /broker/v1/users",
     "POST /broker/v1/users/{userId}/token",
@@ -83,7 +85,7 @@
   },
   "openAPIArtifacts": {
     "openapi/admin-v1.json": "615e8a49f9e6a71f6a3ea0108bd71353bd5b7050cc79cee6b17d98af84a6aeb3",
-    "openapi/broker-v1.json": "c0a195c650e266fcc19cefa795030a6a795601b17b0cf49a0c3a9d0d2e783450",
+    "openapi/broker-v1.json": "3ee2d59078fe751d31c880df1bab6eb53f6d6ab4e0a97189331253acaf04a104",
     "openapi/client-v1.json": "42461474eb48058875938d75a8b428504ac3613ee41dd87e8157cae0e4dfc810"
   },
   "platformSourceRevision": "50141367492be46ebf5623f6191a14b94af2f2bd",

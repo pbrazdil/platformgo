@@ -37,7 +37,6 @@ const (
 	realtimeMaxAttempts      = uint32(10)
 	realtimeFinalizeTimeout  = 5 * time.Second
 	apiKeyReplayCleanupBatch = 100
-	runtimeSchemaRevision    = "20260730000200_phase3_currency_scale_authority_fence"
 )
 
 type databaseRuntimeRole string
@@ -397,6 +396,7 @@ func serve(
 		BrokerAccount:  compatibilityStore,
 		BrokerAccounts: compatibilityStore,
 		BrokerFills:    compatibilityStore,
+		BrokerFunding:  compatibilityStore,
 		BrokerBalances: compatibilityStore,
 		Readiness: []edge.HealthCheck{
 			{Name: "postgres", Check: postgresReady},
@@ -1467,7 +1467,7 @@ func enforceRuntimeDatabaseRole(
 					$2,
 					false
 				)`,
-			runtimeSchemaRevision,
+			platformpostgres.EngineRuntimeSchemaRevision,
 			fmt.Sprint(engine.CurrentDecisionHashVersion),
 		); err != nil {
 			return fmt.Errorf("runtime PostgreSQL schema revision binding: %w", err)

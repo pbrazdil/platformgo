@@ -31,7 +31,7 @@ func TestFundingHistoryQueriesUseKeysetIndexes(t *testing.T) {
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260730000200_phase3_currency_scale_authority_fence',
+				'20260730000400_phase3_broker_funding_acl',
 				true
 			),
 			set_config(
@@ -76,7 +76,85 @@ func TestFundingHistoryQueriesUseKeysetIndexes(t *testing.T) {
 				'LogicalTime',
 				1784901600000000000 + sequence_number
 			),
-			'{"DecisionHashVersion":4}'::jsonb,
+			jsonb_build_object(
+				'DecisionHashVersion',
+				4,
+				'CommandResult',
+				jsonb_build_object('Status', 'accepted'),
+				'FundingChanges',
+				jsonb_build_array(
+					jsonb_build_object(
+						'FundingID',
+						(
+							SELECT jsonb_agg(
+								get_byte(
+									uuid_send(
+										format(
+											'10000000-0000-0000-0000-%s',
+											lpad(
+												to_hex(sequence_number),
+												12,
+												'0'
+											)
+										)::uuid
+									),
+									octet
+								)
+								ORDER BY octet
+							)
+							  FROM generate_series(0, 15) AS bytes(octet)
+						),
+						'SettlementID',
+						(
+							SELECT jsonb_agg(
+								get_byte(
+									uuid_send(
+										format(
+											'20000000-0000-0000-0000-%s',
+											lpad(
+												to_hex(sequence_number),
+												12,
+												'0'
+											)
+										)::uuid
+									),
+									octet
+								)
+								ORDER BY octet
+							)
+							  FROM generate_series(0, 15) AS bytes(octet)
+						),
+						'PositionID',
+						(
+							SELECT jsonb_agg(
+								get_byte(
+									uuid_send(
+										'30000000-0000-0000-0000-000000000001'
+											::uuid
+									),
+									octet
+								)
+								ORDER BY octet
+							)
+							  FROM generate_series(0, 15) AS bytes(octet)
+						),
+						'AccountID',
+						'account-plan',
+						'InstrumentID',
+						'BTC-PERP',
+						'SignedQuantity',
+						'1',
+						'OraclePrice',
+						'100',
+						'Rate',
+						'0.01',
+						'Amount',
+						'-1',
+						'SettlementCurrency',
+						'USDC'
+					)
+				)
+			),
 			decode(repeat('04', 32), 'hex'),
 			1
 		  FROM generate_series(1, 10000) AS sequence(sequence_number);
@@ -120,6 +198,18 @@ func TestFundingHistoryQueriesUseKeysetIndexes(t *testing.T) {
 		  JOIN engine.input_receipts AS receipt
 		    ON receipt.input_id = funding.input_id
 		   AND receipt.shard_id = 41;
+		INSERT INTO trading.funding_instrument_provenance (
+			funding_id, instrument_id, revision, price_scale, quantity_scale
+		)
+		SELECT
+			funding.funding_id,
+			instrument.instrument_id,
+			instrument.revision,
+			instrument.price_scale,
+			instrument.quantity_scale
+		  FROM trading.funding_settlements AS funding
+		  JOIN trading.instruments AS instrument
+		    ON instrument.instrument_id = funding.instrument_id;
 		ANALYZE trading.funding_settlements;
 		ANALYZE trading.funding_history_projection`); err != nil {
 		t.Fatalf("seed representative funding history: %v", err)

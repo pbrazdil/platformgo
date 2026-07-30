@@ -34,6 +34,7 @@ type Server struct {
 	brokerAccount  BrokerAccountReader
 	brokerAccounts BrokerAccountLister
 	brokerFills    BrokerFillsReader
+	brokerFunding  BrokerFundingReader
 	brokerBalances BrokerBalancesReader
 	readiness      []HealthCheck
 	openAPI        map[string][]byte
@@ -52,6 +53,7 @@ type ServerConfig struct {
 	BrokerAccount  BrokerAccountReader
 	BrokerAccounts BrokerAccountLister
 	BrokerFills    BrokerFillsReader
+	BrokerFunding  BrokerFundingReader
 	BrokerBalances BrokerBalancesReader
 	Readiness      []HealthCheck
 	OpenAPI        map[string][]byte
@@ -79,6 +81,7 @@ func NewServer(config ServerConfig) *Server {
 		brokerAccount:  config.BrokerAccount,
 		brokerAccounts: config.BrokerAccounts,
 		brokerFills:    config.BrokerFills,
+		brokerFunding:  config.BrokerFunding,
 		brokerBalances: config.BrokerBalances,
 		readiness:      append([]HealthCheck(nil), config.Readiness...),
 		openAPI:        config.OpenAPI,
@@ -134,6 +137,10 @@ func (server *Server) route(writer http.ResponseWriter, request *http.Request) {
 		}
 		if accountID, ok := brokerFillsRoute(request.URL.Path); ok {
 			server.handleBrokerFills(writer, request, accountID)
+			return
+		}
+		if accountID, ok := brokerFundingRoute(request.URL.Path); ok {
+			server.handleBrokerFunding(writer, request, accountID)
 			return
 		}
 		if accountID, ok := brokerBalancesRoute(request.URL.Path); ok {
@@ -969,6 +976,85 @@ func (server *Server) handleBrokerBalances(
 	}
 }
 
+func (server *Server) handleBrokerFunding(
+	writer http.ResponseWriter,
+	request *http.Request,
+	accountID string,
+) {
+	principal, ok := server.brokerPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	if !principal.HasScope("accounts:read") {
+		writeError(writer, request, http.StatusForbidden, "forbidden", "forbidden")
+		return
+	}
+	const accountPrefix = "urn:xb:account:"
+	if !strings.HasPrefix(accountID, accountPrefix) ||
+		!canonicalUUID.MatchString(strings.TrimPrefix(accountID, accountPrefix)) {
+		writeError(
+			writer,
+			request,
+			http.StatusBadRequest,
+			"invalid_request",
+			"invalid account id",
+		)
+		return
+	}
+	params, err := brokerFundingPageParams(request)
+	if err != nil {
+		writeError(
+			writer,
+			request,
+			http.StatusBadRequest,
+			"invalid_request",
+			"invalid funding page",
+		)
+		return
+	}
+	if server.brokerFunding == nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"trading views unavailable",
+		)
+		return
+	}
+	page, err := server.brokerFunding.BrokerFunding(
+		request.Context(),
+		principal.Tenant,
+		accountID,
+		params,
+	)
+	switch {
+	case errors.Is(err, ErrForbidden):
+		writeError(writer, request, http.StatusForbidden, "forbidden", "forbidden")
+	case errors.Is(err, ErrInvalidRequest):
+		writeError(
+			writer,
+			request,
+			http.StatusBadRequest,
+			"invalid_request",
+			"invalid funding page",
+		)
+	case err != nil:
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"trading views unavailable",
+		)
+	default:
+		if page.Items == nil {
+			page.Items = make([]FundingView, 0)
+		}
+		writeJSON(writer, http.StatusOK, page)
+	}
+}
+
 func (server *Server) handleBrokerEcho(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := server.brokerPrincipal(writer, request)
 	if !ok {
@@ -1173,6 +1259,19 @@ func brokerBalancesRoute(path string) (string, bool) {
 	return accountID, true
 }
 
+func brokerFundingRoute(path string) (string, bool) {
+	const prefix = "/broker/v1/accounts/"
+	const suffix = "/funding"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	accountID := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	if accountID == "" || strings.Contains(accountID, "/") {
+		return "", false
+	}
+	return accountID, true
+}
+
 func brokerAccountListUserID(request *http.Request) (*string, error) {
 	values, err := url.ParseQuery(request.URL.RawQuery)
 	if err != nil {
@@ -1285,6 +1384,29 @@ func fundingPageParams(request *http.Request) (PageParams, error) {
 		return PageParams{}, err
 	}
 	params.Limit = int(limit)
+	return params, nil
+}
+
+func brokerFundingPageParams(request *http.Request) (PageParams, error) {
+	params, err := fundingPageParams(request)
+	if err != nil {
+		return PageParams{}, err
+	}
+	if params.Cursor == "" {
+		return params, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(params.Cursor)
+	if err != nil {
+		return PageParams{}, ErrInvalidRequest
+	}
+	parts := strings.SplitN(string(raw), ":", 2)
+	if len(parts) != 2 {
+		return PageParams{}, ErrInvalidRequest
+	}
+	if _, err := strconv.ParseInt(parts[0], 10, 64); err != nil ||
+		!canonicalUUID.MatchString(parts[1]) {
+		return PageParams{}, ErrInvalidRequest
+	}
 	return params, nil
 }
 

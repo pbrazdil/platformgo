@@ -439,6 +439,17 @@ type BrokerFillsReader interface {
 	) (FillExecutionPage, error)
 }
 
+// BrokerFundingReader keeps tenant authorization inside the same PostgreSQL
+// statement that reads the immutable funding page.
+type BrokerFundingReader interface {
+	BrokerFunding(
+		context.Context,
+		string,
+		string,
+		PageParams,
+	) (FundingPage, error)
+}
+
 // BrokerBalancesReader keeps tenant authorization inside the same PostgreSQL
 // statement that reads the complete balance projection.
 type BrokerBalancesReader interface {

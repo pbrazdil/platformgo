@@ -415,6 +415,53 @@ requires a reviewed forward repair or explicitly authorized complete verified
 pre-migration restore. Never blindly retry, edit frozen bytes, delete a journal
 row, or reset a persistent database.
 
+### Phase 3 broker-funding ACL upgrade
+
+Migration `20260730000400_phase3_broker_funding_acl.up.sql` is a forward-only
+provenance, runtime-fence, and ACL cutover from the exact 39-file
+broker-account-list tip. Stop API activation and drain the engine writer.
+Record all 39 filenames/checksums, the configured shard ownership epoch,
+funding/instrument/receipt digests, relation metadata, exact trigger catalogs,
+the eight reused trigger-function definitions and metadata, raw ACLs, and owner
+defaults.
+
+The migration acquires the configured shard's engine advisory ownership key
+before locking ownership epochs, instruments, settlements, history, and
+receipts in production-compatible order. SQLSTATE `55P03` or `57014` is a
+definite rollback only after proving the 40th journal row is absent and every
+recorded authority/catalog value is unchanged. Drain the blocker and retry the
+same bytes. SQLSTATE `55000` is a fail-closed authority or reconstruction
+conflict; do not repair it by editing migration history or bypassing a trigger.
+
+After commit, verify the exact 40-file tip and prior checksums; exact
+settlement/history/provenance counts and provenance digest; the expected
+immutable, truncate, deferred-constraint, ownership-revision, receipt, fault,
+and checkpoint triggers; trusted function definitions; runtime revision; and
+this complete non-grantable allowlist:
+
+- engine `SELECT, INSERT` on settlements, history, and instrument provenance;
+- API `EXECUTE` on the client and broker account readers, symbol reader,
+  account and symbol counters, and account-position funding aggregate;
+- no API direct table or column privilege;
+- no runtime `EXECUTE` on either funding constraint helper;
+- no `PUBLIC`, unexpected-role, grant-option, or dependent-chain privilege.
+
+Only the runtime built for revision
+`20260730000400_phase3_broker_funding_acl` may reacquire ownership after those
+checks; the old runtime must fail with SQLSTATE `55000`. Then activate the
+broker funding route. A valid request executes one custom-plan PostgreSQL
+statement; absent or foreign authority must not execute the funding reader or
+counter. Missing provenance, historical off-grid values, other corruption,
+cancellation, and restart remain whole-response failures without identifiers,
+cursors, totals, or valid prefixes.
+
+A lost connection or missing `COMMIT` acknowledgment is an unknown outcome.
+Keep runtimes stopped and classify the exact journal/checksum, runtime gate,
+authority/provenance digests, trigger/function catalogs, ACLs, owners, and
+defaults. Retry only when the journal row is absent and the complete prior state
+matches. Never edit frozen bytes, delete journal history, or reset a persistent
+database.
+
 ### Phase 3 command market-sequence binding upgrade
 
 Migration

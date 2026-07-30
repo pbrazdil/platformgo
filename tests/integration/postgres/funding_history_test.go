@@ -178,17 +178,31 @@ func TestFundingHistoryReadsPersistedEngineLogicalTime(t *testing.T) {
 	var (
 		logicalTimeType string
 		hasLegacyKey    bool
+		revision        int64
+		priceScale      int16
+		quantityScale   int16
 	)
 	if err := pool.QueryRow(ctx, `
 		SELECT
 			jsonb_typeof(receipt.envelope -> 'LogicalTime'),
-			receipt.envelope ? 'logicalTime'
+			receipt.envelope ? 'logicalTime',
+			provenance.revision,
+			provenance.price_scale,
+			provenance.quantity_scale
 		  FROM trading.funding_settlements AS funding
 		  JOIN engine.input_receipts AS receipt
 		    ON receipt.input_id = funding.input_id
 		   AND receipt.shard_id = 41
+		  JOIN trading.funding_instrument_provenance AS provenance
+		    ON provenance.funding_id = funding.funding_id
 		 LIMIT 1`,
-	).Scan(&logicalTimeType, &hasLegacyKey); err != nil {
+	).Scan(
+		&logicalTimeType,
+		&hasLegacyKey,
+		&revision,
+		&priceScale,
+		&quantityScale,
+	); err != nil {
 		t.Fatalf("inspect persisted funding receipt: %v", err)
 	}
 	if logicalTimeType != "number" || hasLegacyKey {
@@ -196,6 +210,14 @@ func TestFundingHistoryReadsPersistedEngineLogicalTime(t *testing.T) {
 			"persisted logical time shape = type %q legacy-key %t",
 			logicalTimeType,
 			hasLegacyKey,
+		)
+	}
+	if revision != 1 || priceScale != 2 || quantityScale != 3 {
+		t.Fatalf(
+			"persisted funding provenance = revision %d scales %d/%d, want 1 2/3",
+			revision,
+			priceScale,
+			quantityScale,
 		)
 	}
 
@@ -251,6 +273,51 @@ func TestFundingHistoryRejectsSettlementWithoutProjection(t *testing.T) {
 	}
 }
 
+func TestFundingHistoryRejectsSettlementWithoutInstrumentProvenance(
+	t *testing.T,
+) {
+	pool := postgresPool(t)
+	seedReconciliationFixture(t, pool, 41)
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO trading.funding_settlements (
+			funding_id, settlement_id, position_id, input_id,
+			account_id, instrument_id, signed_quantity, oracle_price,
+			rate, amount, settlement_currency
+		)
+		SELECT
+			'40000000-0000-0000-0000-000000000011',
+			'40000000-0000-0000-0000-000000000012',
+			position_id,
+			input_id,
+			account_id,
+			instrument_id,
+			signed_quantity,
+			oracle_price,
+			rate,
+			amount,
+			settlement_currency
+		  FROM trading.funding_settlements
+		 LIMIT 1;
+		INSERT INTO trading.funding_history_projection (
+			funding_id, account_id, instrument_id, position_id, logical_time
+		)
+		SELECT
+			'40000000-0000-0000-0000-000000000011',
+			history.account_id,
+			history.instrument_id,
+			history.position_id,
+			history.logical_time
+		  FROM trading.funding_history_projection AS history
+		 LIMIT 1`)
+	var pgError *pgconn.PgError
+	if !errors.As(err, &pgError) || pgError.Code != "55000" {
+		t.Fatalf(
+			"settlement without instrument provenance error = %v, want SQLSTATE 55000",
+			err,
+		)
+	}
+}
+
 func seedFundingHistory(
 	t *testing.T,
 	pool *pgxpool.Pool,
@@ -267,7 +334,13 @@ func seedFundingHistory(
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260730000200_phase3_currency_scale_authority_fence',
+				CASE
+					WHEN pg_catalog.to_regclass(
+						'trading.funding_instrument_provenance'
+					) IS NULL
+					THEN '20260730000200_phase3_currency_scale_authority_fence'
+					ELSE '20260730000400_phase3_broker_funding_acl'
+				END,
 				true
 			),
 			set_config(
@@ -354,32 +427,123 @@ func seedFundingHistory(
 			decode(repeat(lpad((stream_sequence + 10)::text, 2, '0'), 32), 'hex'),
 			decode(repeat(lpad((stream_sequence + 20)::text, 2, '0'), 32), 'hex'),
 			jsonb_build_object('LogicalTime', logical_time),
-			'{"DecisionHashVersion":4}'::jsonb,
+			decision,
 			decode(repeat(lpad((stream_sequence + 30)::text, 2, '0'), 32), 'hex'),
 			1
 		  FROM (
 			VALUES
 				(
-					'019f9b6d-3154-4db1-b639-57c246e92301'::uuid,
+					'019f9b6d-3154-4db1-b639-57c246e92300'::uuid,
 					1::bigint,
-					$1::bigint
+					$1::bigint - 100000000000,
+					'{
+						"DecisionHashVersion":4,
+						"CommandResult":{"Status":"accepted"},
+						"InstrumentChanges":[{
+							"InstrumentID":"BTC-PERP",
+							"Revision":1,
+							"PriceScale":2,
+							"QuantityScale":3,
+							"SettlementCurrency":"USDC",
+							"SettlementCurrencyScale":2,
+							"InitialMarginRate":"0.1",
+							"MaintenanceMarginRate":"0.05",
+							"MaxLeverage":"10",
+							"MakerFeeRate":"-0.0001",
+							"TakerFeeRate":"0.0005"
+						}]
+					}'::jsonb
+				),
+				(
+					'019f9b6d-3154-4db1-b639-57c246e92301'::uuid,
+					2::bigint,
+					$1::bigint,
+					'{
+						"DecisionHashVersion":4,
+						"CommandResult":{"Status":"accepted"},
+						"FundingChanges":[{
+							"FundingID":[1,159,155,109,49,84,77,177,182,57,87,194,70,233,36,1],
+							"SettlementID":[1,159,155,109,49,84,77,177,182,57,87,194,70,233,37,1],
+							"PositionID":[1,159,155,109,49,84,77,177,182,57,87,194,70,233,34,1],
+							"AccountID":"urn:xb:account:funding-one",
+							"InstrumentID":"BTC-PERP",
+							"SignedQuantity":"1",
+							"OraclePrice":"1000",
+							"Rate":"0.0000125",
+							"Amount":"-10",
+							"SettlementCurrency":"USDC"
+						}]
+					}'::jsonb
 				),
 				(
 					'019f9b6d-3154-4db1-b639-57c246e92302'::uuid,
-					2::bigint,
-					$2::bigint
+					3::bigint,
+					$2::bigint,
+					'{
+						"DecisionHashVersion":4,
+						"CommandResult":{"Status":"accepted"},
+						"FundingChanges":[{
+							"FundingID":[1,159,155,109,49,84,77,177,182,57,87,194,70,233,36,2],
+							"SettlementID":[1,159,155,109,49,84,77,177,182,57,87,194,70,233,37,2],
+							"PositionID":[1,159,155,109,49,84,77,177,182,57,87,194,70,233,34,1],
+							"AccountID":"urn:xb:account:funding-one",
+							"InstrumentID":"BTC-PERP",
+							"SignedQuantity":"1",
+							"OraclePrice":"1000",
+							"Rate":"0.0000125",
+							"Amount":"5",
+							"SettlementCurrency":"USDC"
+						}]
+					}'::jsonb
 				),
 				(
 					'019f9b6d-3154-4db1-b639-57c246e92303'::uuid,
-					3::bigint,
-					$3::bigint
+					4::bigint,
+					$3::bigint,
+					'{
+						"DecisionHashVersion":4,
+						"CommandResult":{"Status":"accepted"},
+						"FundingChanges":[{
+							"FundingID":[1,159,155,109,49,84,77,177,182,57,87,194,70,233,36,3],
+							"SettlementID":[1,159,155,109,49,84,77,177,182,57,87,194,70,233,37,3],
+							"PositionID":[1,159,155,109,49,84,77,177,182,57,87,194,70,233,34,1],
+							"AccountID":"urn:xb:account:funding-one",
+							"InstrumentID":"BTC-PERP",
+							"SignedQuantity":"1",
+							"OraclePrice":"1000",
+							"Rate":"0.0000125",
+							"Amount":"-2",
+							"SettlementCurrency":"USDC"
+						}]
+					}'::jsonb
 				),
 				(
 					'019f9b6d-3154-4db1-b639-57c246e92304'::uuid,
-					4::bigint,
-					$3::bigint
+					5::bigint,
+					$3::bigint,
+					'{
+						"DecisionHashVersion":4,
+						"CommandResult":{"Status":"accepted"},
+						"FundingChanges":[{
+							"FundingID":[1,159,155,109,49,84,77,177,182,57,87,194,70,233,36,4],
+							"SettlementID":[1,159,155,109,49,84,77,177,182,57,87,194,70,233,37,4],
+							"PositionID":[1,159,155,109,49,84,77,177,182,57,87,194,70,233,34,2],
+							"AccountID":"urn:xb:account:funding-two",
+							"InstrumentID":"BTC-PERP",
+							"SignedQuantity":"1",
+							"OraclePrice":"1000",
+							"Rate":"0.0000125",
+							"Amount":"-3",
+							"SettlementCurrency":"USDC"
+						}]
+					}'::jsonb
 				)
-		  ) AS receipts(input_id, stream_sequence, logical_time)`,
+		  ) AS receipts(
+			input_id,
+			stream_sequence,
+			logical_time,
+			decision
+		  )`,
 		baseTime.Add(-300*time.Second).UnixNano(),
 		baseTime.Add(-200*time.Second).UnixNano(),
 		baseTime.Add(-100*time.Second).UnixNano(),
@@ -463,6 +627,33 @@ func seedFundingHistory(
 		baseTime.Add(-100*time.Second).UnixNano(),
 	); err != nil {
 		t.Fatalf("seed funding history projection: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DO $$
+		BEGIN
+			IF pg_catalog.to_regclass(
+				'trading.funding_instrument_provenance'
+			) IS NOT NULL THEN
+				INSERT INTO trading.funding_instrument_provenance (
+					funding_id,
+					instrument_id,
+					revision,
+					price_scale,
+					quantity_scale
+				)
+				SELECT
+					funding.funding_id,
+					funding.instrument_id,
+					instrument.revision,
+					instrument.price_scale,
+					instrument.quantity_scale
+				  FROM trading.funding_settlements AS funding
+				  JOIN trading.instruments AS instrument
+				    ON instrument.instrument_id = funding.instrument_id;
+			END IF;
+		END
+		$$`); err != nil {
+		t.Fatalf("seed funding instrument provenance: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit funding history seed: %v", err)

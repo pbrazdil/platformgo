@@ -662,6 +662,37 @@ func TestFundingHistoryMigrationUpgradesPopulatedRealtimeSchema(t *testing.T) {
 		len(decision.BookChanges) != 0 {
 		t.Fatalf("derive previous-schema funding receipt: %+v, %v", decision, err)
 	}
+	fundingID, err := engine.ParseID(
+		"019f9b6d-3154-4db1-b639-57c246e92401",
+	)
+	if err != nil {
+		t.Fatalf("parse previous-schema funding ID: %v", err)
+	}
+	settlementID, err := engine.ParseID(
+		"019f9b6d-3154-4db1-b639-57c246e92501",
+	)
+	if err != nil {
+		t.Fatalf("parse previous-schema settlement ID: %v", err)
+	}
+	previousPositionID, err := engine.ParseID(
+		"019f9b6d-3154-4db1-b639-57c246e92201",
+	)
+	if err != nil {
+		t.Fatalf("parse previous-schema position ID: %v", err)
+	}
+	decision.CommandResult.Status = engine.CommandStatusAccepted
+	decision.FundingChanges = []engine.FundingSnapshot{{
+		FundingID:          fundingID,
+		SettlementID:       settlementID,
+		PositionID:         previousPositionID,
+		AccountID:          "account-1",
+		InstrumentID:       "BTC-PERP",
+		SignedQuantity:     "3",
+		OraclePrice:        "100",
+		Rate:               "0.01",
+		Amount:             "-3",
+		SettlementCurrency: "USDC",
+	}}
 	envelopeJSON, err := json.Marshal(struct {
 		InputID              string
 		SchemaVersion        uint32
@@ -729,7 +760,7 @@ func TestFundingHistoryMigrationUpgradesPopulatedRealtimeSchema(t *testing.T) {
 			business_input_hash, business_input_hash_version
 		)
 		SELECT
-			41, $1, 1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+			41, $1, 2, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 		  FROM runtime_revision`,
 		input.InputID.String(),
 		decision.InputHashVersion,
@@ -750,7 +781,7 @@ func TestFundingHistoryMigrationUpgradesPopulatedRealtimeSchema(t *testing.T) {
 		41,
 		"20260725001100_phase3_committed_realtime_outbox",
 		"00000000-0000-4000-8000-000000000913",
-		2,
+		1,
 		"BTC-PERP",
 		"USDC",
 		2,
@@ -1372,7 +1403,7 @@ func TestRuntimeMigrationVerificationIsExactAndOldEngineIsFenced(t *testing.T) {
 			SELECT
 				set_config(
 					'platformgo.runtime_schema_revision',
-					'20260730000200_phase3_currency_scale_authority_fence',
+					'20260730000400_phase3_broker_funding_acl',
 					true
 				),
 				set_config(
@@ -1851,7 +1882,7 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260730000200_phase3_currency_scale_authority_fence',
+				'20260730000400_phase3_broker_funding_acl',
 				false
 			),
 			set_config(
@@ -2143,7 +2174,7 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 			SELECT
 				set_config(
 					'platformgo.runtime_schema_revision',
-					'20260730000200_phase3_currency_scale_authority_fence',
+					'20260730000400_phase3_broker_funding_acl',
 					true
 				),
 				set_config(
@@ -2358,7 +2389,8 @@ func TestFinalBaselineFailsWhenPreprovisionedRuntimeRoleIsMissing(t *testing.T) 
 	dropDurableSchemas(t, pool)
 	if _, err := pool.Exec(
 		context.Background(),
-		"DROP ROLE platformgo_projector",
+		`DROP OWNED BY platformgo_projector CASCADE;
+		DROP ROLE platformgo_projector`,
 	); err != nil {
 		t.Fatalf("remove required runtime role: %v", err)
 	}
@@ -5027,8 +5059,8 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	assertMigrationHistoryTip(
 		t,
 		pool,
-		39,
-		"20260730000300_phase3_broker_account_list_index.up.sql",
+		40,
+		"20260730000400_phase3_broker_funding_acl.up.sql",
 	)
 }
 
@@ -5804,7 +5836,7 @@ func assertReceiptIdentityConstraints(t *testing.T, pool *pgxpool.Pool) {
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260730000200_phase3_currency_scale_authority_fence',
+				'20260730000400_phase3_broker_funding_acl',
 				false
 			),
 			set_config(

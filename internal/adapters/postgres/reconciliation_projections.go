@@ -58,6 +58,7 @@ type inputFunding struct {
 	Snapshot   engine.FundingSnapshot
 	InputID    engine.ID
 	Projection fundingHistoryProjection
+	Provenance fundingInstrumentProvenance
 }
 
 type fundingHistoryProjection struct {
@@ -66,6 +67,14 @@ type fundingHistoryProjection struct {
 	InstrumentID string
 	PositionID   string
 	LogicalTime  engine.LogicalTime
+}
+
+type fundingInstrumentProvenance struct {
+	Present       bool
+	InstrumentID  string
+	Revision      uint64
+	PriceScale    uint8
+	QuantityScale uint8
 }
 
 type durableDomainEvent struct {
@@ -276,6 +285,7 @@ func loadExpectedProjections(
 			expected.positions[change.PositionID.String()] = change
 		}
 		for _, change := range decision.FundingChanges {
+			instrument := expected.instruments[change.InstrumentID].Snapshot
 			expected.funding[change.FundingID.String()] = inputFunding{
 				Snapshot: change,
 				InputID:  input.InputID,
@@ -285,6 +295,13 @@ func loadExpectedProjections(
 					InstrumentID: change.InstrumentID,
 					PositionID:   change.PositionID.String(),
 					LogicalTime:  input.LogicalTime,
+				},
+				Provenance: fundingInstrumentProvenance{
+					Present:       true,
+					InstrumentID:  change.InstrumentID,
+					Revision:      instrument.Revision,
+					PriceScale:    instrument.PriceScale,
+					QuantityScale: instrument.QuantityScale,
 				},
 			}
 		}
@@ -999,10 +1016,17 @@ func compareFunding(
 		       COALESCE(history.account_id, ''),
 		       COALESCE(history.instrument_id, ''),
 		       COALESCE(history.position_id::text, ''),
-		       COALESCE(history.logical_time, 0)
+		       COALESCE(history.logical_time, 0),
+		       provenance.funding_id IS NOT NULL,
+		       COALESCE(provenance.instrument_id, ''),
+		       COALESCE(provenance.revision, 0),
+		       COALESCE(provenance.price_scale, 0),
+		       COALESCE(provenance.quantity_scale, 0)
 		  FROM trading.funding_settlements AS funding
 		  LEFT JOIN trading.funding_history_projection AS history
-		    ON history.funding_id = funding.funding_id`)
+		    ON history.funding_id = funding.funding_id
+		  LEFT JOIN trading.funding_instrument_provenance AS provenance
+		    ON provenance.funding_id = funding.funding_id`)
 	if err != nil {
 		return 0, err
 	}
@@ -1028,6 +1052,11 @@ func compareFunding(
 			&actual.Projection.InstrumentID,
 			&actual.Projection.PositionID,
 			&actual.Projection.LogicalTime,
+			&actual.Provenance.Present,
+			&actual.Provenance.InstrumentID,
+			&actual.Provenance.Revision,
+			&actual.Provenance.PriceScale,
+			&actual.Provenance.QuantityScale,
 		); scanErr != nil {
 			return 0, scanErr
 		}
@@ -1049,7 +1078,36 @@ func compareFunding(
 		}
 		delete(expected, fundingID)
 	}
-	return mismatches + uint64(len(expected)), rows.Err()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	rows.Close()
+
+	var extraProvenance uint64
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM trading.funding_instrument_provenance AS provenance
+		  LEFT JOIN trading.funding_settlements AS funding
+		    ON funding.funding_id = provenance.funding_id
+		 WHERE funding.funding_id IS NULL`,
+	).Scan(&extraProvenance); err != nil {
+		return 0, err
+	}
+
+	var orphanHistory uint64
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM trading.funding_history_projection AS history
+		  LEFT JOIN trading.funding_settlements AS funding
+		    ON funding.funding_id = history.funding_id
+		 WHERE funding.funding_id IS NULL`,
+	).Scan(&orphanHistory); err != nil {
+		return 0, err
+	}
+	return mismatches +
+		uint64(len(expected)) +
+		extraProvenance +
+		orphanHistory, nil
 }
 
 func compareLedger(
