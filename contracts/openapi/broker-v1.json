@@ -190,6 +190,106 @@
         ],
         "type": "object"
       },
+      "FillExecutionPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FillExecutionView"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "type": "string"
+          },
+          "prevCursor": {
+            "type": "string"
+          },
+          "total": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total"
+        ],
+        "type": "object"
+      },
+      "FillExecutionView": {
+        "properties": {
+          "fillId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "filledAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "leverage": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "orderId": {
+            "type": "string"
+          },
+          "positionId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "realizedPnl": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "enum": [
+              "manual",
+              "stop_loss",
+              "take_profit",
+              "liquidation",
+              "flatten"
+            ],
+            "type": "string"
+          },
+          "settlementCurrency": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "side": {
+            "enum": [
+              "BUY",
+              "SELL"
+            ],
+            "type": "string"
+          },
+          "tradeType": {
+            "enum": [
+              "open",
+              "increase",
+              "reduce",
+              "flip",
+              "close"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "fillId",
+          "orderId",
+          "positionId",
+          "side",
+          "tradeType",
+          "reason",
+          "realizedPnl",
+          "settlementCurrency",
+          "filledAt"
+        ],
+        "type": "object"
+      },
       "FundingView": {
         "properties": {
           "amount": {
@@ -673,12 +773,129 @@
     "/broker/v1/accounts/{accountId}/fills": {
       "get": {
         "operationId": "get_broker_v1_accounts_accountId_fills",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "accountId",
+            "required": true,
+            "schema": {
+              "pattern": "^urn:xb:account:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "direction",
+            "required": false,
+            "schema": {
+              "enum": [
+                "next",
+                "prev",
+                "backward"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "side",
+            "required": false,
+            "schema": {
+              "enum": [
+                "BUY",
+                "SELL",
+                "buy",
+                "sell"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tradeId",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
-          "default": {
-            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FillExecutionPage"
+                }
+              }
+            },
+            "description": "Committed moving keyset view of the current Go fill projection, newest first"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid credentials"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
           }
         },
-        "x-platformgo-contract-status": "source-route-inventory"
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
       }
     },
     "/broker/v1/accounts/{accountId}/flatten": {

@@ -1301,6 +1301,31 @@ func (store *CompatibilityStore) FilterFillExecutions(
 	accountID string,
 	filter FillExecutionFilter,
 ) (edge.FillExecutionPage, error) {
+	return store.filterFillExecutions(ctx, accountID, nil, filter)
+}
+
+// BrokerFills returns the accepted fill page only when both durable account
+// authorities belong to brokerTenant in the same statement as the page read.
+func (store *CompatibilityStore) BrokerFills(
+	ctx context.Context,
+	brokerTenant string,
+	accountID string,
+	filter FillExecutionFilter,
+) (edge.FillExecutionPage, error) {
+	return store.filterFillExecutions(
+		ctx,
+		accountID,
+		&brokerTenant,
+		filter,
+	)
+}
+
+func (store *CompatibilityStore) filterFillExecutions(
+	ctx context.Context,
+	accountID string,
+	brokerTenant *string,
+	filter FillExecutionFilter,
+) (edge.FillExecutionPage, error) {
 	side := strings.ToUpper(strings.TrimSpace(filter.Side))
 	if side != "" && side != "BUY" && side != "SELL" {
 		return edge.FillExecutionPage{}, edge.ErrInvalidRequest
@@ -1336,7 +1361,20 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		requestedTradeID = tradeID
 	}
 	query := `
-		WITH page AS (
+		WITH authority AS (
+			SELECT true AS authorized
+			 WHERE $2::text IS NULL
+			UNION ALL
+			SELECT true
+			  FROM identity.user_accounts AS ownership
+			  JOIN identity.account_profiles AS profile
+			    ON profile.account_id = ownership.account_id
+			   AND profile.broker_subject = $2
+			 WHERE $2::text IS NOT NULL
+			   AND ownership.account_id = $1
+			   AND ownership.broker_subject = $2
+		),
+		page AS (
 			SELECT
 				fill.fill_id,
 				fill.order_id,
@@ -1347,19 +1385,27 @@ func (store *CompatibilityStore) FilterFillExecutions(
 				fill.settlement_currency,
 				fill.effective_leverage,
 				fill.logical_time
-			  FROM trading.fills AS fill
+			  FROM authority
+			  JOIN trading.fills AS fill
+			    ON fill.account_id = $1
 			 WHERE fill.account_id = $1
-			   AND ($2::text IS NULL OR fill.side = $2)
-			   AND ($3::uuid IS NULL OR fill.fill_id = $3)
+			   AND ($3::text IS NULL OR fill.side = $3)
+			   AND ($4::uuid IS NULL OR fill.fill_id = $4)
 			 ORDER BY fill.logical_time DESC, fill.fill_id DESC
-			 LIMIT $4
+			 LIMIT $5
 		),
 		filtered_total AS (
-			SELECT count(*) AS total
-			  FROM trading.fills AS counted
-			 WHERE counted.account_id = $1
-			   AND ($2::text IS NULL OR counted.side = $2)
-			   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+			SELECT CASE
+				WHEN EXISTS (SELECT 1 FROM authority)
+				THEN (
+					SELECT count(*)
+					  FROM trading.fills AS counted
+					 WHERE counted.account_id = $1
+					   AND ($3::text IS NULL OR counted.side = $3)
+					   AND ($4::uuid IS NULL OR counted.fill_id = $4)
+				)
+				ELSE -1
+			END AS total
 		)
 		SELECT
 			page.fill_id::text,
@@ -1392,13 +1438,27 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		          page.fill_id DESC NULLS LAST`
 	args := []any{
 		accountID,
+		brokerTenant,
 		requestedSide,
 		requestedTradeID,
 		limit + 1,
 	}
 	if cursor != nil {
 		query = `
-			WITH page AS (
+			WITH authority AS (
+				SELECT true AS authorized
+				 WHERE $2::text IS NULL
+				UNION ALL
+				SELECT true
+				  FROM identity.user_accounts AS ownership
+				  JOIN identity.account_profiles AS profile
+				    ON profile.account_id = ownership.account_id
+				   AND profile.broker_subject = $2
+				 WHERE $2::text IS NOT NULL
+				   AND ownership.account_id = $1
+				   AND ownership.broker_subject = $2
+			),
+			page AS (
 				SELECT
 					fill.fill_id,
 					fill.order_id,
@@ -1409,20 +1469,28 @@ func (store *CompatibilityStore) FilterFillExecutions(
 					fill.settlement_currency,
 					fill.effective_leverage,
 					fill.logical_time
-				  FROM trading.fills AS fill
+				  FROM authority
+				  JOIN trading.fills AS fill
+				    ON fill.account_id = $1
 				 WHERE fill.account_id = $1
-				   AND ($2::text IS NULL OR fill.side = $2)
-				   AND ($3::uuid IS NULL OR fill.fill_id = $3)
-				   AND (fill.logical_time, fill.fill_id) < ($4, $5)
+				   AND ($3::text IS NULL OR fill.side = $3)
+				   AND ($4::uuid IS NULL OR fill.fill_id = $4)
+				   AND (fill.logical_time, fill.fill_id) < ($5, $6)
 				 ORDER BY fill.logical_time DESC, fill.fill_id DESC
-				 LIMIT $6
+				 LIMIT $7
 			),
 			filtered_total AS (
-				SELECT count(*) AS total
-				  FROM trading.fills AS counted
-				 WHERE counted.account_id = $1
-				   AND ($2::text IS NULL OR counted.side = $2)
-				   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+				SELECT CASE
+					WHEN EXISTS (SELECT 1 FROM authority)
+					THEN (
+						SELECT count(*)
+						  FROM trading.fills AS counted
+						 WHERE counted.account_id = $1
+						   AND ($3::text IS NULL OR counted.side = $3)
+						   AND ($4::uuid IS NULL OR counted.fill_id = $4)
+					)
+					ELSE -1
+				END AS total
 			)
 			SELECT
 				page.fill_id::text,
@@ -1455,7 +1523,20 @@ func (store *CompatibilityStore) FilterFillExecutions(
 			          page.fill_id DESC NULLS LAST`
 		if !forward {
 			query = `
-				WITH page AS (
+				WITH authority AS (
+					SELECT true AS authorized
+					 WHERE $2::text IS NULL
+					UNION ALL
+					SELECT true
+					  FROM identity.user_accounts AS ownership
+					  JOIN identity.account_profiles AS profile
+					    ON profile.account_id = ownership.account_id
+					   AND profile.broker_subject = $2
+					 WHERE $2::text IS NOT NULL
+					   AND ownership.account_id = $1
+					   AND ownership.broker_subject = $2
+				),
+				page AS (
 					SELECT
 						fill.fill_id,
 						fill.order_id,
@@ -1466,20 +1547,28 @@ func (store *CompatibilityStore) FilterFillExecutions(
 						fill.settlement_currency,
 						fill.effective_leverage,
 						fill.logical_time
-					  FROM trading.fills AS fill
+					  FROM authority
+					  JOIN trading.fills AS fill
+					    ON fill.account_id = $1
 					 WHERE fill.account_id = $1
-					   AND ($2::text IS NULL OR fill.side = $2)
-					   AND ($3::uuid IS NULL OR fill.fill_id = $3)
-					   AND (fill.logical_time, fill.fill_id) > ($4, $5)
+					   AND ($3::text IS NULL OR fill.side = $3)
+					   AND ($4::uuid IS NULL OR fill.fill_id = $4)
+					   AND (fill.logical_time, fill.fill_id) > ($5, $6)
 					 ORDER BY fill.logical_time ASC, fill.fill_id ASC
-					 LIMIT $6
+					 LIMIT $7
 				),
 				filtered_total AS (
-					SELECT count(*) AS total
-					  FROM trading.fills AS counted
-					 WHERE counted.account_id = $1
-					   AND ($2::text IS NULL OR counted.side = $2)
-					   AND ($3::uuid IS NULL OR counted.fill_id = $3)
+					SELECT CASE
+						WHEN EXISTS (SELECT 1 FROM authority)
+						THEN (
+							SELECT count(*)
+							  FROM trading.fills AS counted
+							 WHERE counted.account_id = $1
+							   AND ($3::text IS NULL OR counted.side = $3)
+							   AND ($4::uuid IS NULL OR counted.fill_id = $4)
+						)
+						ELSE -1
+					END AS total
 				)
 				SELECT
 					page.fill_id::text,
@@ -1513,6 +1602,7 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		}
 		args = []any{
 			accountID,
+			brokerTenant,
 			requestedSide,
 			requestedTradeID,
 			cursor.logicalTime,
@@ -1525,6 +1615,30 @@ func (store *CompatibilityStore) FilterFillExecutions(
 		return edge.FillExecutionPage{}, fmt.Errorf("filter fill executions: %w", err)
 	}
 	defer rows.Close()
+	return collectFillExecutionRows(
+		rows,
+		accountID,
+		brokerTenant != nil,
+		limit,
+		cursor,
+		forward,
+	)
+}
+
+type fillExecutionRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}
+
+func collectFillExecutionRows(
+	rows fillExecutionRows,
+	accountID string,
+	brokerRead bool,
+	limit int,
+	cursor *fillHistoryCursor,
+	forward bool,
+) (edge.FillExecutionPage, error) {
 	history := make([]fillHistoryRow, 0, limit+1)
 	var total int64
 	for rows.Next() {
@@ -1644,6 +1758,9 @@ func (store *CompatibilityStore) FilterFillExecutions(
 	}
 	if err := rows.Err(); err != nil {
 		return edge.FillExecutionPage{}, fmt.Errorf("filter fill executions: %w", err)
+	}
+	if brokerRead && total == -1 {
+		return edge.FillExecutionPage{}, edge.ErrForbidden
 	}
 	hasMore := len(history) > limit
 	if hasMore {

@@ -42,18 +42,25 @@ func (testAuthenticator) AuthenticateBroker(
 	switch token {
 	case "broker-key":
 		scopes = []string{"accounts:read"}
+	case "broker-noscope":
+		scopes = []string{"users:write"}
+	case "broker-wildcard":
+		scopes = []string{"*"}
 	case "broker-full":
 		scopes = []string{"accounts:read", "accounts:write", "tokens:mint"}
 	case "broker-other":
 		return Principal{
-			Subject: "urn:xb:apikey:broker-2", Audience: AudienceBroker,
-			Scopes: []string{"accounts:read"},
+			Subject:  "urn:xb:apikey:broker-2",
+			Tenant:   "urn:xb:tenant:other",
+			Audience: AudienceBroker,
+			Scopes:   []string{"accounts:read"},
 		}, nil
 	default:
 		return Principal{}, ErrUnauthorized
 	}
 	return Principal{
 		Subject:  "urn:xb:apikey:broker-1",
+		Tenant:   "urn:xb:tenant:broker-1",
 		Audience: AudienceBroker,
 		Scopes:   scopes,
 	}, nil
@@ -823,6 +830,235 @@ func (emptyFillsReader) Fills(
 	FillExecutionFilter,
 ) (FillExecutionPage, error) {
 	return FillExecutionPage{}, nil
+}
+
+type recordingBrokerFillsReader struct {
+	calls     int
+	tenant    string
+	accountID string
+	filter    FillExecutionFilter
+	page      FillExecutionPage
+	err       error
+}
+
+func (reader *recordingBrokerFillsReader) BrokerFills(
+	_ context.Context,
+	tenant string,
+	accountID string,
+	filter FillExecutionFilter,
+) (FillExecutionPage, error) {
+	reader.calls++
+	reader.tenant = tenant
+	reader.accountID = accountID
+	reader.filter = filter
+	return reader.page, reader.err
+}
+
+func TestBrokerFillsRouteFreezesGateOrderAndTenantAuthority(t *testing.T) {
+	reader := &recordingBrokerFillsReader{
+		page: FillExecutionPage{Items: []FillExecutionView{}, Total: 0},
+	}
+	handler := NewServer(ServerConfig{
+		Authenticator: testAuthenticator{},
+		BrokerFills:   reader,
+		TrustedProxies: []netip.Prefix{
+			netip.MustParsePrefix("192.0.2.0/24"),
+		},
+		RequestID: func() string { return "broker-fills-gate" },
+	}).Handler()
+	const path = "/broker/v1/accounts/urn:xb:account:00000000-0000-4000-8000-000000000009/fills?limit=bad"
+
+	for _, test := range []struct {
+		name   string
+		key    string
+		status int
+		body   string
+	}{
+		{
+			name: "invalid credential dominates malformed query",
+			key:  "invalid", status: http.StatusUnauthorized,
+			body: `{"code":"unauthorized","message":"unauthorized","requestId":"broker-fills-gate"}` + "\n",
+		},
+		{
+			name: "scope dominates malformed query",
+			key:  "broker-noscope", status: http.StatusForbidden,
+			body: `{"code":"forbidden","message":"forbidden","requestId":"broker-fills-gate"}` + "\n",
+		},
+		{
+			name: "valid scope reaches parsing",
+			key:  "broker-key", status: http.StatusBadRequest,
+			body: `{"code":"invalid_request","message":"invalid fills page","requestId":"broker-fills-gate"}` + "\n",
+		},
+		{
+			name: "wildcard scope reaches parsing",
+			key:  "broker-wildcard", status: http.StatusBadRequest,
+			body: `{"code":"invalid_request","message":"invalid fills page","requestId":"broker-fills-gate"}` + "\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := performRequest(
+				t,
+				handler,
+				http.MethodGet,
+				path,
+				nil,
+				map[string]string{
+					"x-api-key":       test.key,
+					"x-forwarded-for": "203.0.113.7",
+				},
+			)
+			if response.Code != test.status || response.Body.String() != test.body {
+				t.Fatalf(
+					"status = %d body=%q, want status=%d body=%q",
+					response.Code,
+					response.Body.String(),
+					test.status,
+					test.body,
+				)
+			}
+			if reader.calls != 0 {
+				t.Fatalf("reader calls = %d, want 0", reader.calls)
+			}
+		})
+	}
+
+	response := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/broker/v1/accounts/urn:xb:account:00000000-0000-4000-8000-000000000009/fills?side=buy&limit=2",
+		nil,
+		map[string]string{
+			"x-api-key":       "broker-key",
+			"x-forwarded-for": "203.0.113.7",
+		},
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", response.Code, response.Body.String())
+	}
+	if reader.calls != 1 {
+		t.Fatalf("reader calls = %d, want 1", reader.calls)
+	}
+	if reader.tenant != "urn:xb:tenant:broker-1" {
+		t.Fatalf("tenant = %q, want authenticated tenant", reader.tenant)
+	}
+	if reader.accountID != "urn:xb:account:00000000-0000-4000-8000-000000000009" {
+		t.Fatalf("account = %q, want canonical account URN", reader.accountID)
+	}
+	if reader.filter.Side != "BUY" || reader.filter.Limit != 2 {
+		t.Fatalf("filter = %#v, want canonical side and limit", reader.filter)
+	}
+}
+
+func TestBrokerFillsRouteRejectsNoncanonicalAccountIDBeforeRead(t *testing.T) {
+	reader := &recordingBrokerFillsReader{}
+	handler := NewServer(ServerConfig{
+		Authenticator: testAuthenticator{},
+		BrokerFills:   reader,
+		TrustedProxies: []netip.Prefix{
+			netip.MustParsePrefix("192.0.2.0/24"),
+		},
+	}).Handler()
+	headers := map[string]string{
+		"x-api-key":       "broker-key",
+		"x-forwarded-for": "203.0.113.7",
+	}
+	for _, accountID := range []string{
+		"00000000-0000-4000-8000-000000000009",
+		"urn:xb:account:00000000-0000-4000-8000-00000000000A",
+		"not-a-uuid",
+	} {
+		response := performRequest(
+			t,
+			handler,
+			http.MethodGet,
+			"/broker/v1/accounts/"+accountID+"/fills",
+			nil,
+			headers,
+		)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf(
+				"account %q status=%d body=%s, want 400",
+				accountID,
+				response.Code,
+				response.Body.String(),
+			)
+		}
+	}
+	if reader.calls != 0 {
+		t.Fatalf("reader calls = %d, want 0", reader.calls)
+	}
+}
+
+func TestBrokerFillsRouteMapsAuthorizationAndStorageErrorsWithoutPartialPage(
+	t *testing.T,
+) {
+	for _, test := range []struct {
+		name   string
+		err    error
+		status int
+		body   string
+	}{
+		{
+			name:   "tenant denial",
+			err:    ErrForbidden,
+			status: http.StatusForbidden,
+			body: `{"code":"forbidden","message":"forbidden","requestId":"broker-fills-request"}` +
+				"\n",
+		},
+		{
+			name:   "storage failure",
+			err:    errors.New("contains-sensitive-fill-id"),
+			status: http.StatusServiceUnavailable,
+			body: `{"code":"unavailable","message":"trading views unavailable","requestId":"broker-fills-request"}` +
+				"\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader := &recordingBrokerFillsReader{
+				page: FillExecutionPage{
+					Items: []FillExecutionView{{
+						FillID: "must-not-leak",
+					}},
+					Total: 99,
+				},
+				err: test.err,
+			}
+			handler := NewServer(ServerConfig{
+				Authenticator: testAuthenticator{},
+				BrokerFills:   reader,
+				TrustedProxies: []netip.Prefix{
+					netip.MustParsePrefix("192.0.2.0/24"),
+				},
+				RequestID: func() string { return "broker-fills-request" },
+			}).Handler()
+			response := performRequest(
+				t,
+				handler,
+				http.MethodGet,
+				"/broker/v1/accounts/urn:xb:account:00000000-0000-4000-8000-000000000009/fills",
+				nil,
+				map[string]string{
+					"x-api-key":       "broker-key",
+					"x-forwarded-for": "203.0.113.7",
+				},
+			)
+			if response.Code != test.status || response.Body.String() != test.body {
+				t.Fatalf(
+					"response status=%d body=%q, want status=%d body=%q",
+					response.Code,
+					response.Body.String(),
+					test.status,
+					test.body,
+				)
+			}
+			if strings.Contains(response.Body.String(), "must-not-leak") ||
+				strings.Contains(response.Body.String(), "99") ||
+				strings.Contains(response.Body.String(), "sensitive") {
+				t.Fatalf("response leaked partial page or storage detail: %s", response.Body.String())
+			}
+		})
+	}
 }
 
 func TestFillsRouteReturnsNonNullEmptyItems(t *testing.T) {

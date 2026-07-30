@@ -82,6 +82,7 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 	}
 	requiredDeviations := []string{
 		"broker-account-identifiers-preserve-current-go-urns",
+		"broker-fills-preserves-current-go-projection-and-tenant-authority",
 		"client-api-key-creation-requires-idempotency-key",
 		"fill-trade-type-is-always-classified",
 		"native-login-refresh-placement-preserves-current-go-client-boundary",
@@ -129,6 +130,12 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 	}
 	if !foundDeviations["fills-http-preserves-current-go-projection"] {
 		t.Fatal("implemented GET account fills must declare its projection deviation")
+	}
+	if !contains(
+		manifest.ImplementedHTTPRoutes,
+		"GET /broker/v1/accounts/{accountId}/fills",
+	) {
+		t.Fatal("GET broker account fills missing from compatibility manifest")
 	}
 }
 
@@ -239,6 +246,78 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 	if inventory["x-platformgo-contract-status"] != "source-route-inventory" {
 		t.Fatalf("broker account read inventory status = %v", inventory["x-platformgo-contract-status"])
 	}
+	brokerFills := assertMethod(
+		t,
+		broker,
+		"/broker/v1/accounts/{accountId}/fills",
+		"get",
+	)
+	for _, status := range []string{"200", "400", "401", "403", "503"} {
+		assertResponse(t, brokerFills, status)
+	}
+	if brokerFills["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
+		t.Fatalf("broker fills contract status = %v", brokerFills["x-platformgo-contract-status"])
+	}
+	assertOperationSecurity(t, brokerFills, "apiKey")
+	assertOperationParameters(
+		t,
+		brokerFills,
+		"accountId",
+		"limit",
+		"cursor",
+		"direction",
+		"side",
+		"tradeId",
+	)
+	assertOperationParameterPattern(
+		t,
+		brokerFills,
+		"accountId",
+		`^urn:xb:account:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
+	)
+	brokerSchemas := broker["components"].(map[string]any)["schemas"].(map[string]any)
+	assertRequiredFields(
+		t,
+		brokerSchemas["FillExecutionView"].(map[string]any),
+		"fillId",
+		"orderId",
+		"positionId",
+		"side",
+		"tradeType",
+		"reason",
+		"realizedPnl",
+		"settlementCurrency",
+		"filledAt",
+	)
+	assertRequiredFields(
+		t,
+		brokerSchemas["FillExecutionPage"].(map[string]any),
+		"items",
+		"total",
+	)
+	for _, schemaName := range []string{
+		"FillExecutionPage",
+		"FillExecutionView",
+	} {
+		if !reflect.DeepEqual(brokerSchemas[schemaName], schemas[schemaName]) {
+			t.Fatalf(
+				"broker %s schema differs from accepted client schema",
+				schemaName,
+			)
+		}
+	}
+	brokerFillProperties := brokerSchemas["FillExecutionView"].(map[string]any)["properties"].(map[string]any)
+	if _, required := requiredFieldSet(
+		brokerSchemas["FillExecutionView"].(map[string]any),
+	)["leverage"]; required {
+		t.Fatal("broker fill leverage must remain optional for historical rows")
+	}
+	for _, nullableField := range []string{
+		"realizedPnl",
+		"settlementCurrency",
+	} {
+		assertNullableSchemaField(t, brokerFillProperties, nullableField)
+	}
 	echo := assertMethod(t, broker, "/broker/v1/echo", "post")
 	for _, status := range []string{"200", "401", "403", "409", "429", "503"} {
 		assertResponse(t, echo, status)
@@ -273,6 +352,31 @@ func assertOperationParameters(
 	}
 }
 
+func assertOperationParameterPattern(
+	t *testing.T,
+	operation map[string]any,
+	name string,
+	wanted string,
+) {
+	t.Helper()
+	raw, ok := operation["parameters"].([]any)
+	if !ok {
+		t.Fatalf("operation parameters = %v", operation["parameters"])
+	}
+	for _, value := range raw {
+		parameter, ok := value.(map[string]any)
+		if !ok || parameter["name"] != name {
+			continue
+		}
+		schema, ok := parameter["schema"].(map[string]any)
+		if !ok || schema["pattern"] != wanted {
+			t.Fatalf("parameter %q schema = %v, want pattern %q", name, schema, wanted)
+		}
+		return
+	}
+	t.Fatalf("operation parameter %q missing", name)
+}
+
 func assertRequiredFields(
 	t *testing.T,
 	schema map[string]any,
@@ -295,6 +399,38 @@ func assertRequiredFields(
 		if !found[name] {
 			t.Fatalf("required field %q missing from %v", name, found)
 		}
+	}
+}
+
+func requiredFieldSet(schema map[string]any) map[string]bool {
+	raw, _ := schema["required"].([]any)
+	found := make(map[string]bool, len(raw))
+	for _, value := range raw {
+		name, ok := value.(string)
+		if ok {
+			found[name] = true
+		}
+	}
+	return found
+}
+
+func assertNullableSchemaField(
+	t *testing.T,
+	properties map[string]any,
+	field string,
+) {
+	t.Helper()
+	schema, ok := properties[field].(map[string]any)
+	if !ok {
+		t.Fatalf("schema field %q missing", field)
+	}
+	types, ok := schema["type"].([]any)
+	if !ok || !reflect.DeepEqual(types, []any{"string", "null"}) {
+		t.Fatalf(
+			"schema field %q type = %v, want [string null]",
+			field,
+			schema["type"],
+		)
 	}
 }
 

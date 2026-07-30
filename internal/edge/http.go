@@ -31,6 +31,7 @@ type Server struct {
 	realtime       RealtimeTokenIssuer
 	identity       IdentityService
 	trading        TradingReader
+	brokerFills    BrokerFillsReader
 	readiness      []HealthCheck
 	openAPI        map[string][]byte
 	allowOrigin    string
@@ -45,6 +46,7 @@ type ServerConfig struct {
 	Realtime       RealtimeTokenIssuer
 	Identity       IdentityService
 	Trading        TradingReader
+	BrokerFills    BrokerFillsReader
 	Readiness      []HealthCheck
 	OpenAPI        map[string][]byte
 	AllowOrigin    string
@@ -68,6 +70,7 @@ func NewServer(config ServerConfig) *Server {
 		realtime:       config.Realtime,
 		identity:       config.Identity,
 		trading:        config.Trading,
+		brokerFills:    config.BrokerFills,
 		readiness:      append([]HealthCheck(nil), config.Readiness...),
 		openAPI:        config.OpenAPI,
 		allowOrigin:    origin,
@@ -113,6 +116,16 @@ func (server *Server) route(writer http.ResponseWriter, request *http.Request) {
 		server.handleRealtimeToken(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/broker/v1/ping":
 		server.handleBrokerPing(writer, request)
+	case request.Method == http.MethodGet:
+		if accountID, ok := brokerFillsRoute(request.URL.Path); ok {
+			server.handleBrokerFills(writer, request, accountID)
+			return
+		}
+		if accountID, resource, ok := accountReadRoute(request.URL.Path); ok {
+			server.handleAccountRead(writer, request, accountID, resource)
+			return
+		}
+		writeError(writer, request, http.StatusNotFound, "not_found", "route not found")
 	case request.Method == http.MethodPost && request.URL.Path == "/broker/v1/echo":
 		server.handleBrokerEcho(writer, request)
 	case request.Method == http.MethodPost && request.URL.Path == "/broker/v1/users":
@@ -123,12 +136,6 @@ func (server *Server) route(writer http.ResponseWriter, request *http.Request) {
 		strings.HasPrefix(request.URL.Path, "/broker/v1/users/") &&
 		strings.HasSuffix(request.URL.Path, "/token"):
 		server.handleBrokerMintToken(writer, request)
-	case request.Method == http.MethodGet:
-		if accountID, resource, ok := accountReadRoute(request.URL.Path); ok {
-			server.handleAccountRead(writer, request, accountID, resource)
-			return
-		}
-		writeError(writer, request, http.StatusNotFound, "not_found", "route not found")
 	case request.Method == http.MethodPost:
 		accountID, ok := orderSubmitAccount(request.URL.Path)
 		if ok {
@@ -689,6 +696,85 @@ func (server *Server) handleBrokerPing(writer http.ResponseWriter, request *http
 	writeJSON(writer, http.StatusOK, map[string]bool{"ok": true})
 }
 
+func (server *Server) handleBrokerFills(
+	writer http.ResponseWriter,
+	request *http.Request,
+	accountID string,
+) {
+	principal, ok := server.brokerPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	if !principal.HasScope("accounts:read") {
+		writeError(writer, request, http.StatusForbidden, "forbidden", "forbidden")
+		return
+	}
+	const accountPrefix = "urn:xb:account:"
+	if !strings.HasPrefix(accountID, accountPrefix) ||
+		!canonicalUUID.MatchString(strings.TrimPrefix(accountID, accountPrefix)) {
+		writeError(
+			writer,
+			request,
+			http.StatusBadRequest,
+			"invalid_request",
+			"invalid account id",
+		)
+		return
+	}
+	filter, err := fillExecutionFilter(request)
+	if err != nil {
+		writeError(
+			writer,
+			request,
+			http.StatusBadRequest,
+			"invalid_request",
+			"invalid fills page",
+		)
+		return
+	}
+	if server.brokerFills == nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"trading views unavailable",
+		)
+		return
+	}
+	page, err := server.brokerFills.BrokerFills(
+		request.Context(),
+		principal.Tenant,
+		accountID,
+		filter,
+	)
+	switch {
+	case errors.Is(err, ErrForbidden):
+		writeError(writer, request, http.StatusForbidden, "forbidden", "forbidden")
+	case errors.Is(err, ErrInvalidRequest):
+		writeError(
+			writer,
+			request,
+			http.StatusBadRequest,
+			"invalid_request",
+			"invalid fills page",
+		)
+	case err != nil:
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"trading views unavailable",
+		)
+	default:
+		if page.Items == nil {
+			page.Items = make([]FillExecutionView, 0)
+		}
+		writeJSON(writer, http.StatusOK, page)
+	}
+}
+
 func (server *Server) handleBrokerEcho(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := server.brokerPrincipal(writer, request)
 	if !ok {
@@ -853,6 +939,19 @@ func accountReadRoute(path string) (string, string, bool) {
 		}
 	}
 	return "", "", false
+}
+
+func brokerFillsRoute(path string) (string, bool) {
+	const prefix = "/broker/v1/accounts/"
+	const suffix = "/fills"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	accountID := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	if accountID == "" || strings.Contains(accountID, "/") {
+		return "", false
+	}
+	return accountID, true
 }
 
 func fillExecutionFilter(request *http.Request) (FillExecutionFilter, error) {
