@@ -238,6 +238,12 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "request": "BrokerAccountRequest",
         "success": "BrokerAccountResult",
     },
+    ("GET", "/broker/v1/accounts"): {
+        "statuses": [200, 400, 401, 403, 503],
+        "success_array": "MyAccountView",
+        "security": "apiKey",
+        "user_id_filter": True,
+    },
     ("GET", "/broker/v1/accounts/{accountId}"): {
         "statuses": [200, 400, 401, 403, 503],
         "success": "MyAccountView",
@@ -383,6 +389,21 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                     "schema": {
                         "type": "string",
                         "minLength": 1,
+                    },
+                }
+            ]
+        if accepted is not None and accepted.get("user_id_filter") is True:
+            operation["parameters"] = [
+                {
+                    "name": "userId",
+                    "in": "query",
+                    "required": False,
+                    "schema": {
+                        "type": "string",
+                        "pattern": (
+                            "^urn:xb:user:[0-9a-f]{8}-[0-9a-f]{4}-"
+                            "[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                        ),
                     },
                 }
             ]

@@ -546,6 +546,15 @@ func brokerAccountReadDigest(
 	var digest string
 	if err := pool.QueryRow(ctx, `
 		SELECT jsonb_build_object(
+			'users', (
+				SELECT jsonb_agg(
+					jsonb_build_array(
+						user_id, login, normalized_login, broker_subject
+					)
+					ORDER BY user_id
+				)
+				FROM identity.users
+			),
 			'ownership', (
 				SELECT jsonb_agg(
 					jsonb_build_array(user_id, account_id, broker_subject)

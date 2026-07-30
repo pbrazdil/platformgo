@@ -244,11 +244,25 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 	broker := decodeDocument(t, documents["/broker/v1/openapi.json"])
 	assertMethod(t, broker, "/broker/v1/ping", "get")
 	assertPointer(t, broker, "components", "securitySchemes", "apiKey")
-	account := assertMethod(t, broker, "/broker/v1/accounts", "post")
-	assertResponse(t, account, "201")
-	if account["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
-		t.Fatalf("broker account contract status = %v", account["x-platformgo-contract-status"])
+	accountCreate := assertMethod(t, broker, "/broker/v1/accounts", "post")
+	assertResponse(t, accountCreate, "201")
+	if accountCreate["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
+		t.Fatalf("broker account contract status = %v", accountCreate["x-platformgo-contract-status"])
 	}
+	accountList := assertMethod(t, broker, "/broker/v1/accounts", "get")
+	for _, status := range []string{"200", "400", "401", "403", "503"} {
+		assertResponse(t, accountList, status)
+	}
+	if accountList["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
+		t.Fatalf("broker account list contract status = %v", accountList["x-platformgo-contract-status"])
+	}
+	assertOperationSecurity(t, accountList, "apiKey")
+	assertOperationParameterPattern(
+		t,
+		accountList,
+		"userId",
+		`^urn:xb:user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
+	)
 	brokerAccount := assertMethod(t, broker, "/broker/v1/accounts/{accountId}", "get")
 	for _, status := range []string{"200", "400", "401", "403", "503"} {
 		assertResponse(t, brokerAccount, status)

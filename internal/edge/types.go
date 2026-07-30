@@ -450,3 +450,13 @@ type BrokerBalancesReader interface {
 type BrokerAccountReader interface {
 	BrokerAccount(context.Context, string, string) (MyAccountView, error)
 }
+
+// BrokerAccountLister keeps tenant authorization and an optional owner filter
+// inside the same PostgreSQL statement that reads the complete account list.
+type BrokerAccountLister interface {
+	BrokerAccounts(
+		context.Context,
+		string,
+		*string,
+	) ([]MyAccountView, error)
+}

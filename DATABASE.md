@@ -680,6 +680,49 @@ result; an owned incomplete or invalid graph fails closed. The statement is a
 single MVCC snapshot, returns at most one row, and performs no lock upgrade or
 durable write.
 
+### Phase 3 broker-account list index boundary
+
+Migration `20260730000300_phase3_broker_account_list_index.up.sql` advances the
+immutable journal from the exact 38-file currency-scale authority-fence tip to
+the 39-file broker account-list tip. It takes an explicit `SHARE` lock on
+`identity.user_accounts` under a five-second lock timeout, then builds
+`user_accounts_broker_list_idx` under a fifteen-second statement timeout:
+
+```text
+(broker_subject, user_id, account_id)
+WHERE broker_subject IS NOT NULL
+```
+
+The index prevents one authenticated tenant list from scanning ownership rows
+belonging to every tenant. The unfiltered fixed statement uses the
+`broker_subject` prefix. The filtered fixed statement performs a one-time
+tenant/user lookup through `users_id_broker_subject_key`, then uses
+`user_accounts_pkey`; an absent or foreign filter therefore never scans that
+user's ownership range. Both statements use pgx unnamed extended-protocol
+execution so PostgreSQL plans for the concrete tenant on every request rather
+than reusing a tenant-agnostic generic plan. Lateral account-profile and
+trading projections remain primary-key probes. Final sorting by profile login
+and account ID processes only the authorized result. The existing
+least-privilege API role already has `SELECT` on
+`identity.users`, `identity.user_accounts`, `identity.account_profiles`, and
+`trading.accounts`; the migration adds no privilege.
+
+`CREATE INDEX` reads the existing relation and writes only the new index and
+WAL; it does not rewrite or mutate ownership rows. `SHARE` permits reads but
+blocks account-provisioning writes, so operators drain those writers before
+the cutover. A lock, statement, cancellation, disk, or SQL failure before
+commit rolls back both the index and checksum journal row. The migration adds
+no grant and changes no table owner, table filenode, constraint, trigger,
+default privilege, or economic fact.
+
+No down migration or production `DROP INDEX` is allowed. After commit, an old
+38-file binary fails exact schema verification; operational rollback is a
+reviewed code-revert artifact that still embeds migration 39. A missing commit
+acknowledgment is classified from the exact filename/checksum, valid and ready
+index catalog state, exact index definition/predicate, unchanged ownership
+digest/filenode/ACL/defaults, and all prior checksums before any retry or
+binary selection.
+
 ### Phase 3 frozen-effective-leverage migration boundary
 
 Migration `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` is the

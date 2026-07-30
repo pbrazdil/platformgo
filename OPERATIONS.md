@@ -808,6 +808,63 @@ selectively restore tables, edit an applied migration, or run an old binary
 against the v3 schema. Any facts accepted after the boundary are lost by a
 full restore and require the normal disaster-recovery decision.
 
+#### Broker account-list index upgrade
+
+Migration `20260730000300_phase3_broker_account_list_index.up.sql` is the
+forward-only access-path correction from the exact 38-file currency-scale
+authority-fence tip. Before applying it, withdraw broker account-provisioning
+traffic, drain API and engine provisioning writers, and record:
+
+- all 38 migration filenames and checksums;
+- the explicit-column `identity.user_accounts` digest, owner, filenode, raw
+  table/column ACLs, and owner default privileges;
+- free disk and WAL headroom plus the measured populated index-build time.
+
+The migration takes explicit `SHARE` on `identity.user_accounts`. Reads remain
+compatible, but `INSERT`, `UPDATE`, and `DELETE` wait. The migrator's
+five-second `lock_timeout` and the migration's fifteen-second
+`statement_timeout` make a busy or unexpectedly large build fail closed. On a
+definite pre-commit timeout or SQL error, prove the journal remains at 38, the
+index is absent, and every recorded table property is unchanged; drain the
+identified blocker and retry the identical bytes. Do not lengthen the bound,
+run manual DDL, or switch to `CREATE INDEX CONCURRENTLY`: the current migrator
+requires one transaction to commit the index and checksum journal atomically.
+
+Do not activate `GET /broker/v1/accounts` during a mixed 38/39-file serving
+overlap. An already-running 38-file process does not continuously re-run schema
+verification and still returns `404` for that route. Keep the route withdrawn
+until every instance receiving broker-list traffic is the verified 39-file
+artifact, or route that path exclusively to a separately verified 39-file
+pool. A newly started 38-file artifact fails schema-ahead verification and
+must not receive traffic.
+
+After commit, require the exact 39-file tip and checksum. In `pg_index`,
+`user_accounts_broker_list_idx` must be both ready and valid, and
+`pg_get_indexdef` plus the partial predicate must exactly match
+`(broker_subject, user_id, account_id) WHERE broker_subject IS NOT NULL`.
+Verify the ownership digest, table filenode, owner, ACLs, defaults, and all
+prior checksums are unchanged. The broker-list store deliberately uses
+unnamed extended-protocol execution so PostgreSQL makes a custom plan for the
+concrete authenticated tenant on every request. With normal sequential-scan
+settings and `plan_cache_mode = force_custom_plan`, run the exact statements
+with `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`: prove the fixed filtered
+statement uses a one-time `users_id_broker_subject_key` lookup and executes
+zero ownership-scan loops for an absent or foreign user; prove the unfiltered
+statement uses `user_accounts_broker_list_idx` to avoid foreign tenant rows
+and projection joins use their account-ID indexes.
+
+A connection loss, failover, deadline, or missing `COMMIT` acknowledgment is an
+unknown outcome. Keep provisioning writers and the new route stopped until the
+exact journal and index catalog either prove a complete commit or prove the
+complete prior state. A mixed or invalid index state requires a reviewed
+forward repair. Never delete the journal row, edit frozen bytes, or drop the
+index in production.
+
+There is no down migration. Because the 38-file binary rejects a schema-ahead
+database, rollback after commit uses a reviewed code-revert artifact that still
+contains migration 39; the additive index remains. Restore a complete
+pre-migration database only under explicit owner disaster-recovery direction.
+
 ### Phase 3 frozen-effective-leverage hash v4 upgrade
 
 Migrations `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` and

@@ -701,6 +701,12 @@ func (identity *Identity) randomIdentityID() (engine.ID, error) {
 }
 
 func clientAccountSummary(record AccountRecord) (edge.MyAccountView, error) {
+	if record.Login <= 0 {
+		return edge.MyAccountView{}, fmt.Errorf(
+			"invalid account login %d",
+			record.Login,
+		)
+	}
 	normalized := func(kind, value string, allowed ...string) (string, error) {
 		for _, candidate := range allowed {
 			if value == candidate {

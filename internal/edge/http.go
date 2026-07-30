@@ -32,6 +32,7 @@ type Server struct {
 	identity       IdentityService
 	trading        TradingReader
 	brokerAccount  BrokerAccountReader
+	brokerAccounts BrokerAccountLister
 	brokerFills    BrokerFillsReader
 	brokerBalances BrokerBalancesReader
 	readiness      []HealthCheck
@@ -49,6 +50,7 @@ type ServerConfig struct {
 	Identity       IdentityService
 	Trading        TradingReader
 	BrokerAccount  BrokerAccountReader
+	BrokerAccounts BrokerAccountLister
 	BrokerFills    BrokerFillsReader
 	BrokerBalances BrokerBalancesReader
 	Readiness      []HealthCheck
@@ -75,6 +77,7 @@ func NewServer(config ServerConfig) *Server {
 		identity:       config.Identity,
 		trading:        config.Trading,
 		brokerAccount:  config.BrokerAccount,
+		brokerAccounts: config.BrokerAccounts,
 		brokerFills:    config.BrokerFills,
 		brokerBalances: config.BrokerBalances,
 		readiness:      append([]HealthCheck(nil), config.Readiness...),
@@ -122,6 +125,8 @@ func (server *Server) route(writer http.ResponseWriter, request *http.Request) {
 		server.handleRealtimeToken(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/broker/v1/ping":
 		server.handleBrokerPing(writer, request)
+	case request.Method == http.MethodGet && request.URL.Path == "/broker/v1/accounts":
+		server.handleBrokerAccounts(writer, request)
 	case request.Method == http.MethodGet:
 		if accountID, ok := brokerAccountRoute(request.URL.Path); ok {
 			server.handleBrokerAccount(writer, request, accountID)
@@ -772,6 +777,60 @@ func (server *Server) handleBrokerAccount(
 	}
 }
 
+func (server *Server) handleBrokerAccounts(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	principal, ok := server.brokerPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	if !principal.HasScope("accounts:read") {
+		writeError(writer, request, http.StatusForbidden, "forbidden", "forbidden")
+		return
+	}
+	userID, err := brokerAccountListUserID(request)
+	if err != nil {
+		writeError(
+			writer,
+			request,
+			http.StatusBadRequest,
+			"invalid_request",
+			"invalid user id",
+		)
+		return
+	}
+	if server.brokerAccounts == nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"account list unavailable",
+		)
+		return
+	}
+	accounts, err := server.brokerAccounts.BrokerAccounts(
+		request.Context(),
+		principal.Tenant,
+		userID,
+	)
+	if err != nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"account list unavailable",
+		)
+		return
+	}
+	if accounts == nil {
+		accounts = make([]MyAccountView, 0)
+	}
+	writeJSON(writer, http.StatusOK, accounts)
+}
+
 func (server *Server) handleBrokerFills(
 	writer http.ResponseWriter,
 	request *http.Request,
@@ -1112,6 +1171,27 @@ func brokerBalancesRoute(path string) (string, bool) {
 		return "", false
 	}
 	return accountID, true
+}
+
+func brokerAccountListUserID(request *http.Request) (*string, error) {
+	values, err := url.ParseQuery(request.URL.RawQuery)
+	if err != nil {
+		return nil, err
+	}
+	entries, ok := values["userId"]
+	if !ok {
+		return nil, nil
+	}
+	if len(entries) != 1 {
+		return nil, errors.New("userId must appear once")
+	}
+	const userPrefix = "urn:xb:user:"
+	userID := entries[0]
+	if !strings.HasPrefix(userID, userPrefix) ||
+		!canonicalUUID.MatchString(strings.TrimPrefix(userID, userPrefix)) {
+		return nil, errors.New("userId is not canonical")
+	}
+	return &userID, nil
 }
 
 func fillExecutionFilter(request *http.Request) (FillExecutionFilter, error) {

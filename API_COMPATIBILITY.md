@@ -82,6 +82,34 @@ timestamp rendering. A finite PostgreSQL timestamp outside RFC3339's
 representable year range is rejected as projection corruption. The point read
 is non-mutating and has no replay, acknowledgment, or realtime boundary.
 
+### Broker account list
+
+`GET /broker/v1/accounts` returns the accepted non-null array of ten-field
+`MyAccountView` values. Broker HMAC authentication dominates exact
+`accounts:read`/wildcard scope, which dominates strict parsing of the optional
+lowercase UUID `userId` URN, which dominates storage access. Unknown query keys
+remain ignored to preserve the pinned source extractor; blank, duplicate, or
+noncanonical `userId` values return `400 invalid_request / invalid user id`.
+
+The store chooses one of two fixed parameterized statements and executes each
+through pgx's unnamed extended protocol so PostgreSQL plans for the concrete
+tenant instead of aging into a cached generic plan. The unfiltered plan uses
+the tenant-leading ownership index. The filtered statement first performs a
+one-time lookup of the user/tenant pair, then uses the user-key ownership
+index; an absent or foreign filter never scans that user's account range.
+`Principal.Tenant` remains authority inside the materialized ownership query,
+while the optional user ID is only an additional filter. Foreign and absent
+filters both return exact `[]`. Tenant-constrained lateral profile and trading
+probes use their account-ID indexes; nullable projections never authorize.
+
+Every selected row is scanned and validated before the edge writes a response.
+One owned incomplete or corrupt row fails the whole list as opaque `503`; no
+valid prefix is exposed. Valid rows sort by login and then account ID under
+bytewise `C` collation. The source-compatible route remains unpaged, so sorting,
+buffering, and serialization are proportional only to the authorized output.
+The list is non-mutating and has no replay, acknowledgment, or realtime
+boundary.
+
 ## 5. gRPC compatibility
 
 Preserve:
