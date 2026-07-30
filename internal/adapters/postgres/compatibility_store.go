@@ -312,6 +312,203 @@ func (store *CompatibilityStore) BrokerAccount(
 	return account, nil
 }
 
+const brokerAccountsUnfilteredQuery = `
+	WITH ownership AS MATERIALIZED (
+		SELECT account_id, user_id
+		  FROM identity.user_accounts
+		 WHERE broker_subject = $1
+	)
+	SELECT
+		ownership.account_id,
+		profile.login,
+		ownership.user_id,
+		profile.base_currency,
+		account.margin_mode,
+		account.oms_mode,
+		profile.market_venue,
+		profile.permitted_classes,
+		account.status,
+		profile.created_at
+	  FROM ownership
+	  LEFT JOIN LATERAL (
+		SELECT
+			login, base_currency, market_venue, permitted_classes, created_at
+		  FROM identity.account_profiles
+		 WHERE account_id = ownership.account_id
+		   AND broker_subject = $1
+		 OFFSET 0
+	  ) AS profile ON true
+	  LEFT JOIN LATERAL (
+		SELECT margin_mode, oms_mode, status
+		  FROM trading.accounts
+		 WHERE account_id = ownership.account_id
+		 OFFSET 0
+	  ) AS account ON true
+	 ORDER BY profile.login, ownership.account_id COLLATE "C"`
+
+const brokerAccountsFilteredQuery = `
+	WITH ownership AS MATERIALIZED (
+		SELECT account_id, user_id
+		  FROM identity.user_accounts
+		 WHERE broker_subject = $1
+		   AND user_id = $2
+		   AND EXISTS (
+				SELECT 1
+				  FROM identity.users
+				 WHERE user_id = $2
+				   AND broker_subject = $1
+		   )
+	)
+	SELECT
+		ownership.account_id,
+		profile.login,
+		ownership.user_id,
+		profile.base_currency,
+		account.margin_mode,
+		account.oms_mode,
+		profile.market_venue,
+		profile.permitted_classes,
+		account.status,
+		profile.created_at
+	  FROM ownership
+	  LEFT JOIN LATERAL (
+		SELECT
+			login, base_currency, market_venue, permitted_classes, created_at
+		  FROM identity.account_profiles
+		 WHERE account_id = ownership.account_id
+		   AND broker_subject = $1
+		 OFFSET 0
+	  ) AS profile ON true
+	  LEFT JOIN LATERAL (
+		SELECT margin_mode, oms_mode, status
+		  FROM trading.accounts
+		 WHERE account_id = ownership.account_id
+		 OFFSET 0
+	  ) AS account ON true
+	 ORDER BY profile.login, ownership.account_id COLLATE "C"`
+
+// BrokerAccounts returns one completely validated tenant list from one
+// PostgreSQL snapshot. The fixed filtered query uses a one-time tenant/user
+// existence check before its user-key ownership lookup, so a foreign filter
+// cannot scan that foreign user's account range. Both templates use unnamed
+// extended-protocol execution so PostgreSQL plans for the concrete tenant
+// instead of eventually reusing a tenant-agnostic generic plan.
+func (store *CompatibilityStore) BrokerAccounts(
+	ctx context.Context,
+	brokerTenant string,
+	userID *string,
+) ([]edge.MyAccountView, error) {
+	if store == nil || store.pool == nil {
+		return nil, errors.New(
+			"broker accounts: PostgreSQL pool is required",
+		)
+	}
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if userID == nil {
+		rows, err = store.pool.Query(
+			ctx,
+			brokerAccountsUnfilteredQuery,
+			pgx.QueryExecModeExec,
+			brokerTenant,
+		)
+	} else {
+		rows, err = store.pool.Query(
+			ctx,
+			brokerAccountsFilteredQuery,
+			pgx.QueryExecModeExec,
+			brokerTenant,
+			*userID,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list broker accounts: %w", err)
+	}
+	defer rows.Close()
+
+	accounts, err := collectBrokerAccountRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("list broker accounts: %w", err)
+	}
+	return accounts, nil
+}
+
+type brokerAccountRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}
+
+func collectBrokerAccountRows(rows brokerAccountRows) ([]edge.MyAccountView, error) {
+	accounts := make([]edge.MyAccountView, 0)
+	for rows.Next() {
+		var (
+			record           application.AccountRecord
+			login            *int64
+			baseCurrency     *string
+			marginMode       *string
+			omsMode          *string
+			marketVenue      *string
+			permittedClasses []string
+			status           *string
+			createdAt        *time.Time
+		)
+		if err := rows.Scan(
+			&record.AccountID,
+			&login,
+			&record.UserID,
+			&baseCurrency,
+			&marginMode,
+			&omsMode,
+			&marketVenue,
+			&permittedClasses,
+			&status,
+			&createdAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan row: %w", err)
+		}
+		if login == nil ||
+			baseCurrency == nil ||
+			marginMode == nil ||
+			omsMode == nil ||
+			marketVenue == nil ||
+			permittedClasses == nil ||
+			status == nil ||
+			createdAt == nil {
+			return nil, fmt.Errorf(
+				"broker account %q is incomplete",
+				record.AccountID,
+			)
+		}
+		record.Login = *login
+		record.BaseCurrency = *baseCurrency
+		record.MarginMode = *marginMode
+		record.OmsMode = *omsMode
+		record.MarketVenue = *marketVenue
+		record.PermittedClasses = append(
+			[]string(nil),
+			permittedClasses...,
+		)
+		record.Status = *status
+		record.CreatedAt = *createdAt
+		account, err := application.BrokerAccountListSummary(record)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"account %q: %w",
+				record.AccountID,
+				err,
+			)
+		}
+		accounts = append(accounts, account)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("row stream: %w", err)
+	}
+	return accounts, nil
+}
+
 func (store *CompatibilityStore) userAccounts(
 	ctx context.Context,
 	userID string,

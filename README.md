@@ -151,6 +151,23 @@ independent release reviews, and all seven hosted CI jobs passed before PR
 pinned source ledger row remains
 unreviewed because its account-list, balance-mutation, and channel-isolation
 assertions are outside this narrow route.
+The active broker account-list slice preserves the pinned unpaged tenant list
+with the accepted ten-field current-Go account summary and optional canonical
+`userId` filter. Two fixed one-statement PostgreSQL queries anchor
+`Principal.Tenant` before any nullable projection join, return absent and
+foreign filters as exact `[]`, validate the complete list before writing HTTP
+bytes, and sort by login plus bytewise account ID. A new forward-only
+tenant-leading ownership index plus a one-time tenant/user filter check removes
+cross-tenant and foreign zero-result scan amplification without adding
+pagination or a compatibility-breaking cap.
+Real PostgreSQL 19 Beta 2 red-first coverage now proves route activation,
+auth/scope/parser zero-SQL dominance, exact/wildcard scope, filtering, tenant
+isolation, deterministic ties, foreign corruption isolation, late owned
+corruption as opaque whole-response `503`, reconstruction, one statement per
+valid request, and unchanged relation digests. Migration upgrade/lock/plan
+evidence and full replacement-candidate validation are green after the
+final-review account-identifier correction. Fresh exact-SHA review, hosted CI,
+and merge remain open.
 Its forward-only, catalog-only ACL migration scrubs hostile table, column,
 grant-option, and dependent grant-chain privileges from both tenant
 authorities and `ledger.balances`, then restores only the exact non-grantable
@@ -620,6 +637,19 @@ route is now landed after red-first application, edge, and PostgreSQL 19 Beta
 2 validation; a full stable-candidate gate; exact-SHA money, determinism,
 security, PostgreSQL/migration, and independent release reviews with no P0-P3
 findings; and all seven hosted checks on the reviewed candidate SHA.
+The broker account-list candidate has completed its source-contract,
+adversarial-preflight, and failing-test checkpoints. Security and migration
+review required the new 39th forward migration, fixed filtered/unfiltered
+query templates, per-request custom planning, and executed-plan amplification
+evidence. Those corrections and focused PostgreSQL 19 Beta 2 runtime,
+migration-plan, compatibility-regression, and no-partial-response tests are
+green. Final review of the prior implementation candidate found that a
+schema-valid noncanonical account ID could escape through the list. The
+replacement adds list-specific canonical account-URN validation without
+tightening accepted current-Go user URNs. The replacement is green through
+policy, format, lint, full test, race, deterministic repeat, vulnerability,
+complete PostgreSQL 19 Beta 2, and complete compatibility validation. Fresh
+exact-SHA review, hosted CI, and merge remain open.
 
 The landed finite fill-leverage hardening has PostgreSQL 19 Beta 2
 tests defining its corruption-read, no-partial-page, restart, exact 35/36-tip,

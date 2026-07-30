@@ -1079,6 +1079,80 @@ type recordingBrokerAccountReader struct {
 	err       error
 }
 
+type recordingBrokerAccountLister struct {
+	accounts []MyAccountView
+	err      error
+}
+
+func (reader *recordingBrokerAccountLister) BrokerAccounts(
+	context.Context,
+	string,
+	*string,
+) ([]MyAccountView, error) {
+	return reader.accounts, reader.err
+}
+
+func TestBrokerAccountListRouteNeverWritesReturnedRowsWhenReaderFails(
+	t *testing.T,
+) {
+	handler := NewServer(ServerConfig{
+		Authenticator: testAuthenticator{},
+		BrokerAccounts: &recordingBrokerAccountLister{
+			accounts: []MyAccountView{{AccountID: "must-not-leak"}},
+			err:      errors.New("contains-sensitive-list-detail"),
+		},
+		TrustedProxies: []netip.Prefix{
+			netip.MustParsePrefix("192.0.2.0/24"),
+		},
+		RequestID: func() string { return "broker-account-list-error" },
+	}).Handler()
+	response := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/broker/v1/accounts",
+		nil,
+		map[string]string{
+			"x-api-key":       "broker-key",
+			"x-forwarded-for": "203.0.113.7",
+		},
+	)
+	const want = `{"code":"unavailable","message":"account list unavailable","requestId":"broker-account-list-error"}` + "\n"
+	if response.Code != http.StatusServiceUnavailable ||
+		response.Body.String() != want {
+		t.Fatalf("status=%d body=%q, want 503 body=%q", response.Code, response.Body.String(), want)
+	}
+	if strings.Contains(response.Body.String(), "must-not-leak") ||
+		strings.Contains(response.Body.String(), "sensitive") {
+		t.Fatalf("response leaked partial list or storage detail: %s", response.Body.String())
+	}
+}
+
+func TestBrokerAccountListRouteSerializesNilAsEmptyArray(t *testing.T) {
+	handler := NewServer(ServerConfig{
+		Authenticator:  testAuthenticator{},
+		BrokerAccounts: &recordingBrokerAccountLister{},
+		TrustedProxies: []netip.Prefix{
+			netip.MustParsePrefix("192.0.2.0/24"),
+		},
+		RequestID: func() string { return "broker-account-list-empty" },
+	}).Handler()
+	response := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/broker/v1/accounts",
+		nil,
+		map[string]string{
+			"x-api-key":       "broker-key",
+			"x-forwarded-for": "203.0.113.7",
+		},
+	)
+	if response.Code != http.StatusOK || response.Body.String() != "[]\n" {
+		t.Fatalf("status=%d body=%q, want 200 body=%q", response.Code, response.Body.String(), "[]\n")
+	}
+}
+
 func (reader *recordingBrokerAccountReader) BrokerAccount(
 	_ context.Context,
 	tenant string,

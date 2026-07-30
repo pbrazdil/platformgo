@@ -91,7 +91,12 @@ func TestCurrencyScaleAuthorityFenceUpgradesCurrentTip(t *testing.T) {
 		)
 	}
 	assertCurrencyScaleAuthorityFenceCatalog(t, pool)
-	assertFinalMigrationHistory(t, pool)
+	assertMigrationHistoryTip(
+		t,
+		pool,
+		38,
+		currencyScaleAuthorityFenceMigration,
+	)
 }
 
 func TestCurrencyScaleAuthorityFenceNeutralizesPrecreatedHostileTrigger(

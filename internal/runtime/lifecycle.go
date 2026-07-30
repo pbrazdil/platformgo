@@ -395,6 +395,7 @@ func serve(
 		Identity:       identityService,
 		Trading:        compatibilityStore,
 		BrokerAccount:  compatibilityStore,
+		BrokerAccounts: compatibilityStore,
 		BrokerFills:    compatibilityStore,
 		BrokerBalances: compatibilityStore,
 		Readiness: []edge.HealthCheck{

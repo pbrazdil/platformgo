@@ -5024,6 +5024,21 @@ func waitForTableLockWaiter(
 
 func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
+	assertMigrationHistoryTip(
+		t,
+		pool,
+		39,
+		"20260730000300_phase3_broker_account_list_index.up.sql",
+	)
+}
+
+func assertMigrationHistoryTip(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	wantCount int,
+	wantLast string,
+) {
+	t.Helper()
 	var count int
 	var first string
 	var last string
@@ -5033,10 +5048,9 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 38 ||
+	if count != wantCount ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
-		last !=
-			"20260730000200_phase3_currency_scale_authority_fence.up.sql" {
+		last != wantLast {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,

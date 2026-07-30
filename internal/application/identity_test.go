@@ -773,6 +773,49 @@ func TestClientAccountSummaryRejectsTimestampOutsideRFC3339(t *testing.T) {
 	}
 }
 
+func TestClientAccountSummaryRejectsNonpositiveLogin(t *testing.T) {
+	valid := AccountRecord{
+		AccountID:        "urn:xb:account:00000000-0000-4000-8000-000000000001",
+		Login:            73000001,
+		UserID:           "urn:xb:user:00000000-0000-4000-8000-000000000001",
+		BaseCurrency:     "USDC",
+		MarginMode:       "CROSS",
+		OmsMode:          "NETTING",
+		MarketVenue:      "HYPERLIQUID",
+		PermittedClasses: []string{"CRYPTOCURRENCY"},
+		Status:           "ACTIVE",
+		CreatedAt:        time.Date(2026, 7, 30, 8, 9, 10, 0, time.UTC),
+	}
+	valid.Login = 0
+	if _, err := clientAccountSummary(valid); err == nil {
+		t.Fatal("clientAccountSummary accepted nonpositive login")
+	}
+}
+
+func TestBrokerAccountListSummaryRejectsNoncanonicalAccountButAcceptsCurrentUserURN(
+	t *testing.T,
+) {
+	record := AccountRecord{
+		AccountID:        "urn:xb:account:not-a-uuid",
+		Login:            73000001,
+		UserID:           "urn:xb:user:current-go-user",
+		BaseCurrency:     "USDC",
+		MarginMode:       "CROSS",
+		OmsMode:          "NETTING",
+		MarketVenue:      "HYPERLIQUID",
+		PermittedClasses: []string{"CRYPTOCURRENCY"},
+		Status:           "ACTIVE",
+		CreatedAt:        time.Date(2026, 7, 30, 8, 9, 10, 0, time.UTC),
+	}
+	if _, err := BrokerAccountListSummary(record); err == nil {
+		t.Fatal("broker account list accepted a noncanonical account id")
+	}
+	record.AccountID = "urn:xb:account:00000000-0000-4000-8000-000000000001"
+	if _, err := BrokerAccountListSummary(record); err != nil {
+		t.Fatalf("broker account list rejected accepted current-Go user URN: %v", err)
+	}
+}
+
 type fixedAuthClockForApplication struct{ value time.Time }
 
 func (clock fixedAuthClockForApplication) Now() time.Time { return clock.value }

@@ -716,12 +716,78 @@
     "/broker/v1/accounts": {
       "get": {
         "operationId": "get_broker_v1_accounts",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "userId",
+            "required": false,
+            "schema": {
+              "pattern": "^urn:xb:user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
-          "default": {
-            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MyAccountView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid credentials"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
           }
         },
-        "x-platformgo-contract-status": "source-route-inventory"
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
       },
       "post": {
         "operationId": "post_broker_v1_accounts",
