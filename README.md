@@ -130,6 +130,15 @@ implementation are separately accepted. Activation also requires a new
 forward-only, catalog-only ACL migration over the dual identity authorities
 and authoritative balance projection; existing frozen migrations are not
 modified.
+That ACL migration now scrubs hostile table, column, grant-option, and
+dependent grant-chain privileges from both tenant authorities and
+`ledger.balances`, then restores only the exact non-grantable API/engine
+allowlist. All three bounded `SHARE` locks precede the first ACL change in
+production writer order. PostgreSQL 19 Beta2 tests prove hostile current-main
+upgrade, unchanged rows/filenodes/defaults and prior checksums, a
+transaction-wide rollback when the final balance lock times out, safe retry,
+and a production-order writer completing without deadlock. The broker route
+remains inactive until its separate HTTP/store/contract slice is accepted.
 Command-admission replay authority is now also hardened by a landed
 forward-only PostgreSQL 19 Beta 2 migration. It fences engine and API writers,
 removes hostile inherited table and column privileges from commands,

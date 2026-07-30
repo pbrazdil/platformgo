@@ -374,6 +374,47 @@ filenode before retrying or selecting a binary. Never infer rollback from the
 client error, delete a journal row, edit an applied migration, reset a
 persistent database, or selectively restore fill history.
 
+### Phase 3 broker-balances ACL upgrade
+
+Migration `20260730000100_phase3_broker_balances_acl.up.sql` is a
+forward-only catalog correction from the exact 36-file finite-leverage tip.
+Before applying it, drain engine balance/account-provisioning writers and API
+account provisioning, record all 36 filenames/checksums, explicit-column
+digests plus owners/filenodes for `identity.user_accounts`,
+`identity.account_profiles`, and `ledger.balances`, complete raw table/column
+ACLs, and owner default privileges.
+
+The migration takes bounded `SHARE` locks on those three relations in that
+exact production writer order before the first ACL change. A pre-revocation
+writer that remains active beyond the migrator's five-second `lock_timeout`
+causes SQLSTATE `55P03`; prove the journal, all three ACLs, rows, owners,
+filenodes, and defaults remain at the complete prior state, drain or roll back
+the writer, and retry the same bytes. A production-order writer that commits
+within the bound may allow the migration to continue successfully; classify
+that result through the normal exact journal/checksum, ACL, and preservation
+verification rather than expecting a timeout. The migration's ten-second
+`statement_timeout` also bounds catalog enumeration. Read-only traffic is
+lock-compatible, but it does not authorize activating the broker-balances
+route.
+
+After commit, verify the exact 37-file tip and checksum and the complete raw
+non-grantable allowlist documented in `DATABASE.md`. Prove there are no
+`PUBLIC`, column, grant-option, unexpected-role, or dependent-chain privileges;
+all 36 prior checksums and every preserved relation/default snapshot must
+remain unchanged. Existing engine/API binaries remain ACL-compatible because
+their legitimate privileges are restored and the runtime schema revision is
+unchanged. The broker-balances route remains inactive until its separate
+runtime and frozen-contract candidate is accepted.
+
+A connection loss, failover, client deadline, or missing `COMMIT`
+acknowledgment is an unknown outcome. Keep affected runtimes stopped. Classify
+committed only when the exact journal row/checksum and complete final raw ACL
+state agree; classify not committed only when the row is absent and the
+complete prior ACL/data/owner/filenode/default snapshot agrees. Any mixed state
+requires a reviewed forward repair or explicitly authorized complete verified
+pre-migration restore. Never blindly retry, edit frozen bytes, delete a journal
+row, or reset a persistent database.
+
 ### Phase 3 command market-sequence binding upgrade
 
 Migration
