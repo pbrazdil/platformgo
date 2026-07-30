@@ -277,6 +277,22 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
             "[0-9a-f]{4}-[0-9a-f]{12}$"
         ),
     },
+    ("GET", "/broker/v1/accounts/{accountId}/funding"): {
+        "statuses": [200, 400, 401, 403, 503],
+        "success": "FundingPage",
+        "success_description": (
+            "Committed moving keyset view of the current Go funding projection, "
+            "newest first"
+        ),
+        "pagination": True,
+        "pagination_constraints": False,
+        "security": "apiKey",
+        "account_id_pattern": (
+            "^urn:xb:account:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            "[0-9a-f]{4}-[0-9a-f]{12}$"
+        ),
+        "required_scope": "accounts:read",
+    },
 }
 
 
@@ -366,6 +382,8 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                     "rate_description"
                 ]
             operation["x-platformgo-contract-status"] = "phase3-accepted-runtime"
+            if accepted.get("required_scope") is not None:
+                operation["x-platformgo-required-scope"] = accepted["required_scope"]
             request_schema = accepted.get("request")
             if request_schema is not None:
                 operation["requestBody"] = {
@@ -426,7 +444,14 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                     "name": "limit",
                     "in": "query",
                     "required": False,
-                    "schema": {"type": "integer", "minimum": 1, "maximum": 200},
+                    "schema": {
+                        "type": "integer",
+                        **(
+                            {"minimum": 1, "maximum": 200}
+                            if accepted.get("pagination_constraints", True)
+                            else {}
+                        ),
+                    },
                 },
                 {
                     "name": "cursor",
@@ -440,7 +465,11 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                     "required": False,
                     "schema": {
                         "type": "string",
-                        "enum": ["next", "prev", "backward"],
+                        **(
+                            {"enum": ["next", "prev", "backward"]}
+                            if accepted.get("pagination_constraints", True)
+                            else {}
+                        ),
                     },
                 },
             ]
@@ -912,7 +941,7 @@ def schemas(client: bool, broker: bool) -> dict[str, object]:
                     "fundingAmount",
                     "currency",
                     "fundingTime",
-                ],
+                ] + (["accountLogin"] if broker else []),
                 "properties": {
                     "fundingId": {"type": "string"},
                     "symbol": {"type": "string"},
@@ -926,7 +955,7 @@ def schemas(client: bool, broker: bool) -> dict[str, object]:
                     "accountLogin": {"type": "integer"},
                 },
             }
-            if client
+            if client or broker
             else {
                 "type": "object",
                 "properties": {
@@ -951,7 +980,7 @@ def schemas(client: bool, broker: bool) -> dict[str, object]:
                     },
                 }
             }
-            if client
+            if client or broker
             else {}
         ),
         "RealtimeToken": {

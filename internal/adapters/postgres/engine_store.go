@@ -41,7 +41,9 @@ const (
 	FailpointAfterPersistBeforeCommit = "postgres.after_persist_before_commit"
 	engineWriterLockNamespace         = 0x50474f45
 	engineOwnerLockNamespace          = 0x50474f4f
-	engineRuntimeSchemaRevision       = "20260730000200_phase3_currency_scale_authority_fence"
+	// EngineRuntimeSchemaRevision is the persistence shape bound by every
+	// production engine-role connection and engine transaction.
+	EngineRuntimeSchemaRevision = "20260730000400_phase3_broker_funding_acl"
 )
 
 type faultSet interface {
@@ -170,7 +172,7 @@ func (store *EngineStore) AcquireShardOwnership(
 			$1,
 			false
 		)`,
-		engineRuntimeSchemaRevision,
+		EngineRuntimeSchemaRevision,
 	); err != nil {
 		connection.Release()
 		return nil, fmt.Errorf(
@@ -815,7 +817,7 @@ func bindEngineRuntimeSchemaRevision(ctx context.Context, tx pgx.Tx) error {
 		`SELECT
 			set_config('platformgo.runtime_schema_revision', $1, true),
 			set_config('platformgo.engine_decision_hash_version', $2, true)`,
-		engineRuntimeSchemaRevision,
+		EngineRuntimeSchemaRevision,
 		fmt.Sprint(engine.CurrentDecisionHashVersion),
 	); err != nil {
 		return fmt.Errorf("bind engine runtime schema revision: %w", err)
@@ -1686,6 +1688,30 @@ func persistFunding(
 				"persist funding history projection %s: %w",
 				change.FundingID,
 				err,
+			)
+		}
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO trading.funding_instrument_provenance (
+				funding_id, instrument_id, revision, price_scale, quantity_scale
+			)
+			SELECT $1, instrument_id, revision, price_scale, quantity_scale
+			  FROM trading.instruments
+			 WHERE instrument_id = $2`,
+			change.FundingID.String(),
+			change.InstrumentID,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"persist funding instrument provenance %s: %w",
+				change.FundingID,
+				err,
+			)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf(
+				"persist funding instrument provenance %s: instrument %s is unavailable",
+				change.FundingID,
+				change.InstrumentID,
 			)
 		}
 	}

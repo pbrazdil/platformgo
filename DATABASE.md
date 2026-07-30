@@ -723,6 +723,62 @@ index catalog state, exact index definition/predicate, unchanged ownership
 digest/filenode/ACL/defaults, and all prior checksums before any retry or
 binary selection.
 
+### Phase 3 broker-funding ACL and read boundary
+
+Migration `20260730000400_phase3_broker_funding_acl.up.sql` advances the
+immutable journal from the exact 39-file broker-account-list tip to the
+40-file broker-funding provenance and ACL tip. It first acquires the configured
+shard's engine-owner advisory lock, then takes bounded `SHARE` locks on
+`engine.shard_ownership_epochs`, `trading.instruments`,
+`trading.funding_settlements`, `trading.funding_history_projection`, and
+`engine.input_receipts` in the production writer's order. An active writer
+therefore causes a bounded rollback instead of permitting an old and new
+runtime to overlap.
+
+Before DDL or backfill, the migration proves the exact prior trigger catalog
+and the complete trusted metadata and bodies of all reused trigger functions.
+It rejects missing, disabled, rebound, duplicated, immediate, malformed, or
+sidecar triggers and hostile same-OID function replacement with SQLSTATE
+`55000`. It then reconstructs each historical funding row from immutable
+accepted receipts, including the last same-instrument change within a receipt,
+and refuses orphan, malformed, out-of-bounds, or receipt/projection mismatch.
+
+The migration creates append-only
+`trading.funding_instrument_provenance`, backfills its exact instrument
+revision and price/quantity scales, adds immutable and truncate guards, and
+requires both history projection and provenance through genuine deferred
+constraint triggers. Engine persistence writes settlement, history, and
+provenance in the same transaction. The broker read function uses the
+historical provenance; reconciliation compares it bidirectionally and also
+counts either orphan direction.
+
+The ACL scrub removes `PUBLIC` and every explicit non-owner table, column, and
+function privilege, grant option, and dependent same-object grant chain. It
+restores only non-grantable engine `SELECT, INSERT` on the three funding
+relations and API `EXECUTE` on the six approved funding functions. API receives
+no direct funding-table privilege and no `EXECUTE` on either constraint helper.
+The migration advances the runtime revision gate to the 40-file tip, so an old
+runtime cannot acquire or refresh a shard ownership epoch after cutover.
+
+The broker reader authorizes `Principal.Tenant` through matching
+`identity.user_accounts` and `identity.account_profiles` rows in a materialized
+authority CTE. One unnamed custom-plan PostgreSQL statement returns the
+authority sentinel, ordered funding window, registered currency scale, and
+optional cursorless total from one MVCC snapshot. The funding and count
+functions depend on the authority row, so an absent or foreign account cannot
+invoke them. Every returned economic value and identifier is buffered and
+validated through its historical instrument revision before exposure;
+incomplete or mismatched provenance, off-grid quantity or price, non-finite,
+non-positive-oracle, invalid-currency, scan, or terminal stream failure rejects
+the whole page without rounding or partial output.
+
+A missing commit acknowledgment is an unknown outcome. Keep runtimes stopped
+while comparing the exact filename/checksum, all 40 journal rows, raw ACLs,
+trusted function and trigger catalogs, preserved authority-row digests,
+provenance count/digest, owners, defaults, and runtime revision. Retry only
+when the new row is absent and the complete 39-file state matches. Never edit
+the frozen funding read-model migration or applied migration history.
+
 ### Phase 3 frozen-effective-leverage migration boundary
 
 Migration `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` is the

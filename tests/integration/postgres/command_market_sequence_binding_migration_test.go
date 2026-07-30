@@ -402,7 +402,7 @@ func TestCommandMarketSequenceBindingMigrationClassifiesPopulatedHistory(
 		BEGIN;
 		SELECT set_config(
 			'platformgo.runtime_schema_revision',
-			'20260730000200_phase3_currency_scale_authority_fence',
+			'20260730000400_phase3_broker_funding_acl',
 			true
 		);
 		SELECT set_config(
@@ -444,7 +444,7 @@ func TestCommandMarketSequenceBindingMigrationClassifiesPopulatedHistory(
 		BEGIN;
 		SELECT set_config(
 			'platformgo.runtime_schema_revision',
-			'20260730000200_phase3_currency_scale_authority_fence',
+			'20260730000400_phase3_broker_funding_acl',
 			true
 		);
 		SELECT set_config(
@@ -490,7 +490,7 @@ func TestCommandMarketSequenceBindingMigrationClassifiesPopulatedHistory(
 	_, rejectedMarketErr := pool.Exec(ctx, `
 		SELECT set_config(
 			'platformgo.runtime_schema_revision',
-			'20260730000200_phase3_currency_scale_authority_fence',
+			'20260730000400_phase3_broker_funding_acl',
 			false
 		);
 		SELECT set_config(
@@ -857,7 +857,7 @@ func TestCommandMarketSequenceBindingMigrationFencesPreverifiedLegacyEngine(
 	if _, err := legacyConnection.Exec(
 		ctx,
 		`SELECT set_config('platformgo.runtime_schema_revision', $1, false)`,
-		"20260730000200_phase3_currency_scale_authority_fence",
+		platformpostgres.EngineRuntimeSchemaRevision,
 	); err != nil {
 		t.Fatalf("bind current engine runtime after cutover: %v", err)
 	}

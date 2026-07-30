@@ -84,6 +84,7 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 		"broker-account-identifiers-preserve-current-go-urns",
 		"broker-balances-preserves-current-go-projection-and-tenant-authority",
 		"broker-fills-preserves-current-go-projection-and-tenant-authority",
+		"broker-funding-preserves-current-go-projection-and-tenant-authority",
 		"client-api-key-creation-requires-idempotency-key",
 		"fill-trade-type-is-always-classified",
 		"native-login-refresh-placement-preserves-current-go-client-boundary",
@@ -143,6 +144,12 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 		"GET /broker/v1/accounts/{accountId}/balances",
 	) {
 		t.Fatal("GET broker account balances missing from compatibility manifest")
+	}
+	if !contains(
+		manifest.ImplementedHTTPRoutes,
+		"GET /broker/v1/accounts/{accountId}/funding",
+	) {
+		t.Fatal("GET broker account funding missing from compatibility manifest")
 	}
 }
 
@@ -306,6 +313,21 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 		"accountId",
 		`^urn:xb:account:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
 	)
+	brokerFillsLimit := operationParameterSchema(t, brokerFills, "limit")
+	if brokerFillsLimit["minimum"] != float64(1) ||
+		brokerFillsLimit["maximum"] != float64(200) {
+		t.Fatalf("broker fills limit schema = %v, want range 1..200", brokerFillsLimit)
+	}
+	brokerFillsDirection := operationParameterSchema(t, brokerFills, "direction")
+	if !reflect.DeepEqual(
+		brokerFillsDirection["enum"],
+		[]any{"next", "prev", "backward"},
+	) {
+		t.Fatalf(
+			"broker fills direction schema = %v, want accepted direction enum",
+			brokerFillsDirection,
+		)
+	}
 	brokerSchemas := broker["components"].(map[string]any)["schemas"].(map[string]any)
 	if !reflect.DeepEqual(
 		brokerSchemas["MyAccountView"],
@@ -409,6 +431,100 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 	} {
 		assertNullableSchemaField(t, brokerFillProperties, nullableField)
 	}
+	brokerFunding := assertMethod(
+		t,
+		broker,
+		"/broker/v1/accounts/{accountId}/funding",
+		"get",
+	)
+	assertExactResponseStatuses(
+		t,
+		brokerFunding,
+		"200",
+		"400",
+		"401",
+		"403",
+		"503",
+	)
+	if brokerFunding["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
+		t.Fatalf(
+			"broker funding contract status = %v",
+			brokerFunding["x-platformgo-contract-status"],
+		)
+	}
+	if brokerFunding["x-platformgo-required-scope"] != "accounts:read" {
+		t.Fatalf(
+			"broker funding required scope = %v",
+			brokerFunding["x-platformgo-required-scope"],
+		)
+	}
+	assertOperationSecurity(t, brokerFunding, "apiKey")
+	assertOperationParameters(
+		t,
+		brokerFunding,
+		"accountId",
+		"limit",
+		"cursor",
+		"direction",
+	)
+	assertOperationParameterPattern(
+		t,
+		brokerFunding,
+		"accountId",
+		`^urn:xb:account:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
+	)
+	brokerFundingLimit := operationParameterSchema(t, brokerFunding, "limit")
+	if _, constrained := brokerFundingLimit["minimum"]; constrained {
+		t.Fatalf("broker funding limit schema = %v, want current-Go pass-through", brokerFundingLimit)
+	}
+	if _, constrained := brokerFundingLimit["maximum"]; constrained {
+		t.Fatalf("broker funding limit schema = %v, want current-Go pass-through", brokerFundingLimit)
+	}
+	brokerFundingDirection := operationParameterSchema(t, brokerFunding, "direction")
+	if _, constrained := brokerFundingDirection["enum"]; constrained {
+		t.Fatalf(
+			"broker funding direction schema = %v, want current-Go pass-through",
+			brokerFundingDirection,
+		)
+	}
+	assertJSONResponseRef(
+		t,
+		brokerFunding,
+		"200",
+		"#/components/schemas/FundingPage",
+	)
+	assertRequiredFields(
+		t,
+		brokerSchemas["FundingView"].(map[string]any),
+		"fundingId",
+		"symbol",
+		"positionId",
+		"positionSignedQty",
+		"oraclePrice",
+		"fundingRate",
+		"fundingAmount",
+		"currency",
+		"fundingTime",
+		"accountLogin",
+	)
+	assertRequiredFields(
+		t,
+		brokerSchemas["FundingPage"].(map[string]any),
+		"items",
+	)
+	clientFundingView := schemas["FundingView"].(map[string]any)
+	brokerFundingView := brokerSchemas["FundingView"].(map[string]any)
+	clientFundingProperties := clientFundingView["properties"].(map[string]any)
+	brokerFundingProperties := brokerFundingView["properties"].(map[string]any)
+	if !reflect.DeepEqual(brokerFundingProperties, clientFundingProperties) {
+		t.Fatal("broker FundingView properties differ from accepted client schema")
+	}
+	if !reflect.DeepEqual(
+		brokerSchemas["FundingPage"],
+		schemas["FundingPage"],
+	) {
+		t.Fatal("broker FundingPage schema differs from accepted client schema")
+	}
 	echo := assertMethod(t, broker, "/broker/v1/echo", "post")
 	for _, status := range []string{"200", "401", "403", "409", "429", "503"} {
 		assertResponse(t, echo, status)
@@ -466,6 +582,31 @@ func assertOperationParameterPattern(
 		return
 	}
 	t.Fatalf("operation parameter %q missing", name)
+}
+
+func operationParameterSchema(
+	t *testing.T,
+	operation map[string]any,
+	name string,
+) map[string]any {
+	t.Helper()
+	raw, ok := operation["parameters"].([]any)
+	if !ok {
+		t.Fatalf("operation parameters = %v", operation["parameters"])
+	}
+	for _, value := range raw {
+		parameter, ok := value.(map[string]any)
+		if !ok || parameter["name"] != name {
+			continue
+		}
+		schema, ok := parameter["schema"].(map[string]any)
+		if !ok {
+			t.Fatalf("parameter %q schema = %v", name, parameter["schema"])
+		}
+		return schema
+	}
+	t.Fatalf("operation parameter %q missing", name)
+	return nil
 }
 
 func assertRequiredFields(
@@ -549,6 +690,55 @@ func assertResponse(t *testing.T, operation map[string]any, status string) {
 	}
 	if _, ok := responses[status]; !ok {
 		t.Fatalf("response %s missing: %v", status, responses)
+	}
+}
+
+func assertExactResponseStatuses(
+	t *testing.T,
+	operation map[string]any,
+	wanted ...string,
+) {
+	t.Helper()
+	responses, ok := operation["responses"].(map[string]any)
+	if !ok {
+		t.Fatal("responses missing")
+	}
+	if len(responses) != len(wanted) {
+		t.Fatalf("response statuses = %v, want exactly %v", responses, wanted)
+	}
+	for _, status := range wanted {
+		if _, ok := responses[status]; !ok {
+			t.Fatalf("response %s missing: %v", status, responses)
+		}
+	}
+}
+
+func assertJSONResponseRef(
+	t *testing.T,
+	operation map[string]any,
+	status string,
+	wantedRef string,
+) {
+	t.Helper()
+	responses, ok := operation["responses"].(map[string]any)
+	if !ok {
+		t.Fatal("responses missing")
+	}
+	response, ok := responses[status].(map[string]any)
+	if !ok {
+		t.Fatalf("response %s missing", status)
+	}
+	content, ok := response["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("response %s content missing", status)
+	}
+	jsonContent, ok := content["application/json"].(map[string]any)
+	if !ok {
+		t.Fatalf("response %s application/json content missing", status)
+	}
+	schema, ok := jsonContent["schema"].(map[string]any)
+	if !ok || schema["$ref"] != wantedRef {
+		t.Fatalf("response %s schema = %v, want ref %q", status, schema, wantedRef)
 	}
 }
 

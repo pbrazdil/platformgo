@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/upcomers-org/platformgo/internal/application"
+	economic "github.com/upcomers-org/platformgo/internal/decimal/economic"
 	"github.com/upcomers-org/platformgo/internal/domain"
 	"github.com/upcomers-org/platformgo/internal/edge"
 	"github.com/upcomers-org/platformgo/internal/engine"
@@ -2408,6 +2409,130 @@ func (store *CompatibilityStore) Funding(
 	return store.fundingPage(ctx, accountID, "", false, params)
 }
 
+// BrokerFunding returns one complete funding page only when both durable
+// account authorities belong to brokerTenant. Authority, page rows, and the
+// optional first-page total are read by one PostgreSQL statement.
+func (store *CompatibilityStore) BrokerFunding(
+	ctx context.Context,
+	brokerTenant string,
+	accountID string,
+	params edge.PageParams,
+) (edge.FundingPage, error) {
+	limit := params.Limit
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	cursor, err := decodeFundingHistoryCursor(params.Cursor)
+	if err != nil {
+		return edge.FundingPage{}, err
+	}
+	forward := cursor == nil ||
+		(params.Direction != "prev" && params.Direction != "backward")
+	var cursorTime any
+	var cursorID any
+	if cursor != nil {
+		cursorTime = cursor.logicalTime
+		cursorID = cursor.fundingID
+	}
+
+	rows, err := store.pool.Query(ctx, `
+		WITH authority AS MATERIALIZED (
+			SELECT
+				ownership.account_id,
+				profile.login AS account_login
+			  FROM identity.user_accounts AS ownership
+			  JOIN identity.account_profiles AS profile
+			    ON profile.account_id = ownership.account_id
+			   AND profile.broker_subject = $1
+			 WHERE ownership.account_id = $2
+			   AND ownership.broker_subject = $1
+		),
+		page AS MATERIALIZED (
+			SELECT
+				authority.account_login,
+				funding.funding_id,
+				funding.instrument_id,
+				funding.instrument_revision,
+				funding.price_scale,
+				funding.quantity_scale,
+				funding.position_id,
+				funding.signed_quantity,
+				funding.oracle_price,
+				funding.funding_rate,
+				funding.funding_amount,
+				funding.settlement_currency,
+				funding.funding_logical_time,
+				funding.ordinality AS page_ordinal
+			  FROM authority
+			  CROSS JOIN LATERAL trading.read_broker_account_funding_history(
+				authority.account_id,
+				$3::bigint,
+				$4::uuid,
+				$5,
+				$6,
+				$7
+			  ) WITH ORDINALITY AS funding
+		),
+		total AS MATERIALIZED (
+			SELECT trading.account_funding_history_count(
+				authority.account_id
+			) AS value
+			  FROM authority
+			 WHERE NOT $5
+		),
+		sentinel AS (
+			SELECT EXISTS (SELECT 1 FROM authority) AS authorized
+		)
+		SELECT
+			sentinel.authorized,
+			authority.account_login,
+			page.funding_id::text,
+			page.instrument_id,
+			page.instrument_revision,
+			page.price_scale,
+			page.quantity_scale,
+			page.position_id::text,
+			trim_scale(page.signed_quantity)::text,
+			trim_scale(page.oracle_price)::text,
+			trim_scale(page.funding_rate)::text,
+			trim_scale(page.funding_amount)::text,
+			page.settlement_currency,
+			currency_scale.scale,
+			page.funding_logical_time,
+			total.value
+		  FROM sentinel
+		  LEFT JOIN authority ON sentinel.authorized
+		  LEFT JOIN page ON sentinel.authorized
+		  LEFT JOIN trading.currency_scales AS currency_scale
+		    ON currency_scale.currency = page.settlement_currency
+		  LEFT JOIN total ON sentinel.authorized
+		 ORDER BY page.page_ordinal NULLS LAST`,
+		pgx.QueryExecModeExec,
+		brokerTenant,
+		accountID,
+		cursorTime,
+		cursorID,
+		cursor != nil,
+		limit+1,
+		forward,
+	)
+	if err != nil {
+		return edge.FundingPage{}, fmt.Errorf("list broker funding: %w", err)
+	}
+	defer rows.Close()
+	page, err := collectBrokerFundingRows(rows, limit, cursor, forward)
+	if err != nil {
+		return edge.FundingPage{}, fmt.Errorf("list broker funding: %w", err)
+	}
+	return page, nil
+}
+
 // FundingBySymbol returns a fleet funding page with account login identity.
 func (store *CompatibilityStore) FundingBySymbol(
 	ctx context.Context,
@@ -2457,6 +2582,294 @@ type fundingHistoryCursor struct {
 type fundingHistoryRow struct {
 	view        edge.FundingView
 	logicalTime int64
+}
+
+type brokerFundingRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}
+
+func collectBrokerFundingRows(
+	rows brokerFundingRows,
+	limit int,
+	cursor *fundingHistoryCursor,
+	forward bool,
+) (edge.FundingPage, error) {
+	history := make([]fundingHistoryRow, 0, limit+1)
+	sawSentinel := false
+	authorized := false
+	var authoritativeLogin *int64
+	var authoritativeTotal *int64
+	for rows.Next() {
+		var (
+			rowAuthorized bool
+			accountLogin  *int64
+			fundingID     *string
+			symbol        *string
+			revision      *int64
+			priceScale    *int16
+			quantityScale *int16
+			rawPositionID *string
+			signedQty     *string
+			oraclePrice   *string
+			fundingRate   *string
+			fundingAmount *string
+			currencyCode  *string
+			currencyScale *int16
+			logicalTime   *int64
+			total         *int64
+		)
+		if err := rows.Scan(
+			&rowAuthorized,
+			&accountLogin,
+			&fundingID,
+			&symbol,
+			&revision,
+			&priceScale,
+			&quantityScale,
+			&rawPositionID,
+			&signedQty,
+			&oraclePrice,
+			&fundingRate,
+			&fundingAmount,
+			&currencyCode,
+			&currencyScale,
+			&logicalTime,
+			&total,
+		); err != nil {
+			return edge.FundingPage{}, fmt.Errorf("scan funding: %w", err)
+		}
+		if sawSentinel && authorized != rowAuthorized {
+			return edge.FundingPage{}, errors.New(
+				"inconsistent broker funding authority sentinel",
+			)
+		}
+		sawSentinel = true
+		authorized = rowAuthorized
+
+		payloadPresent := fundingID != nil ||
+			symbol != nil ||
+			revision != nil ||
+			priceScale != nil ||
+			quantityScale != nil ||
+			rawPositionID != nil ||
+			signedQty != nil ||
+			oraclePrice != nil ||
+			fundingRate != nil ||
+			fundingAmount != nil ||
+			currencyCode != nil ||
+			currencyScale != nil ||
+			logicalTime != nil
+		if !authorized {
+			if accountLogin != nil || total != nil || payloadPresent {
+				return edge.FundingPage{}, errors.New(
+					"unauthorized broker funding payload",
+				)
+			}
+			continue
+		}
+		if accountLogin == nil || *accountLogin <= 0 {
+			return edge.FundingPage{}, errors.New(
+				"broker funding account login is unavailable",
+			)
+		}
+		if authoritativeLogin == nil {
+			login := *accountLogin
+			authoritativeLogin = &login
+		} else if *authoritativeLogin != *accountLogin {
+			return edge.FundingPage{}, errors.New(
+				"inconsistent broker funding account login",
+			)
+		}
+		if cursor == nil {
+			if total == nil || *total < 0 {
+				return edge.FundingPage{}, errors.New(
+					"broker funding total is unavailable",
+				)
+			}
+			if authoritativeTotal == nil {
+				value := *total
+				authoritativeTotal = &value
+			} else if *authoritativeTotal != *total {
+				return edge.FundingPage{}, errors.New(
+					"inconsistent broker funding total",
+				)
+			}
+		} else if total != nil {
+			return edge.FundingPage{}, errors.New(
+				"cursor broker funding page exposed a total",
+			)
+		}
+		if !payloadPresent {
+			continue
+		}
+		if fundingID == nil ||
+			symbol == nil ||
+			revision == nil ||
+			priceScale == nil ||
+			quantityScale == nil ||
+			rawPositionID == nil ||
+			signedQty == nil ||
+			oraclePrice == nil ||
+			fundingRate == nil ||
+			fundingAmount == nil ||
+			currencyCode == nil ||
+			currencyScale == nil ||
+			logicalTime == nil ||
+			*revision <= 0 ||
+			*priceScale < 0 ||
+			*priceScale > int16(economic.MaxScale) ||
+			*quantityScale < 0 ||
+			*quantityScale > int16(economic.MaxScale) ||
+			*currencyScale < 0 ||
+			*currencyScale > int16(economic.MaxScale) {
+			return edge.FundingPage{}, errors.New(
+				"broker funding row is incomplete",
+			)
+		}
+		if _, err := engine.ParseID(*fundingID); err != nil {
+			return edge.FundingPage{}, fmt.Errorf(
+				"invalid broker funding ID: %w",
+				err,
+			)
+		}
+		if _, err := engine.ParseID(*rawPositionID); err != nil {
+			return edge.FundingPage{}, fmt.Errorf(
+				"invalid broker funding position ID: %w",
+				err,
+			)
+		}
+		instrument, err := domain.NewInstrumentRevision(
+			*symbol,
+			uint64(*revision),
+			uint8(*priceScale),
+			uint8(*quantityScale),
+		)
+		if err != nil {
+			return edge.FundingPage{}, fmt.Errorf(
+				"invalid broker funding instrument: %w",
+				err,
+			)
+		}
+		quantityMagnitude, negative := strings.CutPrefix(*signedQty, "-")
+		quantity, err := domain.NewQuantity(quantityMagnitude, instrument)
+		if err != nil {
+			return edge.FundingPage{}, fmt.Errorf(
+				"invalid broker funding signed quantity: %w",
+				err,
+			)
+		}
+		canonicalQuantity := quantity.Decimal().String()
+		if negative && !quantity.Decimal().IsZero() {
+			canonicalQuantity = "-" + canonicalQuantity
+		}
+		oracle, err := domain.NewPrice(*oraclePrice, instrument)
+		if err != nil {
+			return edge.FundingPage{}, fmt.Errorf(
+				"invalid broker funding oracle price: %w",
+				err,
+			)
+		}
+		if oracle.Decimal().Sign() <= 0 {
+			return edge.FundingPage{}, errors.New(
+				"broker funding oracle price must be positive",
+			)
+		}
+		rate, err := domain.NewRate(*fundingRate)
+		if err != nil {
+			return edge.FundingPage{}, fmt.Errorf(
+				"invalid broker funding rate: %w",
+				err,
+			)
+		}
+		currency, err := domain.NewCurrency(
+			*currencyCode,
+			uint8(*currencyScale),
+		)
+		if err != nil {
+			return edge.FundingPage{}, fmt.Errorf(
+				"invalid broker funding currency: %w",
+				err,
+			)
+		}
+		amount, err := domain.NewMoney(*fundingAmount, currency)
+		if err != nil {
+			return edge.FundingPage{}, fmt.Errorf(
+				"invalid broker funding amount: %w",
+				err,
+			)
+		}
+		row := fundingHistoryRow{
+			logicalTime: *logicalTime,
+			view: edge.FundingView{
+				FundingID:              *fundingID,
+				Symbol:                 instrument.ID(),
+				PositionID:             hex.EncodeToString([]byte(*rawPositionID)),
+				PositionSignedQuantity: canonicalQuantity,
+				OraclePrice:            oracle.Decimal().String(),
+				FundingRate:            rate.Decimal().String(),
+				FundingAmount:          amount.Decimal().String(),
+				Currency:               currency.Code(),
+				FundingTime: time.Unix(0, *logicalTime).
+					UTC().
+					Format(time.RFC3339Nano),
+				AccountLogin: authoritativeLogin,
+			},
+		}
+		history = append(history, row)
+	}
+	if err := rows.Err(); err != nil {
+		return edge.FundingPage{}, err
+	}
+	if !sawSentinel {
+		return edge.FundingPage{}, errors.New(
+			"broker funding authority sentinel is missing",
+		)
+	}
+	if !authorized {
+		return edge.FundingPage{}, edge.ErrForbidden
+	}
+	if authoritativeTotal != nil && *authoritativeTotal < int64(len(history)) {
+		return edge.FundingPage{}, errors.New(
+			"broker funding total is smaller than the page",
+		)
+	}
+
+	hasMore := len(history) > limit
+	if hasMore {
+		history = history[:limit]
+	}
+	if !forward && cursor != nil {
+		for left, right := 0, len(history)-1; left < right; left, right = left+1, right-1 {
+			history[left], history[right] = history[right], history[left]
+		}
+	}
+	page := edge.FundingPage{
+		Items: make([]edge.FundingView, len(history)),
+		Total: authoritativeTotal,
+	}
+	for index := range history {
+		page.Items[index] = history[index].view
+	}
+	if len(history) != 0 {
+		newest := encodeFundingHistoryCursor(history[0])
+		oldest := encodeFundingHistoryCursor(history[len(history)-1])
+		if forward {
+			if hasMore {
+				page.NextCursor = &oldest
+			}
+			if cursor != nil {
+				page.PrevCursor = &newest
+			}
+		} else {
+			page.NextCursor = &oldest
+			if hasMore {
+				page.PrevCursor = &newest
+			}
+		}
+	}
+	return page, nil
 }
 
 func (store *CompatibilityStore) fundingPage(

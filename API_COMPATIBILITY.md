@@ -110,6 +110,37 @@ buffering, and serialization are proportional only to the authorized output.
 The list is non-mutating and has no replay, acknowledgment, or realtime
 boundary.
 
+### Broker account funding
+
+`GET /broker/v1/accounts/{accountId}/funding` returns the accepted current-Go
+`FundingPage` with the full exact `FundingView` and required broker
+`accountLogin`. Broker HMAC authentication dominates exact
+`accounts:read`/wildcard scope, which dominates canonical account-URN and
+funding-page parsing, which dominates storage access. `Principal.Tenant`,
+never the API-key subject, is tenant authority.
+
+One unnamed custom-plan PostgreSQL statement materializes matching
+`identity.user_accounts` and `identity.account_profiles` authority before
+calling the funding reader. It returns the ordered page and optional
+cursorless total from one MVCC snapshot. Absent, foreign, partial, and
+conflicting authority all return the same generic `403`; no denied account
+invokes or decodes the funding function. Empty authorized pages preserve
+`items: []` and first-page `total: 0`.
+
+The newest-first `(logical_time, funding_id)` cursor remains a moving committed
+history position, not a replay snapshot. Each settlement carries immutable
+receipt-derived instrument revision, price-scale, and quantity-scale
+provenance. The reader reconstructs the exact historical `InstrumentRevision`
+and validates quantity and oracle price through its step and tick rules; it
+does not reinterpret old rows through the instrument's current revision.
+Every row is buffered before HTTP output. Missing or mismatched provenance,
+off-step quantity, off-tick or non-positive price, non-finite values, invalid
+currency scale, a late corrupt row, or a stream failure rejects the whole
+response as opaque `503`, without identifiers, cursors, totals, or a valid
+prefix. This applies equally to first, forward-cursor, and backward-cursor
+pages. The read performs no durable write, acknowledgment, outbox publication,
+or realtime effect.
+
 ## 5. gRPC compatibility
 
 Preserve:
