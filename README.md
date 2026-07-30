@@ -106,14 +106,17 @@ SQLSTATE `23514`; operators must not retry or repair that history and must
 remain halted for a reviewed forward or owner decision. Only an explicit owner
 authorization permits a complete verified pre-constraint restore followed by
 the exact prior artifact, fresh recovery, and full reconciliation.
-The broker account-fills inventory now has an owner-approved current-Go
-contract decision. Its future route must reuse the accepted exact fill page
-shape but authorize the authenticated tenant through both durable ownership
+The broker account-fills route now preserves the accepted exact current-Go
+fill page while authorizing `Principal.Tenant` through both durable ownership
 and account-profile authorities in the same PostgreSQL statement that returns
-the page. API-key subject is not tenant authority, and moving keyset cursors are
-ordinary history rather than replay or catch-up. The route remains inactive
-until the tenant-hostile failing tests and implementation are separately
-accepted.
+the page and filter-wide total. API-key subject is not tenant authority.
+Authentication and exact scope dominate strict parsing, foreign empty, valid,
+or corrupt histories return the same generic denial, and authorized projection
+corruption returns no partial page. Both reverse cursor directions are covered
+through the real least-privilege PostgreSQL 19 Beta 2 HTTP boundary. The frozen
+broker OpenAPI, compatibility manifest, generated artifact hash, runtime
+wiring, and intentional-deviation record activate atomically. Moving keyset
+cursors remain ordinary committed history rather than replay or catch-up.
 Command-admission replay authority is now also hardened by a landed
 forward-only PostgreSQL 19 Beta 2 migration. It fences engine and API writers,
 removes hostile inherited table and column privileges from commands,

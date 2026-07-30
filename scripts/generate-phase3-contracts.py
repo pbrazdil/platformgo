@@ -238,6 +238,21 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "request": "BrokerAccountRequest",
         "success": "BrokerAccountResult",
     },
+    ("GET", "/broker/v1/accounts/{accountId}/fills"): {
+        "statuses": [200, 400, 401, 403, 503],
+        "success": "FillExecutionPage",
+        "success_description": (
+            "Committed moving keyset view of the current Go fill projection, "
+            "newest first"
+        ),
+        "pagination": True,
+        "fill_filters": True,
+        "security": "apiKey",
+        "account_id_pattern": (
+            "^urn:xb:account:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            "[0-9a-f]{4}-[0-9a-f]{12}$"
+        ),
+    },
 }
 
 
@@ -359,7 +374,14 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                     "name": "accountId",
                     "in": "path",
                     "required": True,
-                    "schema": {"type": "string"},
+                    "schema": {
+                        "type": "string",
+                        **(
+                            {"pattern": accepted["account_id_pattern"]}
+                            if accepted.get("account_id_pattern") is not None
+                            else {}
+                        ),
+                    },
                 },
                 {
                     "name": "limit",
@@ -412,7 +434,7 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
     return paths
 
 
-def schemas(client: bool) -> dict[str, object]:
+def schemas(client: bool, broker: bool) -> dict[str, object]:
     decimal = {"type": "string", "pattern": r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$"}
     return {
         "Error": {
@@ -751,7 +773,7 @@ def schemas(client: bool) -> dict[str, object]:
                     },
                 },
             }
-            if client
+            if client or broker
             else {}
         ),
         "BrokerEcho": {
@@ -908,7 +930,7 @@ def document(title: str, raw: str, security: str) -> dict[str, object]:
                     else {"type": "http", "scheme": "bearer"}
                 )
             },
-            "schemas": schemas(raw == CLIENT),
+            "schemas": schemas(raw == CLIENT, raw == BROKER),
         },
     }
 

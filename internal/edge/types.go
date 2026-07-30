@@ -427,3 +427,14 @@ type TradingReader interface {
 	Fills(context.Context, string, FillExecutionFilter) (FillExecutionPage, error)
 	Funding(context.Context, string, PageParams) (FundingPage, error)
 }
+
+// BrokerFillsReader keeps tenant authorization inside the same PostgreSQL
+// statement that reads the immutable fill page.
+type BrokerFillsReader interface {
+	BrokerFills(
+		context.Context,
+		string,
+		string,
+		FillExecutionFilter,
+	) (FillExecutionPage, error)
+}

@@ -394,6 +394,7 @@ func serve(
 		Realtime:      realtime,
 		Identity:      identityService,
 		Trading:       compatibilityStore,
+		BrokerFills:   compatibilityStore,
 		Readiness: []edge.HealthCheck{
 			{Name: "postgres", Check: postgresReady},
 			{Name: "redis", Check: realtime.Healthy},
