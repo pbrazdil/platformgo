@@ -156,6 +156,10 @@ role claims are never authority. This is intentionally not a production route
 activation: no role or administrator is seeded, the runtime does not inject
 the admin dependencies, and the frozen contract remains source inventory until
 a separately audited first-admin/bootstrap path exists.
+The stable foundation candidate passed policy, formatting, lint, complete
+serial PostgreSQL 19 Beta 2 tests, complete serial race tests, deterministic
+repeat tests, and vulnerability scanning; its migration, determinism, and
+security implementation-boundary reviews closed with no P0–P3 findings.
 The landed broker account point read preserves the accepted
 ten-field current-Go account summary while retaining the pinned source's
 generic `400 unknown account` for both absent and foreign ownership.
