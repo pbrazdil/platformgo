@@ -575,6 +575,46 @@ readers independently parse every non-`NULL` effective leverage through the
 exact ratio domain, require a positive value, and canonicalize it; invalid
 durable data fails the complete read closed without changing rows.
 
+### Phase 3 broker-balances ACL boundary
+
+Migration `20260730000100_phase3_broker_balances_acl.up.sql` advances the
+immutable journal from the exact 36-file finite-leverage validation tip to the
+37-file broker-balances ACL tip. It takes `SHARE` locks before any ACL change,
+in production writer order: `identity.user_accounts`,
+`identity.account_profiles`, then `ledger.balances`. Account provisioning
+writes the two identity relations in that order before balance persistence; a
+balance-only writer touches only the final relation. The migrator's five-second
+`lock_timeout` is shorter than the migration's ten-second
+`statement_timeout`, which bounds a conflicting pre-revocation writer. If the
+writer does not finish or drain within five seconds, lock acquisition fails
+with SQLSTATE `55P03` and the migration rolls back before any ACL change. If
+the production-order writer commits within the bound, the migration acquires
+all three locks and proceeds safely.
+
+The migration removes `PUBLIC`, every explicit non-owner table and column
+grant, all grant options, and dependent same-object grant chains inherited
+from hostile owner defaults. It restores only these non-grantable privileges:
+
+- `identity.user_accounts`: API `SELECT`; engine `SELECT, INSERT`;
+- `identity.account_profiles`: API `SELECT`; engine `INSERT`;
+- `ledger.balances`: API `SELECT`; engine `SELECT, INSERT, UPDATE`.
+
+The migration changes only ACL catalogs and the migration journal. It does not
+change owner default-privilege templates, relation owners, rows, relation
+files, schemas, economic state, or the runtime schema revision. A lock,
+statement, deadlock, SQL, or journal failure before `COMMIT` rolls back all
+three relations' ACL changes and can be retried with the same bytes after the
+cause is classified and drained.
+
+A connection loss, failover, client deadline, or missing `COMMIT`
+acknowledgment is an unknown outcome. Keep runtimes stopped and compare the
+exact filename/checksum, complete raw `pg_class.relacl` and
+`pg_attribute.attacl` allowlist, all prior migration checksums, explicit-column
+row digests, relation owners and filenodes, and owner defaults. Retry only when
+the new journal row is absent and the complete prior state matches. A mixed or
+divergent state requires a reviewed forward repair or explicitly authorized
+complete verified pre-migration restore; never edit frozen migration bytes.
+
 ### Phase 3 frozen-effective-leverage migration boundary
 
 Migration `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` is the
