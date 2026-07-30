@@ -66,6 +66,22 @@ not an API process clock, owns the 24-hour replay lifetime. After expiry, a new
 claim may replace the old row; cleanup is bounded and may delete expired rows
 only.
 
+### Broker account point read
+
+`GET /broker/v1/accounts/{accountId}` returns the accepted ten-field
+`MyAccountView`. Broker HMAC authentication dominates exact
+`accounts:read`/wildcard scope, which dominates strict lowercase UUID account
+URN parsing, which dominates storage access.
+
+The authenticated tenant and account ID are bound inside one PostgreSQL
+statement. Absent and foreign ownership are intentionally indistinguishable as
+`400 invalid_request / unknown account`. A tenant-owned incomplete, inconsistent,
+or corrupt projection returns opaque `503` without any partial account fields.
+Valid output preserves the current-Go enum, venue, class, currency, and UTC
+timestamp rendering. A finite PostgreSQL timestamp outside RFC3339's
+representable year range is rejected as projection corruption. The point read
+is non-mutating and has no replay, acknowledgment, or realtime boundary.
+
 ## 5. gRPC compatibility
 
 Preserve:

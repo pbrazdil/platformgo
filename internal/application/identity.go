@@ -742,12 +742,21 @@ func clientAccountSummary(record AccountRecord) (edge.MyAccountView, error) {
 		return edge.MyAccountView{}, err
 	}
 	if record.MarketVenue != "HYPERLIQUID" ||
+		record.BaseCurrency != "USDC" ||
 		len(record.PermittedClasses) != 1 ||
 		record.PermittedClasses[0] != "CRYPTOCURRENCY" {
 		return edge.MyAccountView{}, fmt.Errorf(
-			"invalid account market compatibility %q/%v",
+			"invalid account compatibility %q/%q/%v",
+			record.BaseCurrency,
 			record.MarketVenue,
 			record.PermittedClasses,
+		)
+	}
+	createdAt, err := record.CreatedAt.UTC().MarshalText()
+	if err != nil {
+		return edge.MyAccountView{}, fmt.Errorf(
+			"invalid account creation time: %w",
+			err,
 		)
 	}
 	return edge.MyAccountView{
@@ -760,8 +769,13 @@ func clientAccountSummary(record AccountRecord) (edge.MyAccountView, error) {
 		MarketVenue:      "hyperliquid",
 		PermittedClasses: []string{"perps"},
 		Status:           status,
-		CreatedAt:        record.CreatedAt.UTC().Format(time.RFC3339Nano),
+		CreatedAt:        string(createdAt),
 	}, nil
+}
+
+// AccountSummary validates and renders one complete durable account projection.
+func AccountSummary(record AccountRecord) (edge.MyAccountView, error) {
+	return clientAccountSummary(record)
 }
 
 // BrokerEcho durably replays one response per principal and idempotency key.

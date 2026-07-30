@@ -213,6 +213,105 @@ func (store *CompatibilityStore) AccountsByUser(
 	return accounts, nil
 }
 
+// BrokerAccount returns one complete account only when the durable ownership
+// anchor belongs to brokerTenant in the same PostgreSQL statement.
+func (store *CompatibilityStore) BrokerAccount(
+	ctx context.Context,
+	brokerTenant string,
+	accountID string,
+) (edge.MyAccountView, error) {
+	if store == nil || store.pool == nil {
+		return edge.MyAccountView{}, errors.New(
+			"broker account: PostgreSQL pool is required",
+		)
+	}
+	var (
+		record           application.AccountRecord
+		login            *int64
+		baseCurrency     *string
+		marginMode       *string
+		omsMode          *string
+		marketVenue      *string
+		permittedClasses []string
+		status           *string
+		createdAt        *time.Time
+	)
+	err := store.pool.QueryRow(ctx, `
+		WITH ownership AS MATERIALIZED (
+			SELECT account_id, user_id
+			  FROM identity.user_accounts
+			 WHERE account_id = $2
+			   AND broker_subject = $1
+		)
+		SELECT
+			ownership.account_id,
+			profile.login,
+			ownership.user_id,
+			profile.base_currency,
+			account.margin_mode,
+			account.oms_mode,
+			profile.market_venue,
+			profile.permitted_classes,
+			account.status,
+			profile.created_at
+		  FROM ownership
+		  LEFT JOIN identity.account_profiles AS profile
+		    ON profile.account_id = ownership.account_id
+		   AND profile.broker_subject = $1
+		  LEFT JOIN trading.accounts AS account
+		    ON account.account_id = ownership.account_id`,
+		brokerTenant,
+		accountID,
+	).Scan(
+		&record.AccountID,
+		&login,
+		&record.UserID,
+		&baseCurrency,
+		&marginMode,
+		&omsMode,
+		&marketVenue,
+		&permittedClasses,
+		&status,
+		&createdAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return edge.MyAccountView{}, edge.ErrNotFound
+	}
+	if err != nil {
+		return edge.MyAccountView{}, fmt.Errorf("read broker account: %w", err)
+	}
+	if login == nil ||
+		baseCurrency == nil ||
+		marginMode == nil ||
+		omsMode == nil ||
+		marketVenue == nil ||
+		permittedClasses == nil ||
+		status == nil ||
+		createdAt == nil {
+		return edge.MyAccountView{}, fmt.Errorf(
+			"broker account %q is incomplete",
+			record.AccountID,
+		)
+	}
+	record.Login = *login
+	record.BaseCurrency = *baseCurrency
+	record.MarginMode = *marginMode
+	record.OmsMode = *omsMode
+	record.MarketVenue = *marketVenue
+	record.PermittedClasses = append([]string(nil), permittedClasses...)
+	record.Status = *status
+	record.CreatedAt = *createdAt
+	account, err := application.AccountSummary(record)
+	if err != nil {
+		return edge.MyAccountView{}, fmt.Errorf(
+			"read broker account %q: %w",
+			record.AccountID,
+			err,
+		)
+	}
+	return account, nil
+}
+
 func (store *CompatibilityStore) userAccounts(
 	ctx context.Context,
 	userID string,
