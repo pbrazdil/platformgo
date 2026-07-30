@@ -784,6 +784,29 @@ func AccountSummary(record AccountRecord) (edge.MyAccountView, error) {
 	return clientAccountSummary(record)
 }
 
+// BrokerAccountListSummary applies the broker list's accepted canonical
+// account-URN contract without tightening the broader current-Go user URNs
+// accepted by existing account-summary consumers.
+func BrokerAccountListSummary(record AccountRecord) (edge.MyAccountView, error) {
+	const accountPrefix = "urn:xb:account:"
+	if !strings.HasPrefix(record.AccountID, accountPrefix) {
+		return edge.MyAccountView{}, fmt.Errorf(
+			"invalid account id %q",
+			record.AccountID,
+		)
+	}
+	if _, err := engine.ParseID(
+		strings.TrimPrefix(record.AccountID, accountPrefix),
+	); err != nil {
+		return edge.MyAccountView{}, fmt.Errorf(
+			"invalid account id %q: %w",
+			record.AccountID,
+			err,
+		)
+	}
+	return clientAccountSummary(record)
+}
+
 // BrokerEcho durably replays one response per principal and idempotency key.
 func (identity *Identity) BrokerEcho(
 	ctx context.Context,

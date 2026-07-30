@@ -230,6 +230,49 @@ func TestBrokerAccountListIsScopedToItsTenant(t *testing.T) {
 	if after != before {
 		t.Fatalf("broker account list reads changed durable state\nbefore=%s\nafter=%s", before, after)
 	}
+
+	const malformedAccount = "urn:xb:account:not-a-uuid"
+	seedBrokerAccountListAccount(
+		t,
+		ctx,
+		admin,
+		tenantA,
+		filterUser,
+		malformedAccount,
+		9900,
+		"2026-07-30T08:09:13Z",
+	)
+	beforeMalformedReads := brokerAccountReadDigest(t, ctx, admin)
+	for _, harness := range []brokerAccountReadHarness{first, restarted} {
+		response := brokerAccountListGet(
+			t,
+			harness,
+			"",
+			"xbk_accountread.secret",
+			true,
+		)
+		assertBrokerAccountReadResponse(
+			t,
+			response,
+			http.StatusServiceUnavailable,
+			unavailableBody,
+		)
+		if strings.Contains(response.Body.String(), accountEarly) ||
+			strings.Contains(response.Body.String(), malformedAccount) {
+			t.Fatalf(
+				"invalid account id leaked a valid prefix or corrupt id: %s",
+				response.Body.String(),
+			)
+		}
+	}
+	afterMalformedReads := brokerAccountReadDigest(t, ctx, admin)
+	if afterMalformedReads != beforeMalformedReads {
+		t.Fatalf(
+			"malformed account reads changed durable state\nbefore=%s\nafter=%s",
+			beforeMalformedReads,
+			afterMalformedReads,
+		)
+	}
 }
 
 func brokerAccountListGet(

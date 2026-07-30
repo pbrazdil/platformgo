@@ -166,7 +166,8 @@ isolation, deterministic ties, foreign corruption isolation, late owned
 corruption as opaque whole-response `503`, reconstruction, one statement per
 valid request, and unchanged relation digests. Migration upgrade/lock/plan
 evidence, full candidate validation, exact-SHA review, hosted CI, and merge
-remain pending for this slice.
+must be repeated for the replacement candidate after the final-review
+account-identifier correction.
 Its forward-only, catalog-only ACL migration scrubs hostile table, column,
 grant-option, and dependent grant-chain privileges from both tenant
 authorities and `ledger.balances`, then restores only the exact non-grantable
@@ -642,10 +643,11 @@ review required the new 39th forward migration, fixed filtered/unfiltered
 query templates, per-request custom planning, and executed-plan amplification
 evidence. Those corrections and focused PostgreSQL 19 Beta 2 runtime,
 migration-plan, compatibility-regression, and no-partial-response tests are
-green. The stable implementation candidate is also green through policy,
-format, lint, full test, race, deterministic repeat, vulnerability, complete
-PostgreSQL 19 Beta 2, and complete compatibility validation. Exact-SHA
-specialist review, hosted CI, and merge remain open.
+green. Final review of the prior implementation candidate found that a
+schema-valid noncanonical account ID could escape through the list. The
+replacement adds list-specific canonical account-URN validation without
+tightening accepted current-Go user URNs; replacement full validation,
+exact-SHA review, hosted CI, and merge remain open.
 
 The landed finite fill-leverage hardening has PostgreSQL 19 Beta 2
 tests defining its corruption-read, no-partial-page, restart, exact 35/36-tip,

@@ -493,7 +493,7 @@ func collectBrokerAccountRows(rows brokerAccountRows) ([]edge.MyAccountView, err
 		)
 		record.Status = *status
 		record.CreatedAt = *createdAt
-		account, err := application.AccountSummary(record)
+		account, err := application.BrokerAccountListSummary(record)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"account %q: %w",
