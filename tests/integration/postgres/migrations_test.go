@@ -5059,8 +5059,8 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	assertMigrationHistoryTip(
 		t,
 		pool,
-		40,
-		"20260730000400_phase3_broker_funding_acl.up.sql",
+		41,
+		"20260730000500_phase3_admin_permission_authority.up.sql",
 	)
 }
 

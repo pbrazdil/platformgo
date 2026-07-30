@@ -141,6 +141,25 @@ prefix. This applies equally to first, forward-cursor, and backward-cursor
 pages. The read performs no durable write, acknowledgment, outbox publication,
 or realtime effect.
 
+### Admin permission catalog foundation
+
+The internal `GET /admin/v1/permissions` composition preserves the accepted
+current-Go response fields and ordered catalog values: eleven resources and
+four actions, each represented by lowercase `id` and `label`. Authentication
+requires the separately configured current-Go HMAC admin audience and a
+canonical admin subject. Its key must be distinct from the client-token key and
+an absent admin key leaves the route uncomposed. Durable PostgreSQL
+`roles/read`, not token role
+claims, authorizes the read; missing credentials, denial, and unavailable
+authority fail as `401`, `403`, and `503` before catalog data is returned.
+
+This does not yet freeze or activate an external admin contract. The imported
+OpenAPI entry remains source-route inventory because the source does not
+currently determine additional query, body, method, trailing-slash, `Allow`
+header, or JSON object-member-order behavior. The production runtime injects
+none of the admin catalog dependencies until the separately reviewed
+first-admin/bootstrap boundary exists.
+
 ## 5. gRPC compatibility
 
 Preserve:

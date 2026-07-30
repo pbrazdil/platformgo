@@ -967,6 +967,33 @@ partial catalog state. The stop, preflight, exact journal/checksum and catalog
 classification, final-tip binary selection, and recovery protocol is in
 `OPERATIONS.md`.
 
+### Phase 3 admin permission authority foundation
+
+Migration `20260730000500_phase3_admin_permission_authority.up.sql` advances
+the immutable journal from the 40-file broker-funding tip to an additive
+41-file identity-authority tip. It creates role, role-parent, admin-assignment,
+and policy relations without seeding a role, policy, or administrator.
+Assignments accept only canonical `admin::urn:xb:admin:<lowercase UUID>`
+subjects. Policies accept only the catalog's known resources and actions plus
+the explicit `*` wildcard, and effects are exactly `allow` or `deny`.
+
+`identity.admin_has_permission(text,text,text)` evaluates direct and inherited
+roles in one MVCC statement. Recursive `UNION` makes cycles terminate, matching
+deny overrides every matching allow, unknown values fail closed, and an admin
+with no durable assignment is denied. The function is `SECURITY DEFINER` with
+`search_path=pg_catalog`; `platformgo_api` receives only non-grantable
+`EXECUTE`. It has no direct table or column privilege. The migration removes
+`PUBLIC`, hostile default-derived, named, column, grant-option, and dependent
+same-object privileges from the new boundary before granting that single
+allowlist entry.
+
+The migration does not change an economic relation, runtime engine revision,
+or existing identity fact. A binary embedding only the 40-file artifact must
+reject the database as schema-ahead. The application runtime intentionally
+does not compose this authority yet: production activation requires a separate
+reviewed bootstrap and role-administration design with an auditable first
+administrator, recovery, and lockout procedure.
+
 ## 11. Retention and partitioning
 
 High-volume append-only tables may be time partitioned:

@@ -79,6 +79,46 @@ type Authenticator interface {
 	AuthenticateBroker(context.Context, string, string) (Principal, error)
 }
 
+// AdminAuthenticator verifies an administrative bearer credential. It is
+// separate from Authenticator so client/broker-only compositions do not gain
+// an administrative authentication surface implicitly.
+type AdminAuthenticator interface {
+	AuthenticateAdmin(context.Context, string) (Principal, error)
+}
+
+// PermissionCatalogItem is one externally visible RBAC resource or action.
+type PermissionCatalogItem struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+// AdminPermissionCatalog is the stable permission vocabulary returned to an
+// authorized administrative caller.
+type AdminPermissionCatalog struct {
+	Resources []PermissionCatalogItem `json:"resources"`
+	Actions   []PermissionCatalogItem `json:"actions"`
+}
+
+// AdminPermissionAuthorizer evaluates one permission against durable
+// administrative authority.
+type AdminPermissionAuthorizer interface {
+	AuthorizeAdmin(
+		context.Context,
+		Principal,
+		string,
+		string,
+	) (bool, error)
+}
+
+// AdminPermissionCatalogReader returns the static catalog only after the edge
+// has completed authentication and durable authorization.
+type AdminPermissionCatalogReader interface {
+	AdminPermissionCatalog(
+		context.Context,
+		Principal,
+	) (AdminPermissionCatalog, error)
+}
+
 // SubmitOrderRequest is the frozen client JSON request shape.
 type SubmitOrderRequest struct {
 	IntentID       string  `json:"intentId"`

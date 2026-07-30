@@ -146,6 +146,20 @@ revision fence. It also removes hostile funding table, column, and function
 grants, restores only the engine/API allowlist, and leaves both constraint
 helpers uncallable by runtime roles. The client funding route and its accepted
 projection remain unchanged.
+The current admin permission-catalog foundation preserves the accepted ordered
+current-Go catalog of eleven resources and four actions behind a strict admin
+HMAC bearer with a distinct, separately configured key and durable PostgreSQL
+`roles/read` authority. Migration 41 adds
+deny-by-default role assignments, cycle-safe inheritance, wildcard policy,
+deny override, and one hardened least-privilege authorization function; token
+role claims are never authority. This is intentionally not a production route
+activation: no role or administrator is seeded, the runtime does not inject
+the admin dependencies, and the frozen contract remains source inventory until
+a separately audited first-admin/bootstrap path exists.
+The stable foundation candidate passed policy, formatting, lint, complete
+serial PostgreSQL 19 Beta 2 tests, complete serial race tests, deterministic
+repeat tests, and vulnerability scanning; its migration, determinism, and
+security implementation-boundary reviews closed with no P0–P3 findings.
 The landed broker account point read preserves the accepted
 ten-field current-Go account summary while retaining the pinned source's
 generic `400 unknown account` for both absent and foreign ownership.

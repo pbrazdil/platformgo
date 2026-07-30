@@ -462,6 +462,34 @@ defaults. Retry only when the journal row is absent and the complete prior state
 matches. Never edit frozen bytes, delete journal history, or reset a persistent
 database.
 
+### Phase 3 admin permission authority foundation
+
+Migration `20260730000500_phase3_admin_permission_authority.up.sql` is an
+additive cutover from the exact 40-file broker-funding tip to the 41-file
+identity-authority tip. Before applying it, record all 40 filenames and
+checksums plus the identity relation digest and ACL/default-privilege state.
+Apply only the exact candidate bytes. A lock or statement timeout is a definite
+rollback only after confirming the 41st journal row is absent and the recorded
+state is unchanged; a missing commit acknowledgment is an unknown outcome and
+must be classified from the exact journal row/checksum and complete catalog.
+
+After commit, verify all 41 checksums, unchanged preexisting identity data, the
+four new relation definitions and constraints, and this allowlist:
+
+- API has non-grantable `EXECUTE` on
+  `identity.admin_has_permission(text,text,text)`;
+- API has no direct table or column privilege on any RBAC relation;
+- `PUBLIC` and every unexpected role have no table, column, or function
+  privilege and no grant option.
+
+Do not seed an administrator or activate the route as an operational shortcut.
+The current runtime deliberately omits the admin authenticator, authorizer, and
+catalog dependencies. First-admin creation, ongoing role administration,
+audit, lockout recovery, and secret rotation require a separate reviewed
+cutover. A 40-file binary must reject this database as schema-ahead; rollback
+is a forward code artifact that still embeds migration 41, or an explicitly
+authorized complete pre-migration restore before any later durable fact.
+
 ### Phase 3 command market-sequence binding upgrade
 
 Migration

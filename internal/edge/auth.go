@@ -41,13 +41,16 @@ type BrokerCredential struct {
 // HMACAuthenticatorConfig defines the compact Phase 3 credential verifier.
 type HMACAuthenticatorConfig struct {
 	ClientTokenSecret []byte
+	AdminTokenSecret  []byte
 	BrokerCredentials []BrokerCredential
 	Clock             AuthClock
 }
 
-// HMACAuthenticator verifies client JWTs and broker xbk_ API keys.
+// HMACAuthenticator verifies separately keyed client/admin JWTs and broker
+// xbk_ API keys.
 type HMACAuthenticator struct {
 	clientSecret []byte
+	adminSecret  []byte
 	brokers      map[string]BrokerCredential
 	clock        AuthClock
 }
@@ -58,6 +61,15 @@ func NewHMACAuthenticator(
 ) (*HMACAuthenticator, error) {
 	if len(config.ClientTokenSecret) < 32 {
 		return nil, errors.New("auth: client token secret must contain at least 32 bytes")
+	}
+	if len(config.AdminTokenSecret) > 0 && len(config.AdminTokenSecret) < 32 {
+		return nil, errors.New("auth: admin token secret must contain at least 32 bytes")
+	}
+	if len(config.AdminTokenSecret) > 0 &&
+		bytes.Equal(config.AdminTokenSecret, config.ClientTokenSecret) {
+		return nil, errors.New(
+			"auth: admin and client token secrets must be distinct",
+		)
 	}
 	if config.Clock == nil {
 		config.Clock = authWallClock{}
@@ -95,6 +107,7 @@ func NewHMACAuthenticator(
 	}
 	return &HMACAuthenticator{
 		clientSecret: append([]byte(nil), config.ClientTokenSecret...),
+		adminSecret:  append([]byte(nil), config.AdminTokenSecret...),
 		brokers:      brokers,
 		clock:        config.Clock,
 	}, nil
@@ -114,6 +127,40 @@ type ClientClaims struct {
 	Expires  int64    `json:"exp"`
 	Accounts []string `json:"accounts,omitempty"`
 	Scopes   []string `json:"scopes,omitempty"`
+}
+
+// AdminClaims is the administrative access-token wire shape. Roles are parsed
+// for compatibility but never trusted as authorization authority; PostgreSQL
+// evaluates the authenticated subject's current assignments and policies.
+type AdminClaims struct {
+	Subject  string   `json:"sub"`
+	Audience string   `json:"aud"`
+	Expires  int64    `json:"exp"`
+	Roles    []string `json:"roles,omitempty"`
+}
+
+func (claims AdminClaims) GetExpirationTime() (*jwt.NumericDate, error) {
+	if claims.Expires == 0 {
+		return nil, nil
+	}
+	return jwt.NewNumericDate(time.Unix(claims.Expires, 0)), nil
+}
+
+func (AdminClaims) GetIssuedAt() (*jwt.NumericDate, error) { return nil, nil }
+
+func (AdminClaims) GetNotBefore() (*jwt.NumericDate, error) { return nil, nil }
+
+func (AdminClaims) GetIssuer() (string, error) { return "", nil }
+
+func (claims AdminClaims) GetSubject() (string, error) {
+	return claims.Subject, nil
+}
+
+func (claims AdminClaims) GetAudience() (jwt.ClaimStrings, error) {
+	if claims.Audience == "" {
+		return nil, nil
+	}
+	return jwt.ClaimStrings{claims.Audience}, nil
 }
 
 func (claims ClientClaims) GetExpirationTime() (*jwt.NumericDate, error) {
@@ -182,6 +229,55 @@ func (auth *HMACAuthenticator) AuthenticateClient(
 	}, nil
 }
 
+// AuthenticateAdmin verifies signature, audience, expiry, and the canonical
+// administrative subject. Token role claims are intentionally not copied into
+// the principal because durable PostgreSQL policy remains authoritative.
+func (auth *HMACAuthenticator) AuthenticateAdmin(
+	_ context.Context,
+	token string,
+) (Principal, error) {
+	if auth == nil || len(auth.adminSecret) < 32 {
+		return Principal{}, ErrUnauthorized
+	}
+	if err := rejectAmbiguousJWT(token); err != nil {
+		return Principal{}, ErrUnauthorized
+	}
+	var claims AdminClaims
+	parsed, err := jwt.ParseWithClaims(
+		token,
+		&claims,
+		func(candidate *jwt.Token) (any, error) {
+			if candidate.Method != jwt.SigningMethodHS256 ||
+				candidate.Header["typ"] != "JWT" {
+				return nil, ErrUnauthorized
+			}
+			if _, critical := candidate.Header["crit"]; critical {
+				return nil, ErrUnauthorized
+			}
+			return auth.adminSecret, nil
+		},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithAudience(string(AudienceAdmin)),
+		jwt.WithExpirationRequired(),
+		jwt.WithTimeFunc(auth.clock.Now),
+	)
+	if err != nil || !parsed.Valid {
+		return Principal{}, ErrUnauthorized
+	}
+	const prefix = "urn:xb:admin:"
+	adminID := strings.TrimPrefix(claims.Subject, prefix)
+	if claims.Audience != string(AudienceAdmin) ||
+		claims.Expires <= auth.clock.Now().Unix() ||
+		adminID == claims.Subject ||
+		!canonicalUUID.MatchString(adminID) {
+		return Principal{}, ErrUnauthorized
+	}
+	return Principal{
+		Subject:  "admin::" + claims.Subject,
+		Audience: AudienceAdmin,
+	}, nil
+}
+
 // AuthenticateBroker verifies the public prefix, secret, expiry, and exact IP
 // allowlist before returning scopes.
 func (auth *HMACAuthenticator) AuthenticateBroker(
@@ -239,6 +335,25 @@ func (auth *HMACAuthenticator) SignClientToken(claims ClientClaims) (string, err
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	token.Header["typ"] = "JWT"
 	return token.SignedString(auth.clientSecret)
+}
+
+// SignAdminToken exists for trusted administrative composition and tests.
+func (auth *HMACAuthenticator) SignAdminToken(
+	claims AdminClaims,
+) (string, error) {
+	const prefix = "urn:xb:admin:"
+	adminID := strings.TrimPrefix(claims.Subject, prefix)
+	if auth == nil ||
+		len(auth.adminSecret) < 32 ||
+		claims.Audience != string(AudienceAdmin) ||
+		claims.Expires == 0 ||
+		adminID == claims.Subject ||
+		!canonicalUUID.MatchString(adminID) {
+		return "", errors.New("auth: valid admin claims are required")
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	token.Header["typ"] = "JWT"
+	return token.SignedString(auth.adminSecret)
 }
 
 // HashBrokerSecret creates the stored comparison value for a broker secret.
