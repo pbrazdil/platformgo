@@ -59,6 +59,74 @@ func TestHMACAuthenticatorEnforcesAudienceExpiryAndAccountClaims(t *testing.T) {
 	}
 }
 
+func TestHMACAuthenticatorEnforcesAdminAudienceExpiryAndSubject(t *testing.T) {
+	now := time.Date(2026, time.July, 30, 22, 0, 0, 0, time.UTC)
+	auth, err := NewHMACAuthenticator(HMACAuthenticatorConfig{
+		ClientTokenSecret: []byte("0123456789abcdef0123456789abcdef"),
+		Clock:             fixedAuthClock{value: now},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := auth.SignAdminToken(AdminClaims{
+		Subject:  "urn:xb:admin:00000000-0000-4000-8000-000000000001",
+		Audience: "admin",
+		Expires:  now.Add(time.Minute).Unix(),
+		Roles:    []string{"forged-token-role-must-not-authorize"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := auth.AuthenticateAdmin(context.Background(), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if principal.Subject !=
+		"admin::urn:xb:admin:00000000-0000-4000-8000-000000000001" ||
+		principal.Audience != AudienceAdmin ||
+		len(principal.Scopes) != 0 {
+		t.Fatalf("admin principal = %#v", principal)
+	}
+
+	for name, claims := range map[string]AdminClaims{
+		"wrong audience": {
+			Subject:  "urn:xb:admin:00000000-0000-4000-8000-000000000001",
+			Audience: "client",
+			Expires:  now.Add(time.Minute).Unix(),
+		},
+		"expired": {
+			Subject:  "urn:xb:admin:00000000-0000-4000-8000-000000000001",
+			Audience: "admin",
+			Expires:  now.Unix(),
+		},
+		"noncanonical subject": {
+			Subject:  "urn:xb:admin:ROOT",
+			Audience: "admin",
+			Expires:  now.Add(time.Minute).Unix(),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := signClientTestToken(
+				t,
+				jwt.SigningMethodHS256,
+				claims,
+				auth.clientSecret,
+				nil,
+			)
+			if _, authenticateErr := auth.AuthenticateAdmin(
+				context.Background(),
+				candidate,
+			); authenticateErr == nil {
+				t.Fatal("admin token accepted")
+			}
+		})
+	}
+
+	if _, err := auth.AuthenticateClient(context.Background(), token); err == nil {
+		t.Fatal("admin token accepted by client authenticator")
+	}
+}
+
 func TestClientTokenRejectsAmbiguousAndCrossTypeJWTs(t *testing.T) {
 	now := time.Date(2026, time.July, 25, 15, 0, 0, 0, time.UTC)
 	secret := []byte("0123456789abcdef0123456789abcdef")
