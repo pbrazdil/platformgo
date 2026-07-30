@@ -7,17 +7,11 @@ import (
 )
 
 // PermissionCatalogItem is one stable authorization resource or action.
-type PermissionCatalogItem struct {
-	ID    string
-	Label string
-}
+type PermissionCatalogItem = edge.PermissionCatalogItem
 
 // AdminPermissionCatalog lists the authorization vocabulary shown to trusted
 // administrative callers.
-type AdminPermissionCatalog struct {
-	Resources []PermissionCatalogItem
-	Actions   []PermissionCatalogItem
-}
+type AdminPermissionCatalog = edge.AdminPermissionCatalog
 
 // AdminPermissionCatalogHandler returns the static administrative permission
 // vocabulary. Authentication and the source Roles:Read dispatcher policy are
@@ -53,4 +47,13 @@ func (AdminPermissionCatalogHandler) Handle(
 			{ID: "delete", Label: "Delete"},
 		},
 	}, nil
+}
+
+// AdminPermissionCatalog implements the HTTP edge's catalog reader while
+// preserving Handle as the accepted application specification boundary.
+func (handler AdminPermissionCatalogHandler) AdminPermissionCatalog(
+	ctx context.Context,
+	principal edge.Principal,
+) (edge.AdminPermissionCatalog, error) {
+	return handler.Handle(ctx, principal)
 }

@@ -141,6 +141,24 @@ func TestAdminPermissionCatalogAuthenticatesAndAuthorizesBeforeReading(t *testin
 	}
 }
 
+func TestAdminPermissionCatalogIsUnroutedWithoutAdminComposition(t *testing.T) {
+	response := performRequest(
+		t,
+		NewServer(ServerConfig{}).Handler(),
+		http.MethodGet,
+		"/admin/v1/permissions",
+		nil,
+		nil,
+	)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf(
+			"inactive permission catalog status/body = %d/%q, want 404",
+			response.Code,
+			response.Body.String(),
+		)
+	}
+}
+
 func TestAdminPermissionCatalogFailsClosedBeforeReturningData(t *testing.T) {
 	admin := Principal{
 		Subject:  "admin::urn:xb:admin:00000000-0000-4000-8000-000000000001",

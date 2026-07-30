@@ -26,40 +26,46 @@ var canonicalUUID = regexp.MustCompile(
 
 // Server is the dependency-injected HTTP compatibility edge.
 type Server struct {
-	auth           Authenticator
-	commands       CommandSubmitter
-	realtime       RealtimeTokenIssuer
-	identity       IdentityService
-	trading        TradingReader
-	brokerAccount  BrokerAccountReader
-	brokerAccounts BrokerAccountLister
-	brokerFills    BrokerFillsReader
-	brokerFunding  BrokerFundingReader
-	brokerBalances BrokerBalancesReader
-	readiness      []HealthCheck
-	openAPI        map[string][]byte
-	allowOrigin    string
-	trustedProxies []netip.Prefix
-	requestID      func() string
+	auth             Authenticator
+	adminAuth        AdminAuthenticator
+	adminAuthorizer  AdminPermissionAuthorizer
+	adminPermissions AdminPermissionCatalogReader
+	commands         CommandSubmitter
+	realtime         RealtimeTokenIssuer
+	identity         IdentityService
+	trading          TradingReader
+	brokerAccount    BrokerAccountReader
+	brokerAccounts   BrokerAccountLister
+	brokerFills      BrokerFillsReader
+	brokerFunding    BrokerFundingReader
+	brokerBalances   BrokerBalancesReader
+	readiness        []HealthCheck
+	openAPI          map[string][]byte
+	allowOrigin      string
+	trustedProxies   []netip.Prefix
+	requestID        func() string
 }
 
 // ServerConfig contains only externally observable edge configuration.
 type ServerConfig struct {
-	Authenticator  Authenticator
-	Commands       CommandSubmitter
-	Realtime       RealtimeTokenIssuer
-	Identity       IdentityService
-	Trading        TradingReader
-	BrokerAccount  BrokerAccountReader
-	BrokerAccounts BrokerAccountLister
-	BrokerFills    BrokerFillsReader
-	BrokerFunding  BrokerFundingReader
-	BrokerBalances BrokerBalancesReader
-	Readiness      []HealthCheck
-	OpenAPI        map[string][]byte
-	AllowOrigin    string
-	TrustedProxies []netip.Prefix
-	RequestID      func() string
+	Authenticator             Authenticator
+	AdminAuthenticator        AdminAuthenticator
+	AdminPermissionAuthorizer AdminPermissionAuthorizer
+	AdminPermissionCatalog    AdminPermissionCatalogReader
+	Commands                  CommandSubmitter
+	Realtime                  RealtimeTokenIssuer
+	Identity                  IdentityService
+	Trading                   TradingReader
+	BrokerAccount             BrokerAccountReader
+	BrokerAccounts            BrokerAccountLister
+	BrokerFills               BrokerFillsReader
+	BrokerFunding             BrokerFundingReader
+	BrokerBalances            BrokerBalancesReader
+	Readiness                 []HealthCheck
+	OpenAPI                   map[string][]byte
+	AllowOrigin               string
+	TrustedProxies            []netip.Prefix
+	RequestID                 func() string
 }
 
 // NewServer builds a standard-library HTTP handler.
@@ -73,21 +79,24 @@ func NewServer(config ServerConfig) *Server {
 		requestID = newRequestID
 	}
 	return &Server{
-		auth:           config.Authenticator,
-		commands:       config.Commands,
-		realtime:       config.Realtime,
-		identity:       config.Identity,
-		trading:        config.Trading,
-		brokerAccount:  config.BrokerAccount,
-		brokerAccounts: config.BrokerAccounts,
-		brokerFills:    config.BrokerFills,
-		brokerFunding:  config.BrokerFunding,
-		brokerBalances: config.BrokerBalances,
-		readiness:      append([]HealthCheck(nil), config.Readiness...),
-		openAPI:        config.OpenAPI,
-		allowOrigin:    origin,
-		trustedProxies: append([]netip.Prefix(nil), config.TrustedProxies...),
-		requestID:      requestID,
+		auth:             config.Authenticator,
+		adminAuth:        config.AdminAuthenticator,
+		adminAuthorizer:  config.AdminPermissionAuthorizer,
+		adminPermissions: config.AdminPermissionCatalog,
+		commands:         config.Commands,
+		realtime:         config.Realtime,
+		identity:         config.Identity,
+		trading:          config.Trading,
+		brokerAccount:    config.BrokerAccount,
+		brokerAccounts:   config.BrokerAccounts,
+		brokerFills:      config.BrokerFills,
+		brokerFunding:    config.BrokerFunding,
+		brokerBalances:   config.BrokerBalances,
+		readiness:        append([]HealthCheck(nil), config.Readiness...),
+		openAPI:          config.OpenAPI,
+		allowOrigin:      origin,
+		trustedProxies:   append([]netip.Prefix(nil), config.TrustedProxies...),
+		requestID:        requestID,
 	}
 }
 
@@ -122,6 +131,10 @@ func (server *Server) route(writer http.ResponseWriter, request *http.Request) {
 		server.handleProfile(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/instruments":
 		server.handleInstruments(writer, request)
+	case server.adminAuth != nil &&
+		request.Method == http.MethodGet &&
+		request.URL.Path == "/admin/v1/permissions":
+		server.handleAdminPermissionCatalog(writer, request)
 	case request.Method == http.MethodPost &&
 		(request.URL.Path == "/v1/realtime/token" ||
 			request.URL.Path == "/v1/me/realtime/token"):
@@ -172,6 +185,83 @@ func (server *Server) route(writer http.ResponseWriter, request *http.Request) {
 	default:
 		writeError(writer, request, http.StatusNotFound, "not_found", "route not found")
 	}
+}
+
+func (server *Server) handleAdminPermissionCatalog(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	principal, ok := server.adminPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	if server.adminAuthorizer == nil || server.adminPermissions == nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"admin permissions unavailable",
+		)
+		return
+	}
+	allowed, err := server.adminAuthorizer.AuthorizeAdmin(
+		request.Context(),
+		principal,
+		"roles",
+		"read",
+	)
+	if err != nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"admin permissions unavailable",
+		)
+		return
+	}
+	if !allowed {
+		writeError(
+			writer,
+			request,
+			http.StatusForbidden,
+			"forbidden",
+			"forbidden",
+		)
+		return
+	}
+	catalog, err := server.adminPermissions.AdminPermissionCatalog(
+		request.Context(),
+		principal,
+	)
+	if errors.Is(err, ErrForbidden) {
+		writeError(
+			writer,
+			request,
+			http.StatusForbidden,
+			"forbidden",
+			"forbidden",
+		)
+		return
+	}
+	if err != nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"admin permissions unavailable",
+		)
+		return
+	}
+	if catalog.Resources == nil {
+		catalog.Resources = make([]PermissionCatalogItem, 0)
+	}
+	if catalog.Actions == nil {
+		catalog.Actions = make([]PermissionCatalogItem, 0)
+	}
+	writeJSON(writer, http.StatusOK, catalog)
 }
 
 func (server *Server) handleLogin(writer http.ResponseWriter, request *http.Request) {
@@ -1169,6 +1259,43 @@ func (server *Server) authenticatedClientPrincipal(
 	principal, err := server.auth.AuthenticateClient(request.Context(), raw)
 	if err != nil || principal.Audience != AudienceClient {
 		writeError(writer, request, http.StatusUnauthorized, "unauthorized", "unauthorized")
+		return Principal{}, false
+	}
+	return principal, true
+}
+
+func (server *Server) adminPrincipal(
+	writer http.ResponseWriter,
+	request *http.Request,
+) (Principal, bool) {
+	raw := strings.TrimSpace(
+		strings.TrimPrefix(
+			request.Header.Get("authorization"),
+			"Bearer ",
+		),
+	)
+	if server.adminAuth == nil || raw == "" {
+		writeError(
+			writer,
+			request,
+			http.StatusUnauthorized,
+			"unauthorized",
+			"unauthorized",
+		)
+		return Principal{}, false
+	}
+	principal, err := server.adminAuth.AuthenticateAdmin(
+		request.Context(),
+		raw,
+	)
+	if err != nil || principal.Audience != AudienceAdmin {
+		writeError(
+			writer,
+			request,
+			http.StatusUnauthorized,
+			"unauthorized",
+			"unauthorized",
+		)
 		return Principal{}, false
 	}
 	return principal, true

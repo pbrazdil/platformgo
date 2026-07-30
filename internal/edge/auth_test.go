@@ -61,8 +61,16 @@ func TestHMACAuthenticatorEnforcesAudienceExpiryAndAccountClaims(t *testing.T) {
 
 func TestHMACAuthenticatorEnforcesAdminAudienceExpiryAndSubject(t *testing.T) {
 	now := time.Date(2026, time.July, 30, 22, 0, 0, 0, time.UTC)
+	if _, err := NewHMACAuthenticator(HMACAuthenticatorConfig{
+		ClientTokenSecret: []byte("0123456789abcdef0123456789abcdef"),
+		AdminTokenSecret:  []byte("0123456789abcdef0123456789abcdef"),
+		Clock:             fixedAuthClock{value: now},
+	}); err == nil {
+		t.Fatal("shared client/admin token authority accepted")
+	}
 	auth, err := NewHMACAuthenticator(HMACAuthenticatorConfig{
 		ClientTokenSecret: []byte("0123456789abcdef0123456789abcdef"),
+		AdminTokenSecret:  []byte("admin-secret-0123456789abcdef012345"),
 		Clock:             fixedAuthClock{value: now},
 	})
 	if err != nil {
@@ -110,7 +118,7 @@ func TestHMACAuthenticatorEnforcesAdminAudienceExpiryAndSubject(t *testing.T) {
 				t,
 				jwt.SigningMethodHS256,
 				claims,
-				auth.clientSecret,
+				auth.adminSecret,
 				nil,
 			)
 			if _, authenticateErr := auth.AuthenticateAdmin(
@@ -122,8 +130,41 @@ func TestHMACAuthenticatorEnforcesAdminAudienceExpiryAndSubject(t *testing.T) {
 		})
 	}
 
-	if _, err := auth.AuthenticateClient(context.Background(), token); err == nil {
+	if _, authenticateErr := auth.AuthenticateClient(
+		context.Background(),
+		token,
+	); authenticateErr == nil {
 		t.Fatal("admin token accepted by client authenticator")
+	}
+	clientSignedAdmin := signClientTestToken(
+		t,
+		jwt.SigningMethodHS256,
+		AdminClaims{
+			Subject:  "urn:xb:admin:00000000-0000-4000-8000-000000000001",
+			Audience: "admin",
+			Expires:  now.Add(time.Minute).Unix(),
+		},
+		auth.clientSecret,
+		nil,
+	)
+	if _, authenticateErr := auth.AuthenticateAdmin(
+		context.Background(),
+		clientSignedAdmin,
+	); authenticateErr == nil {
+		t.Fatal("client-secret-signed admin token accepted")
+	}
+	clientOnly, err := NewHMACAuthenticator(HMACAuthenticatorConfig{
+		ClientTokenSecret: []byte("0123456789abcdef0123456789abcdef"),
+		Clock:             fixedAuthClock{value: now},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clientOnly.AuthenticateAdmin(
+		context.Background(),
+		token,
+	); err == nil {
+		t.Fatal("admin token accepted without configured admin authority")
 	}
 }
 
