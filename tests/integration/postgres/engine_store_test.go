@@ -3675,7 +3675,7 @@ func TestEngineStoreRecoversDecisionHashV2V3AndExtendsTheChainWithV4(
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260728000200_phase3_command_market_sequence_binding',
+				'20260730000200_phase3_currency_scale_authority_fence',
 				false
 			),
 			set_config(
@@ -3902,7 +3902,7 @@ func TestEngineStoreRecoversDecisionHashV2V3AndExtendsTheChainWithV4(
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260728000200_phase3_command_market_sequence_binding',
+				'20260730000200_phase3_currency_scale_authority_fence',
 				false
 			),
 			set_config(
@@ -4560,9 +4560,19 @@ func TestEngineStoreRetainsMigratedCatalogCurrencyAfterReconfiguration(
 			maker_fee_rate, taker_fee_rate
 		) VALUES (
 			'BTC-PERP', 1, 2, 3, 'USDC', 2, 0.1, 0.05, 10, 0, 0
-		)`); err != nil {
+	)`); err != nil {
 		t.Fatalf("seed catalog-only currency identity: %v", err)
 	}
+	seedRecoverableAcceptedInstrumentReceiptForShard(
+		t,
+		pool,
+		8,
+		"20260725001100_phase3_committed_realtime_outbox",
+		"00000000-0000-4000-8000-000000000912",
+		"BTC-PERP",
+		"USDC",
+		2,
+	)
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),

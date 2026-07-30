@@ -25,6 +25,42 @@ const (
 	brokerBalancesPath    = "/broker/v1/accounts/" + brokerBalancesAccount + "/balances"
 )
 
+type brokerBalanceScaleAuthority struct {
+	currency string
+	scale    int16
+}
+
+func seedBrokerBalanceScaleAuthorities(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	authorities ...brokerBalanceScaleAuthority,
+) {
+	t.Helper()
+	for index, authority := range authorities {
+		if _, err := pool.Exec(context.Background(), `
+			INSERT INTO trading.instruments (
+				instrument_id, revision, price_scale, quantity_scale,
+				settlement_currency, settlement_currency_scale,
+				initial_margin_rate, maintenance_margin_rate, max_leverage,
+				maker_fee_rate, taker_fee_rate
+			) VALUES (
+				$1, 1, 2, 3, $2, $3,
+				0.1, 0.05, 10, 0, 0
+			)`,
+			fmt.Sprintf("BALANCE-%s-%d", authority.currency, index),
+			authority.currency,
+			authority.scale,
+		); err != nil {
+			t.Fatalf(
+				"seed broker balance currency authority %s/%d: %v",
+				authority.currency,
+				authority.scale,
+				err,
+			)
+		}
+	}
+}
+
 type brokerBalancesQueryTrace struct {
 	count   atomic.Int64
 	mu      sync.Mutex
@@ -162,12 +198,12 @@ func TestBrokerBalancesLeastPrivilegeStatementHTTPAndRestart(t *testing.T) {
 	)
 	assertBrokerBalancesAuthorityStatement(t, first.trace.lastQuery(t))
 
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO trading.currency_scales (currency, scale) VALUES
-			('BTC', 8),
-			('USDC', 2)`); err != nil {
-		t.Fatalf("seed exact broker balance scales: %v", err)
-	}
+	seedBrokerBalanceScaleAuthorities(
+		t,
+		pool,
+		brokerBalanceScaleAuthority{currency: "BTC", scale: 8},
+		brokerBalanceScaleAuthority{currency: "USDC", scale: 2},
+	)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO ledger.balances (
 			account_id, currency, total, used, free, equity, ledger_sequence,

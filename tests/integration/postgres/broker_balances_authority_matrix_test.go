@@ -43,11 +43,11 @@ func TestBrokerBalancesUnauthorizedAuthorityProjectionMatrix(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed broker-balances authority-matrix principals: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO trading.currency_scales (currency, scale)
-		VALUES ('USDC', 2)`); err != nil {
-		t.Fatalf("seed broker-balances authority-matrix scale: %v", err)
-	}
+	seedBrokerBalanceScaleAuthorities(
+		t,
+		pool,
+		brokerBalanceScaleAuthority{currency: "USDC", scale: 2},
+	)
 
 	authorityShapes := []struct {
 		name            string

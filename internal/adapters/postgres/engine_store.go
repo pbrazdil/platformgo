@@ -41,7 +41,7 @@ const (
 	FailpointAfterPersistBeforeCommit = "postgres.after_persist_before_commit"
 	engineWriterLockNamespace         = 0x50474f45
 	engineOwnerLockNamespace          = 0x50474f4f
-	engineRuntimeSchemaRevision       = "20260728000200_phase3_command_market_sequence_binding"
+	engineRuntimeSchemaRevision       = "20260730000200_phase3_currency_scale_authority_fence"
 )
 
 type faultSet interface {

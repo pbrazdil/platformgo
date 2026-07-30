@@ -37,7 +37,7 @@ const (
 	realtimeMaxAttempts      = uint32(10)
 	realtimeFinalizeTimeout  = 5 * time.Second
 	apiKeyReplayCleanupBatch = 100
-	runtimeSchemaRevision    = "20260728000200_phase3_command_market_sequence_binding"
+	runtimeSchemaRevision    = "20260730000200_phase3_currency_scale_authority_fence"
 )
 
 type databaseRuntimeRole string

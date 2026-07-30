@@ -402,7 +402,7 @@ func TestCommandMarketSequenceBindingMigrationClassifiesPopulatedHistory(
 		BEGIN;
 		SELECT set_config(
 			'platformgo.runtime_schema_revision',
-			'20260728000200_phase3_command_market_sequence_binding',
+			'20260730000200_phase3_currency_scale_authority_fence',
 			true
 		);
 		SELECT set_config(
@@ -444,7 +444,7 @@ func TestCommandMarketSequenceBindingMigrationClassifiesPopulatedHistory(
 		BEGIN;
 		SELECT set_config(
 			'platformgo.runtime_schema_revision',
-			'20260728000200_phase3_command_market_sequence_binding',
+			'20260730000200_phase3_currency_scale_authority_fence',
 			true
 		);
 		SELECT set_config(
@@ -490,7 +490,7 @@ func TestCommandMarketSequenceBindingMigrationClassifiesPopulatedHistory(
 	_, rejectedMarketErr := pool.Exec(ctx, `
 		SELECT set_config(
 			'platformgo.runtime_schema_revision',
-			'20260728000200_phase3_command_market_sequence_binding',
+			'20260730000200_phase3_currency_scale_authority_fence',
 			false
 		);
 		SELECT set_config(
@@ -560,7 +560,7 @@ func TestCommandMarketSequenceBindingMigrationFencesPreverifiedLegacyEngine(
 			maker_fee_rate, taker_fee_rate
 		) VALUES (
 			'BTC-PERP', 1, 2, 3, 'USDC', 2,
-			'0.02', '0.01', '50', '0.0002', '0.0005'
+			'0.1', '0.05', '10', '0', '0'
 		);
 		INSERT INTO market.books (
 			instrument_id, mark_price, bids, asks, stream_sequence
@@ -601,9 +601,19 @@ func TestCommandMarketSequenceBindingMigrationFencesPreverifiedLegacyEngine(
 			'engine.input.8.command.v1',
 			1,
 			'{"marketSequence":0}'
-		)`); err != nil {
+	)`); err != nil {
 		t.Fatalf("seed preverified-engine cutover state: %v", err)
 	}
+	seedRecoverableAcceptedInstrumentReceiptForShard(
+		t,
+		pool,
+		8,
+		previousEngineRuntimeRevision,
+		"00000000-0000-4000-8000-000000000811",
+		"BTC-PERP",
+		"USDC",
+		2,
+	)
 
 	legacyConnection, err := pool.Acquire(ctx)
 	if err != nil {
@@ -807,7 +817,10 @@ func TestCommandMarketSequenceBindingMigrationFencesPreverifiedLegacyEngine(
 			   FROM engine.shard_faults
 			  WHERE input_id = '00000000-0000-4000-8000-000000000819')
 			+
-			(SELECT count(*) FROM engine.shard_checkpoints WHERE shard_id = 8)`).
+			(SELECT count(*)
+			   FROM engine.shard_checkpoints
+			  WHERE shard_id = 8
+			    AND state_hash = decode(repeat('81', 32), 'hex'))`).
 		Scan(&commandStatus, &effectRows); err != nil {
 		t.Fatalf("inspect fenced preverified engine effects: %v", err)
 	}
@@ -844,7 +857,7 @@ func TestCommandMarketSequenceBindingMigrationFencesPreverifiedLegacyEngine(
 	if _, err := legacyConnection.Exec(
 		ctx,
 		`SELECT set_config('platformgo.runtime_schema_revision', $1, false)`,
-		commandMarketBindingRevision,
+		"20260730000200_phase3_currency_scale_authority_fence",
 	); err != nil {
 		t.Fatalf("bind current engine runtime after cutover: %v", err)
 	}
@@ -852,9 +865,14 @@ func TestCommandMarketSequenceBindingMigrationFencesPreverifiedLegacyEngine(
 	if _, err := legacyConnection.Exec(ctx, `
 		INSERT INTO engine.shard_checkpoints (
 			shard_id, next_stream_sequence, ready, state_hash, state_snapshot
-		) VALUES (
-			8, $1, true, $2, '{}'
-		)`,
+			) VALUES (
+				8, $1, true, $2, '{}'
+			)
+			ON CONFLICT (shard_id) DO UPDATE SET
+				next_stream_sequence = EXCLUDED.next_stream_sequence,
+				ready = EXCLUDED.ready,
+				state_hash = EXCLUDED.state_hash,
+				state_snapshot = EXCLUDED.state_snapshot`,
 		recovered.NextStreamSequence(),
 		recoveredHash[:],
 	); err != nil {

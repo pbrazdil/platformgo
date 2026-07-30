@@ -139,6 +139,19 @@ change in production writer order. PostgreSQL 19 Beta2 tests prove hostile
 current-main upgrade, unchanged rows/filenodes/defaults and prior checksums, a
 transaction-wide rollback when the final balance lock times out, safe retry,
 and a production-order writer completing without deadlock.
+The current currency-scale authority-fence candidate addresses a
+release-blocking defect discovered during the next Phase 3 route preflight. A
+single forward-only migration fences the engine and all registry writers,
+validates the append-only registry bidirectionally against current instruments
+and accepted historical instrument changes, neutralizes previously created or
+already-running hostile definer triggers with an `ENABLE ALWAYS` table guard,
+scrubs every named table/column/function grant, and advances the runtime schema
+revision. It never edits frozen migrations or repairs registry facts. Focused
+PostgreSQL 19 Beta 2 exploit, rollback, upgrade, recovery, and exact-catalog
+evidence and the complete stable-candidate local validation gate are green.
+Exact-SHA specialist re-review of the bookkeeping-amended tree, independent
+final review, hosted CI, and merge evidence remain required before this
+candidate can land.
 Command-admission replay authority is now also hardened by a landed
 forward-only PostgreSQL 19 Beta 2 migration. It fences engine and API writers,
 removes hostile inherited table and column privileges from commands,
@@ -560,12 +573,30 @@ This repository is not yet a production-capable replacement.
 |---|---|---|
 | 0 — Policy and test harness | Complete | Machine-readable policy, exact decimals, deterministic time and IDs, test fixture, full source inventory, provenance ledger, and protected hosted checks. |
 | 1 — Pure engine | Complete | Deterministic order lifecycle, matching, fills, positions, PnL, margin, funding, liquidation, brackets, triggers, and fees with exact-value and replay coverage. |
-| 2 — Durable execution | Complete | PostgreSQL authority, historically completed and validated on PostgreSQL 17; immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. |
+| 2 — Durable execution | Complete | PostgreSQL authority, immutable checksum-verified migrations, atomic economic commits, command/idempotency journal, durable ownership and ordering, JetStream outbox/inbox, recovery, and reconciliation. Historical slices first passed on PostgreSQL 17; the supported development/CI minimum and all current qualification are PostgreSQL 19 Beta 2. |
 | 3 — Compatibility edges | In progress | The runtime/contract slice includes reviewed JWT handling, trusted-proxy derivation, least-privilege role enforcement, identity cutover protection, a durable realtime projection, exact client funding history, authenticated caller-scoped account summaries, an exact flat-balance read through the PostgreSQL-authoritative engine projection, and hash-only self-service API-key creation with encrypted durable replay, a PostgreSQL-authoritative owner cap, protected-client rate limiting, and an atomic audit fact. Funding, account-summary, flat-balance, API-key, realtime gateway, and authenticated account-fill HTTP implementations plus their applicable separate port-ledger acceptance are landed. The separately accepted working-order source behavior preserves current Go maximum-price and prospective-fee reservation authority, exact PostgreSQL balance/realtime/recovery semantics, and production JetStream market-watermark binding under the owner-approved economic deviation. The fill-history foundation and its first nine separately accepted source behaviors add an indexed newest-execution read with exact engine-time fidelity, immutable side/fill-ID filtering, same-statement filtered totals, a correlatable fill-to-order identity using the current Go `urn:xb:order:<UUID>` representation, exact classified side/trade-type and durable reason projection, strict deterministic tuple pagination with stable filter-wide totals, per-position exact realized PnL/currency that keeps hedged legs isolated, atomic fee-bearing order/fill settlement across rollback, retry, duplicate delivery, restart, and fail-closed reconciliation, and decision-hash v4 frozen execution-time leverage shared by decisions, PostgreSQL, recovery, and reconciliation while retaining v2/v3 history. Its client HTTP route freezes the narrow current-Go projection, authenticated account ownership, strict external query parsing, moving committed keyset semantics, exact JSON nullability, and registered-currency validation of realized PnL without rounding. The first admin fleet-fills source behavior is separately accepted through an internal admin-before-PostgreSQL gate and an empty-only existence projection with hostile-ACL cleanup; the admin external route and all non-empty semantics remain inventory. The first admin fleet-orders source behavior is separately accepted through an internal admin-before-PostgreSQL gate, a single-snapshot empty-only predicate over materialized orders plus immutable intents, exact hostile-ACL cleanup on both relations, and a pre-revocation writer fence; all external/non-empty order semantics remain inventory. The first admin fleet-positions source behavior is separately accepted through an internal admin-before-PostgreSQL gate, a single-snapshot empty-only predicate over positions plus immutable fills, exact hostile-ACL cleanup on positions, and a pre-revocation writer fence; every external/non-empty position semantic remains inventory. The first admin risk-monitor source behavior is separately accepted through an admin-before-PostgreSQL empty-only boolean over all current durable account/economic roots, exact hostile `SECURITY DEFINER` ACL cleanup, and deadlock-safe lifecycle-table ACL fencing; the external route and every non-empty risk semantic remain inventory. Terminal-only audit recovery is separately accepted through the current Go command/idempotency/receipt authority, including transaction rollback, duplicate delivery, restart, exact permitted-effect, and full durable-projection evidence. Rejected-order durability is also landed and separately accepted using the deterministic current-Go transition: exact terminal reason, reservation release, duplicate/restart/reconciliation stability, historical decision-hash v3 balance authority, markless recovery, and monotonic currency scales. Unfunded opening-order rejection is separately accepted at the current Go durable engine boundary for both absent and exact-zero USDC balances, with atomic `insufficient_funds`, no additional economic/domain/realtime delivery effect beyond command admission and duplicate audit, and rollback/duplicate/restart/reconciliation stability; the Rust synchronous application error remains outside the accepted contract. The pinned coalesced-doorbell behavior is separately accepted only as a real post-readiness PostgreSQL commit reaching JetStream through current Go's fixed 100ms authoritative poll; no PostgreSQL notification or coalescing mechanism is claimed. |
 | 4 — Hyperliquid production integration | Not started | Protocol fixtures, controlled live canaries, reconnect and gap handling, capacity/soak validation, and incident drills. |
 | 5 — Replacement rehearsal | Not started | Production-like data import, close-only/drain/cutover rehearsal, rollback and reconciliation plan, and audited go-live decision. |
 
 ## Validation snapshot
+
+The currency-scale authority-fence candidate has completed migration,
+determinism, and exact-money adversarial preflight. A PostgreSQL 19 Beta 2
+red-first test failed on the missing forward migration before implementation,
+then passed once the atomic candidate and runtime revision fence existed. Its
+focused PG19 suite now covers hostile source grants, accepted-receipt
+provenance, full latest-snapshot/version equality, canonical exact-value
+domains, non-accepted history, committed pre-revocation writers, a previously
+loaded definer body, exact trigger/ACL restoration, bounded same-scale writes,
+rollback, and retry. The complete PostgreSQL integration package is green on
+local PostgreSQL 19 Beta 2, and the migration, determinism, and exact-money
+advisory correction reviews report no remaining P0-P3 finding. The stable
+candidate completed policy, format, lint, full test, race, repeat, and
+vulnerability validation. The predecessor exact-SHA determinism and exact-money
+reviews also reported no P0-P3 finding; this bookkeeping-only amendment still
+requires exact-SHA specialist re-review, independent final review, hosted CI,
+and merge evidence. Current `main` remains blocked for further Phase 3 route
+publication until this correction lands.
 
 The landed finite fill-leverage hardening has PostgreSQL 19 Beta 2
 tests defining its corruption-read, no-partial-page, restart, exact 35/36-tip,
