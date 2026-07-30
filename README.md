@@ -515,11 +515,14 @@ reviewed green source tests and one separately reviewed permission-catalog
 specification fixture; 2,560 remain explicitly unreviewed placeholder ports,
 and 97 implementation-only tests are reviewed and excluded with decision
 records. The permission-catalog fixture freezes the exact static 11-resource
-and four-action source catalog plus client denial, but remains production
-unwired and does not claim the source `Roles:Read` dispatcher policy,
-production admin credentials, or the external admin HTTP route. Ledger
-acceptance remains separate from implementation, as required by repository
-governance.
+and four-action source catalog plus client denial. A production application
+handler now returns that exact ordered catalog to admin-audience principals,
+fails every other audience closed before returning data, and returns fresh
+slices on every successful call. It is not runtime- or HTTP-wired, and does not
+claim the source `Roles:Read` dispatcher policy, production admin credentials,
+or the external admin HTTP route. The ledger remains at reviewed
+`spec-fixture` until the production test wiring is accepted separately, as
+required by repository governance.
 
 The broker scope-gate acceptance preserves the pinned authorization sequence:
 an `accounts:read` credential may probe ping but cannot create an account, while
