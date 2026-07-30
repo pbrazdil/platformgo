@@ -139,8 +139,8 @@ change in production writer order. PostgreSQL 19 Beta2 tests prove hostile
 current-main upgrade, unchanged rows/filenodes/defaults and prior checksums, a
 transaction-wide rollback when the final balance lock times out, safe retry,
 and a production-order writer completing without deadlock.
-The current currency-scale authority-fence candidate addresses a
-release-blocking defect discovered during the next Phase 3 route preflight. A
+The landed currency-scale authority fence addresses the release-blocking
+defect discovered during the next Phase 3 route preflight. A
 single forward-only migration fences the engine and all registry writers,
 validates the append-only registry bidirectionally against current instruments
 and accepted historical instrument changes, neutralizes previously created or
@@ -149,9 +149,9 @@ scrubs every named table/column/function grant, and advances the runtime schema
 revision. It never edits frozen migrations or repairs registry facts. Focused
 PostgreSQL 19 Beta 2 exploit, rollback, upgrade, recovery, and exact-catalog
 evidence and the complete stable-candidate local validation gate are green.
-Exact-SHA specialist re-review of the bookkeeping-amended tree, independent
-final review, hosted CI, and merge evidence remain required before this
-candidate can land.
+Exact-SHA migration, determinism, exact-money, and independent final reviews
+reported no P0-P3 finding. Hosted CI passed all seven jobs on the reviewed SHA,
+and PR #137 landed the correction on `main`.
 Command-admission replay authority is now also hardened by a landed
 forward-only PostgreSQL 19 Beta 2 migration. It fences engine and API writers,
 removes hostile inherited table and column privileges from commands,
@@ -580,7 +580,7 @@ This repository is not yet a production-capable replacement.
 
 ## Validation snapshot
 
-The currency-scale authority-fence candidate has completed migration,
+The currency-scale authority fence has completed migration,
 determinism, and exact-money adversarial preflight. A PostgreSQL 19 Beta 2
 red-first test failed on the missing forward migration before implementation,
 then passed once the atomic candidate and runtime revision fence existed. Its
@@ -592,11 +592,11 @@ rollback, and retry. The complete PostgreSQL integration package is green on
 local PostgreSQL 19 Beta 2, and the migration, determinism, and exact-money
 advisory correction reviews report no remaining P0-P3 finding. The stable
 candidate completed policy, format, lint, full test, race, repeat, and
-vulnerability validation. The predecessor exact-SHA determinism and exact-money
-reviews also reported no P0-P3 finding; this bookkeeping-only amendment still
-requires exact-SHA specialist re-review, independent final review, hosted CI,
-and merge evidence. Current `main` remains blocked for further Phase 3 route
-publication until this correction lands.
+vulnerability validation. Exact-SHA migration, determinism, exact-money, and
+independent final reviews reported no P0-P3 finding, and all seven hosted CI
+jobs passed on the reviewed SHA. PR #137 merged the correction as
+`d380c12ccb7614db7be9ac779ed08f61aa364830`; the next Phase 3 route is therefore
+unblocked for failing-test definition.
 
 The landed finite fill-leverage hardening has PostgreSQL 19 Beta 2
 tests defining its corruption-read, no-partial-page, restart, exact 35/36-tip,
