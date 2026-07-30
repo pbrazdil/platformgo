@@ -42,14 +42,15 @@ Serde extractor, which does not deny unknown fields.
 
 `Principal.Tenant` is tenant authority. `Principal.Subject` and the optional
 `userId` are not. The store selects one of two fixed parameterized statement
-templates based only on filter presence. Each materialized ownership query
-first constrains `identity.user_accounts` by `broker_subject`; the filtered
-template also uses an equality predicate on `user_id`. This avoids a nullable
-`OR` whose generic PostgreSQL plan could scan the entire tenant prefix for an
-absent user. Only then may the statement left-join the tenant-constrained
-account profile and trading projection. Nullable joins never establish
-authority. An absent or foreign user filter therefore returns the same
-successful empty array and cannot act as an existence oracle.
+templates based only on filter presence. The unfiltered materialized ownership
+query first constrains `identity.user_accounts` by `broker_subject`. The
+filtered template performs a one-time tenant/user existence lookup, then
+constrains ownership by both `broker_subject` and `user_id`. Thus a generic
+plan neither scans the tenant prefix for an absent user nor scans a foreign
+user's ownership range. Only then may the statement left-join the
+tenant-constrained account profile and trading projection. Nullable joins
+never establish authority. An absent or foreign user filter therefore returns
+the same successful empty array and cannot act as an existence oracle.
 
 The complete result is scanned, validated, and buffered before the HTTP edge
 writes headers or JSON. Any tenant-owned incomplete, inconsistent, or corrupt
@@ -117,9 +118,9 @@ Required evidence:
 - repeated behavior after pool, reader, authenticator, and server
   reconstruction;
 - representative tenant and cross-tenant query plans, including
-  `plan_cache_mode = force_generic_plan`, proving the fixed filtered template
-  performs a bounded composite-index lookup and the new index removes global
-  ownership-scan amplification;
+  `plan_cache_mode = force_generic_plan`, proving the filtered template uses a
+  one-time tenant/user key lookup before its ownership lookup and the new index
+  removes global ownership-scan amplification from the unfiltered template;
 - current-main migration upgrade, retry/checksum, lock/timeout, ACL, and
   rollback evidence;
 - atomic OpenAPI, manifest/hash, runtime wiring, companion documentation, and
