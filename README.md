@@ -131,7 +131,7 @@ seven hosted CI jobs passed on the accepted tree before merge. Focused edge,
 adapter, runtime, contract, and PostgreSQL exact-output, 18-case authority,
 hostile-collation, corruption, snapshot-transition, cancellation, restart, and
 ledger-fold tests are green.
-The current broker account point-read candidate preserves the accepted
+The landed broker account point read preserves the accepted
 ten-field current-Go account summary while retaining the pinned source's
 generic `400 unknown account` for both absent and foreign ownership.
 Authentication and exact scope dominate canonical account parsing; one
@@ -143,7 +143,12 @@ least-privilege PostgreSQL 19 Beta 2 HTTP tests are green, including exact and
 wildcard scope, exact wire bytes, zero pre-read SQL on gate failures, one SQL
 statement per valid authorized request, absent/foreign equivalence, foreign
 corruption non-disclosure, owned corruption and incompleteness, restart, and
-unchanged relation digests. The composite pinned source ledger row remains
+unchanged relation digests. Red-first corrections also reject unsupported base
+currency and finite PostgreSQL timestamps outside RFC3339's wire range. The
+full exact-tree local gate, money, determinism, security, migration, and
+independent release reviews, and all seven hosted CI jobs passed before PR
+#140 landed as `1b7474d574a517104e6802f7fbf6c241c65cd5e0`. The composite
+pinned source ledger row remains
 unreviewed because its account-list, balance-mutation, and channel-isolation
 assertions are outside this narrow route.
 Its forward-only, catalog-only ACL migration scrubs hostile table, column,
@@ -611,9 +616,10 @@ vulnerability validation. Exact-SHA migration, determinism, exact-money, and
 independent final reviews reported no P0-P3 finding, and all seven hosted CI
 jobs passed on the reviewed SHA. PR #137 merged the correction as
 `d380c12ccb7614db7be9ac779ed08f61aa364830`. The broker account point-read
-candidate has completed its adversarial preflight and focused red-first
-application/edge plus PostgreSQL 19 Beta 2 validation; full stable-candidate
-validation and exact-SHA reviews remain pending.
+route is now landed after red-first application, edge, and PostgreSQL 19 Beta
+2 validation; a full stable-candidate gate; exact-SHA money, determinism,
+security, PostgreSQL/migration, and independent release reviews with no P0-P3
+findings; and all seven hosted checks on the reviewed candidate SHA.
 
 The landed finite fill-leverage hardening has PostgreSQL 19 Beta 2
 tests defining its corruption-read, no-partial-page, restart, exact 35/36-tip,
