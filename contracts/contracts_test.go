@@ -82,6 +82,7 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 	}
 	requiredDeviations := []string{
 		"broker-account-identifiers-preserve-current-go-urns",
+		"broker-balances-preserves-current-go-projection-and-tenant-authority",
 		"broker-fills-preserves-current-go-projection-and-tenant-authority",
 		"client-api-key-creation-requires-idempotency-key",
 		"fill-trade-type-is-always-classified",
@@ -136,6 +137,12 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 		"GET /broker/v1/accounts/{accountId}/fills",
 	) {
 		t.Fatal("GET broker account fills missing from compatibility manifest")
+	}
+	if !contains(
+		manifest.ImplementedHTTPRoutes,
+		"GET /broker/v1/accounts/{accountId}/balances",
+	) {
+		t.Fatal("GET broker account balances missing from compatibility manifest")
 	}
 }
 
@@ -276,6 +283,60 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 		`^urn:xb:account:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
 	)
 	brokerSchemas := broker["components"].(map[string]any)["schemas"].(map[string]any)
+	brokerBalances := assertMethod(
+		t,
+		broker,
+		"/broker/v1/accounts/{accountId}/balances",
+		"get",
+	)
+	for _, status := range []string{"200", "400", "401", "403", "503"} {
+		assertResponse(t, brokerBalances, status)
+	}
+	if brokerBalances["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
+		t.Fatalf(
+			"broker balances contract status = %v",
+			brokerBalances["x-platformgo-contract-status"],
+		)
+	}
+	assertOperationSecurity(t, brokerBalances, "apiKey")
+	assertOperationParameterPattern(
+		t,
+		brokerBalances,
+		"accountId",
+		`^urn:xb:account:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
+	)
+	assertNonNullArrayResponseRef(
+		t,
+		brokerBalances,
+		"200",
+		"#/components/schemas/BalanceView",
+	)
+	assertExactRequiredStringFields(
+		t,
+		"broker BalanceView",
+		brokerSchemas["BalanceView"].(map[string]any),
+		"currency",
+		"total",
+		"locked",
+		"free",
+		"equity",
+	)
+	assertExactRequiredStringFields(
+		t,
+		"client BalanceView",
+		schemas["BalanceView"].(map[string]any),
+		"currency",
+		"total",
+		"locked",
+		"free",
+		"equity",
+	)
+	if !reflect.DeepEqual(
+		brokerSchemas["BalanceView"],
+		schemas["BalanceView"],
+	) {
+		t.Fatal("broker BalanceView schema differs from accepted client schema")
+	}
 	assertRequiredFields(
 		t,
 		brokerSchemas["FillExecutionView"].(map[string]any),
@@ -458,6 +519,70 @@ func assertResponse(t *testing.T, operation map[string]any, status string) {
 	}
 	if _, ok := responses[status]; !ok {
 		t.Fatalf("response %s missing: %v", status, responses)
+	}
+}
+
+func assertNonNullArrayResponseRef(
+	t *testing.T,
+	operation map[string]any,
+	status string,
+	wantedRef string,
+) {
+	t.Helper()
+	responses, ok := operation["responses"].(map[string]any)
+	if !ok {
+		t.Fatal("responses missing")
+	}
+	response, ok := responses[status].(map[string]any)
+	if !ok {
+		t.Fatalf("response %s missing", status)
+	}
+	content, ok := response["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("response %s content missing", status)
+	}
+	jsonContent, ok := content["application/json"].(map[string]any)
+	if !ok {
+		t.Fatalf("response %s application/json content missing", status)
+	}
+	schema, ok := jsonContent["schema"].(map[string]any)
+	if !ok || schema["type"] != "array" {
+		t.Fatalf("response %s schema = %v, want non-null array", status, schema)
+	}
+	items, ok := schema["items"].(map[string]any)
+	if !ok || items["$ref"] != wantedRef {
+		t.Fatalf("response %s items = %v, want ref %q", status, items, wantedRef)
+	}
+}
+
+func assertExactRequiredStringFields(
+	t *testing.T,
+	name string,
+	schema map[string]any,
+	wanted ...string,
+) {
+	t.Helper()
+	if schema["type"] != "object" {
+		t.Fatalf("%s type = %v, want object", name, schema["type"])
+	}
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok || len(properties) != len(wanted) {
+		t.Fatalf("%s properties = %v, want exactly %v", name, properties, wanted)
+	}
+	required, ok := schema["required"].([]any)
+	if !ok || len(required) != len(wanted) {
+		t.Fatalf("%s required fields = %v, want exactly %v", name, required, wanted)
+	}
+	wantSet := make(map[string]bool, len(wanted))
+	for _, field := range wanted {
+		wantSet[field] = true
+		property, ok := properties[field].(map[string]any)
+		if !ok || property["type"] != "string" {
+			t.Fatalf("%s field %q = %v, want string", name, field, property)
+		}
+	}
+	if got := requiredFieldSet(schema); !reflect.DeepEqual(got, wantSet) {
+		t.Fatalf("%s required fields = %v, want exactly %v", name, got, wantSet)
 	}
 }
 

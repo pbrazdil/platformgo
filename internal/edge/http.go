@@ -32,6 +32,7 @@ type Server struct {
 	identity       IdentityService
 	trading        TradingReader
 	brokerFills    BrokerFillsReader
+	brokerBalances BrokerBalancesReader
 	readiness      []HealthCheck
 	openAPI        map[string][]byte
 	allowOrigin    string
@@ -47,6 +48,7 @@ type ServerConfig struct {
 	Identity       IdentityService
 	Trading        TradingReader
 	BrokerFills    BrokerFillsReader
+	BrokerBalances BrokerBalancesReader
 	Readiness      []HealthCheck
 	OpenAPI        map[string][]byte
 	AllowOrigin    string
@@ -71,6 +73,7 @@ func NewServer(config ServerConfig) *Server {
 		identity:       config.Identity,
 		trading:        config.Trading,
 		brokerFills:    config.BrokerFills,
+		brokerBalances: config.BrokerBalances,
 		readiness:      append([]HealthCheck(nil), config.Readiness...),
 		openAPI:        config.OpenAPI,
 		allowOrigin:    origin,
@@ -119,6 +122,10 @@ func (server *Server) route(writer http.ResponseWriter, request *http.Request) {
 	case request.Method == http.MethodGet:
 		if accountID, ok := brokerFillsRoute(request.URL.Path); ok {
 			server.handleBrokerFills(writer, request, accountID)
+			return
+		}
+		if accountID, ok := brokerBalancesRoute(request.URL.Path); ok {
+			server.handleBrokerBalances(writer, request, accountID)
 			return
 		}
 		if accountID, resource, ok := accountReadRoute(request.URL.Path); ok {
@@ -775,6 +782,65 @@ func (server *Server) handleBrokerFills(
 	}
 }
 
+func (server *Server) handleBrokerBalances(
+	writer http.ResponseWriter,
+	request *http.Request,
+	accountID string,
+) {
+	principal, ok := server.brokerPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	if !principal.HasScope("accounts:read") {
+		writeError(writer, request, http.StatusForbidden, "forbidden", "forbidden")
+		return
+	}
+	const accountPrefix = "urn:xb:account:"
+	if !strings.HasPrefix(accountID, accountPrefix) ||
+		!canonicalUUID.MatchString(strings.TrimPrefix(accountID, accountPrefix)) {
+		writeError(
+			writer,
+			request,
+			http.StatusBadRequest,
+			"invalid_request",
+			"invalid account id",
+		)
+		return
+	}
+	if server.brokerBalances == nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"trading views unavailable",
+		)
+		return
+	}
+	balances, err := server.brokerBalances.BrokerBalances(
+		request.Context(),
+		principal.Tenant,
+		accountID,
+	)
+	switch {
+	case errors.Is(err, ErrForbidden):
+		writeError(writer, request, http.StatusForbidden, "forbidden", "forbidden")
+	case err != nil:
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"trading views unavailable",
+		)
+	default:
+		if balances == nil {
+			balances = make([]BalanceView, 0)
+		}
+		writeJSON(writer, http.StatusOK, balances)
+	}
+}
+
 func (server *Server) handleBrokerEcho(writer http.ResponseWriter, request *http.Request) {
 	principal, ok := server.brokerPrincipal(writer, request)
 	if !ok {
@@ -944,6 +1010,19 @@ func accountReadRoute(path string) (string, string, bool) {
 func brokerFillsRoute(path string) (string, bool) {
 	const prefix = "/broker/v1/accounts/"
 	const suffix = "/fills"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	accountID := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	if accountID == "" || strings.Contains(accountID, "/") {
+		return "", false
+	}
+	return accountID, true
+}
+
+func brokerBalancesRoute(path string) (string, bool) {
+	const prefix = "/broker/v1/accounts/"
+	const suffix = "/balances"
 	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
 		return "", false
 	}
