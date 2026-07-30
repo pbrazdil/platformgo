@@ -117,6 +117,19 @@ through the real least-privilege PostgreSQL 19 Beta 2 HTTP boundary. The frozen
 broker OpenAPI, compatibility manifest, generated artifact hash, runtime
 wiring, and intentional-deviation record activate atomically. Moving keyset
 cursors remain ordinary committed history rather than replay or catch-up.
+The broker account-balances inventory now has an owner-approved current-Go
+contract decision. Its future route must return the accepted deterministic
+five-field exact balance projection while authorizing `Principal.Tenant`
+through both durable account authorities in the same PostgreSQL statement that
+returns the balances and currency-scale authority. API-key subject is not
+tenant authority, unauthorized corrupt rows cannot influence error selection,
+authorized corruption must fail the complete response closed, and bytewise
+`C` ordering makes response bytes independent of database locale. The route
+remains inactive until tenant- and collation-hostile failing tests and
+implementation are separately accepted. Activation also requires a new
+forward-only, catalog-only ACL migration over the dual identity authorities
+and authoritative balance projection; existing frozen migrations are not
+modified.
 Command-admission replay authority is now also hardened by a landed
 forward-only PostgreSQL 19 Beta 2 migration. It fences engine and API writers,
 removes hostile inherited table and column privileges from commands,
