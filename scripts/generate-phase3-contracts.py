@@ -238,6 +238,15 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "request": "BrokerAccountRequest",
         "success": "BrokerAccountResult",
     },
+    ("GET", "/broker/v1/accounts/{accountId}/balances"): {
+        "statuses": [200, 400, 401, 403, 503],
+        "success_array": "BalanceView",
+        "security": "apiKey",
+        "account_id_pattern": (
+            "^urn:xb:account:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            "[0-9a-f]{4}-[0-9a-f]{12}$"
+        ),
+    },
     ("GET", "/broker/v1/accounts/{accountId}/fills"): {
         "statuses": [200, 400, 401, 403, 503],
         "success": "FillExecutionPage",
@@ -428,6 +437,22 @@ def operations(raw: str) -> dict[str, dict[str, object]]:
                         },
                     ]
                 )
+        if (
+            accepted is not None
+            and accepted.get("account_id_pattern") is not None
+            and accepted.get("pagination") is not True
+        ):
+            operation["parameters"] = [
+                {
+                    "name": "accountId",
+                    "in": "path",
+                    "required": True,
+                    "schema": {
+                        "type": "string",
+                        "pattern": accepted["account_id_pattern"],
+                    },
+                }
+            ]
         if accepted is not None and accepted.get("security") is not None:
             operation["security"] = [{accepted["security"]: []}]
         paths.setdefault(path, {})[method.lower()] = operation

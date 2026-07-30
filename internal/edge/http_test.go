@@ -44,6 +44,8 @@ func (testAuthenticator) AuthenticateBroker(
 		scopes = []string{"accounts:read"}
 	case "broker-noscope":
 		scopes = []string{"users:write"}
+	case "broker-near-scope":
+		scopes = []string{"accounts:read:any"}
 	case "broker-wildcard":
 		scopes = []string{"*"}
 	case "broker-full":
@@ -1058,6 +1060,322 @@ func TestBrokerFillsRouteMapsAuthorizationAndStorageErrorsWithoutPartialPage(
 				t.Fatalf("response leaked partial page or storage detail: %s", response.Body.String())
 			}
 		})
+	}
+}
+
+type recordingBrokerBalancesReader struct {
+	calls     int
+	tenant    string
+	accountID string
+	balances  []BalanceView
+	err       error
+}
+
+func (reader *recordingBrokerBalancesReader) BrokerBalances(
+	_ context.Context,
+	tenant string,
+	accountID string,
+) ([]BalanceView, error) {
+	reader.calls++
+	reader.tenant = tenant
+	reader.accountID = accountID
+	return reader.balances, reader.err
+}
+
+func TestBrokerBalancesRouteFreezesGateOrderScopeAndTenantAuthority(t *testing.T) {
+	reader := &recordingBrokerBalancesReader{
+		balances: []BalanceView{{
+			Currency: "USDC",
+			Total:    "100.25",
+			Locked:   "2.5",
+			Free:     "97.75",
+			Equity:   "101.125",
+		}},
+	}
+	handler := NewServer(ServerConfig{
+		Authenticator:  testAuthenticator{},
+		BrokerBalances: reader,
+		TrustedProxies: []netip.Prefix{
+			netip.MustParsePrefix("192.0.2.0/24"),
+		},
+		RequestID: func() string { return "broker-balances-gate" },
+	}).Handler()
+	const malformedPath = "/broker/v1/accounts/urn:xb:account:not-a-uuid/balances"
+
+	for _, test := range []struct {
+		name   string
+		key    string
+		status int
+		body   string
+	}{
+		{
+			name: "invalid credential dominates malformed account id",
+			key:  "invalid", status: http.StatusUnauthorized,
+			body: `{"code":"unauthorized","message":"unauthorized","requestId":"broker-balances-gate"}` + "\n",
+		},
+		{
+			name: "missing scope dominates malformed account id",
+			key:  "broker-noscope", status: http.StatusForbidden,
+			body: `{"code":"forbidden","message":"forbidden","requestId":"broker-balances-gate"}` + "\n",
+		},
+		{
+			name: "similar scope is not sufficient",
+			key:  "broker-near-scope", status: http.StatusForbidden,
+			body: `{"code":"forbidden","message":"forbidden","requestId":"broker-balances-gate"}` + "\n",
+		},
+		{
+			name: "exact scope reaches account parsing",
+			key:  "broker-key", status: http.StatusBadRequest,
+			body: `{"code":"invalid_request","message":"invalid account id","requestId":"broker-balances-gate"}` + "\n",
+		},
+		{
+			name: "wildcard scope reaches account parsing",
+			key:  "broker-wildcard", status: http.StatusBadRequest,
+			body: `{"code":"invalid_request","message":"invalid account id","requestId":"broker-balances-gate"}` + "\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := performRequest(
+				t,
+				handler,
+				http.MethodGet,
+				malformedPath,
+				nil,
+				map[string]string{
+					"x-api-key":       test.key,
+					"x-forwarded-for": "203.0.113.7",
+				},
+			)
+			if response.Code != test.status || response.Body.String() != test.body {
+				t.Fatalf(
+					"status = %d body=%q, want status=%d body=%q",
+					response.Code,
+					response.Body.String(),
+					test.status,
+					test.body,
+				)
+			}
+			if reader.calls != 0 {
+				t.Fatalf("reader calls = %d, want 0", reader.calls)
+			}
+		})
+	}
+
+	const path = "/broker/v1/accounts/urn:xb:account:00000000-0000-4000-8000-000000000009/balances"
+	const want = `[{"currency":"USDC","total":"100.25","locked":"2.5","free":"97.75","equity":"101.125"}]` + "\n"
+	for index, key := range []string{"broker-key", "broker-wildcard"} {
+		response := performRequest(
+			t,
+			handler,
+			http.MethodGet,
+			path,
+			nil,
+			map[string]string{
+				"x-api-key":       key,
+				"x-forwarded-for": "203.0.113.7",
+			},
+		)
+		if response.Code != http.StatusOK || response.Body.String() != want {
+			t.Fatalf(
+				"key %q status=%d body=%q, want status=200 body=%q",
+				key,
+				response.Code,
+				response.Body.String(),
+				want,
+			)
+		}
+		if reader.calls != index+1 {
+			t.Fatalf("key %q reader calls = %d, want %d", key, reader.calls, index+1)
+		}
+		if reader.tenant != "urn:xb:tenant:broker-1" {
+			t.Fatalf("tenant = %q, want authenticated tenant", reader.tenant)
+		}
+		if reader.tenant == "urn:xb:apikey:broker-1" {
+			t.Fatalf("reader received API-key subject as tenant authority")
+		}
+		if reader.accountID != "urn:xb:account:00000000-0000-4000-8000-000000000009" {
+			t.Fatalf("account = %q, want canonical account URN", reader.accountID)
+		}
+	}
+}
+
+func TestBrokerBalancesRouteRejectsNoncanonicalAndInjectedAccountIDsBeforeRead(
+	t *testing.T,
+) {
+	reader := &recordingBrokerBalancesReader{}
+	handler := NewServer(ServerConfig{
+		Authenticator:  testAuthenticator{},
+		BrokerBalances: reader,
+		TrustedProxies: []netip.Prefix{
+			netip.MustParsePrefix("192.0.2.0/24"),
+		},
+	}).Handler()
+	headers := map[string]string{
+		"x-api-key":       "broker-key",
+		"x-forwarded-for": "203.0.113.7",
+	}
+	for _, accountID := range []string{
+		"00000000-0000-4000-8000-000000000009",
+		"urn:xb:account:00000000-0000-4000-8000-00000000000A",
+		"urn:xb:account:00000000000040008000000000000009",
+		"urn:XB:account:00000000-0000-4000-8000-000000000009",
+		"urn:xb:account:00000000-0000-4000-8000-000000000009%27%20OR%201%3D1--",
+		"urn:xb:account:00000000-0000-4000-8000-000000000009%3BDROP%20TABLE%20ledger.balances",
+	} {
+		response := performRequest(
+			t,
+			handler,
+			http.MethodGet,
+			"/broker/v1/accounts/"+accountID+"/balances",
+			nil,
+			headers,
+		)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf(
+				"account %q status=%d body=%s, want 400",
+				accountID,
+				response.Code,
+				response.Body.String(),
+			)
+		}
+	}
+	if reader.calls != 0 {
+		t.Fatalf("reader calls = %d, want 0", reader.calls)
+	}
+}
+
+func TestBrokerBalancesRouteReturnsNonNullEmptyArray(t *testing.T) {
+	reader := &recordingBrokerBalancesReader{}
+	handler := NewServer(ServerConfig{
+		Authenticator:  testAuthenticator{},
+		BrokerBalances: reader,
+		TrustedProxies: []netip.Prefix{
+			netip.MustParsePrefix("192.0.2.0/24"),
+		},
+	}).Handler()
+	response := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/broker/v1/accounts/urn:xb:account:00000000-0000-4000-8000-000000000009/balances",
+		nil,
+		map[string]string{
+			"x-api-key":       "broker-key",
+			"x-forwarded-for": "203.0.113.7",
+		},
+	)
+	const want = "[]\n"
+	if response.Code != http.StatusOK || response.Body.String() != want {
+		t.Fatalf(
+			"empty balances status=%d body=%q, want status=200 body=%q",
+			response.Code,
+			response.Body.String(),
+			want,
+		)
+	}
+}
+
+func TestBrokerBalancesRouteMapsAuthorizationAndStorageErrorsWithoutPartialArray(
+	t *testing.T,
+) {
+	for _, test := range []struct {
+		name   string
+		err    error
+		status int
+		body   string
+	}{
+		{
+			name:   "tenant denial",
+			err:    ErrForbidden,
+			status: http.StatusForbidden,
+			body: `{"code":"forbidden","message":"forbidden","requestId":"broker-balances-request"}` +
+				"\n",
+		},
+		{
+			name:   "storage failure",
+			err:    errors.New("contains-sensitive-balance-detail"),
+			status: http.StatusServiceUnavailable,
+			body: `{"code":"unavailable","message":"trading views unavailable","requestId":"broker-balances-request"}` +
+				"\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader := &recordingBrokerBalancesReader{
+				balances: []BalanceView{{
+					Currency: "MUST-NOT-LEAK",
+					Total:    "sensitive-total",
+					Locked:   "sensitive-locked",
+					Free:     "sensitive-free",
+					Equity:   "sensitive-equity",
+				}},
+				err: test.err,
+			}
+			handler := NewServer(ServerConfig{
+				Authenticator:  testAuthenticator{},
+				BrokerBalances: reader,
+				TrustedProxies: []netip.Prefix{
+					netip.MustParsePrefix("192.0.2.0/24"),
+				},
+				RequestID: func() string { return "broker-balances-request" },
+			}).Handler()
+			response := performRequest(
+				t,
+				handler,
+				http.MethodGet,
+				"/broker/v1/accounts/urn:xb:account:00000000-0000-4000-8000-000000000009/balances",
+				nil,
+				map[string]string{
+					"x-api-key":       "broker-key",
+					"x-forwarded-for": "203.0.113.7",
+				},
+			)
+			if response.Code != test.status || response.Body.String() != test.body {
+				t.Fatalf(
+					"response status=%d body=%q, want status=%d body=%q",
+					response.Code,
+					response.Body.String(),
+					test.status,
+					test.body,
+				)
+			}
+			if strings.Contains(response.Body.String(), "MUST-NOT-LEAK") ||
+				strings.Contains(response.Body.String(), "sensitive") {
+				t.Fatalf(
+					"response leaked partial balances or storage detail: %s",
+					response.Body.String(),
+				)
+			}
+		})
+	}
+}
+
+func TestBrokerBalancesRouteFailsClosedWithoutReader(t *testing.T) {
+	handler := NewServer(ServerConfig{
+		Authenticator: testAuthenticator{},
+		TrustedProxies: []netip.Prefix{
+			netip.MustParsePrefix("192.0.2.0/24"),
+		},
+		RequestID: func() string { return "broker-balances-nil" },
+	}).Handler()
+	response := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/broker/v1/accounts/urn:xb:account:00000000-0000-4000-8000-000000000009/balances",
+		nil,
+		map[string]string{
+			"x-api-key":       "broker-key",
+			"x-forwarded-for": "203.0.113.7",
+		},
+	)
+	const want = `{"code":"unavailable","message":"trading views unavailable","requestId":"broker-balances-nil"}` + "\n"
+	if response.Code != http.StatusServiceUnavailable || response.Body.String() != want {
+		t.Fatalf(
+			"nil reader status=%d body=%q, want status=503 body=%q",
+			response.Code,
+			response.Body.String(),
+			want,
+		)
 	}
 }
 

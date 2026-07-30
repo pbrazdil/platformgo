@@ -1172,6 +1172,160 @@ func (store *CompatibilityStore) Balances(
 	return values, rows.Err()
 }
 
+// BrokerBalances returns the complete exact balance projection only when both
+// durable account authorities belong to brokerTenant in the same statement.
+func (store *CompatibilityStore) BrokerBalances(
+	ctx context.Context,
+	brokerTenant string,
+	accountID string,
+) ([]edge.BalanceView, error) {
+	rows, err := store.pool.Query(ctx, `
+		WITH authority AS MATERIALIZED (
+			SELECT EXISTS (
+				SELECT 1
+				  FROM identity.user_accounts AS ownership
+				  JOIN identity.account_profiles AS profile
+				    ON profile.account_id = ownership.account_id
+				   AND profile.broker_subject = $1
+				 WHERE ownership.account_id = $2
+				   AND ownership.broker_subject = $1
+			) AS authorized
+		)
+		SELECT
+			authority.authorized,
+			balance.currency,
+			scale.scale,
+			trim_scale(balance.total)::text,
+			trim_scale(balance.used)::text,
+			trim_scale(balance.free)::text,
+			trim_scale(balance.equity)::text
+		  FROM authority
+		  LEFT JOIN ledger.balances AS balance
+		    ON authority.authorized
+		   AND balance.account_id = $2
+		  LEFT JOIN trading.currency_scales AS scale
+		    ON scale.currency = balance.currency
+		 ORDER BY balance.currency COLLATE pg_catalog."C" NULLS LAST`,
+		brokerTenant,
+		accountID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list broker balances: %w", err)
+	}
+	defer rows.Close()
+	values, err := collectBrokerBalanceRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("list broker balances: %w", err)
+	}
+	return values, nil
+}
+
+type brokerBalanceRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}
+
+func collectBrokerBalanceRows(rows brokerBalanceRows) ([]edge.BalanceView, error) {
+	values := make([]edge.BalanceView, 0)
+	sawSentinel := false
+	authorized := false
+	for rows.Next() {
+		var (
+			rowAuthorized   bool
+			currency        *string
+			registeredScale *int16
+			total           *string
+			used            *string
+			free            *string
+			equity          *string
+		)
+		if err := rows.Scan(
+			&rowAuthorized,
+			&currency,
+			&registeredScale,
+			&total,
+			&used,
+			&free,
+			&equity,
+		); err != nil {
+			return nil, fmt.Errorf("scan balance: %w", err)
+		}
+		if sawSentinel && authorized != rowAuthorized {
+			return nil, errors.New("inconsistent broker balance authority sentinel")
+		}
+		sawSentinel = true
+		authorized = rowAuthorized
+		payloadPresent := currency != nil ||
+			registeredScale != nil ||
+			total != nil ||
+			used != nil ||
+			free != nil ||
+			equity != nil
+		if !authorized {
+			if payloadPresent {
+				return nil, errors.New("unauthorized broker balance payload")
+			}
+			continue
+		}
+		if !payloadPresent {
+			continue
+		}
+		if currency == nil ||
+			registeredScale == nil ||
+			total == nil ||
+			used == nil ||
+			free == nil ||
+			equity == nil ||
+			*registeredScale < 0 ||
+			*registeredScale > 18 {
+			return nil, errors.New("broker balance row is incomplete")
+		}
+		registeredCurrency, err := domain.NewCurrency(
+			*currency,
+			uint8(*registeredScale),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"invalid authoritative currency: %w",
+				err,
+			)
+		}
+		value := edge.BalanceView{Currency: registeredCurrency.Code()}
+		for _, field := range []struct {
+			name   string
+			source string
+			target *string
+		}{
+			{name: "total", source: *total, target: &value.Total},
+			{name: "locked", source: *used, target: &value.Locked},
+			{name: "free", source: *free, target: &value.Free},
+			{name: "equity", source: *equity, target: &value.Equity},
+		} {
+			money, err := domain.NewMoney(field.source, registeredCurrency)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"invalid authoritative %s: %w",
+					field.name,
+					err,
+				)
+			}
+			*field.target = money.Decimal().String()
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if !sawSentinel {
+		return nil, errors.New("broker balance authority sentinel is missing")
+	}
+	if !authorized {
+		return nil, edge.ErrForbidden
+	}
+	return values, nil
+}
+
 // LatestFillExecution returns the newest immutable execution-time projection
 // proven by the first native fill-history source port.
 func (store *CompatibilityStore) LatestFillExecution(
