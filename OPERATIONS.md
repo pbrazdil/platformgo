@@ -442,13 +442,14 @@ reconstructs only the hidden watermark from their durable physical stream
 sequence. New and previous command binaries can admit only a zero-sentinel
 outbox; an explicit outbox fails within its admission transaction with
 SQLSTATE `23514`. A post-cutover market receipt must contain a non-empty book
-change and matching stream/market metadata. The engine runtime-schema revision
-must equal `20260728000200_phase3_command_market_sequence_binding` on every
+change and matching stream/market metadata. This boundary introduced runtime
+revision `20260728000200_phase3_command_market_sequence_binding` on every
 shard ownership-epoch insert/update, business receipt, duplicate receipt, shard
-fault, and checkpoint insert/update. This fences a previous engine that passed
-schema verification before the upgrade but attempted shard ownership only
-after commit; its epoch write fails with SQLSTATE `55000` before it can publish
-engine readiness.
+fault, and checkpoint insert/update. Later no-overlap migrations advance that
+exact value; the current required revision is recorded by the latest such
+boundary below. Each advance fences an engine that passed schema verification
+before the upgrade but attempted shard ownership only after commit; its epoch
+write fails with SQLSTATE `55000` before it can publish engine readiness.
 
 On `55P03`, `57014`, `55000`, or another definite pre-commit error, verify that
 the migration filename, column, functions, and triggers are all absent before
@@ -746,6 +747,58 @@ delete, and truncate are forbidden, including for the table owner; runtime
 roles have no mutation grant. A scale conflict, malformed registry/history,
 or disagreement between replay and durable projections makes readiness false.
 Do not repair these facts in place.
+
+#### Currency-scale authority-fence forward correction
+
+Migration `20260730000200_phase3_currency_scale_authority_fence.up.sql` is the
+mandatory forward correction for the frozen registry ACL/function boundary.
+Apply it with traffic withdrawn and the engine drained. The migration's
+engine-owner advisory lock and transaction-held relation fences make a complete
+all-session drain defense-in-depth rather than a correctness dependency:
+
+- an old registry insert that already holds `ROW EXCLUSIVE` completes before
+  the migration can validate, so its committed effect is observed and causes
+  SQLSTATE `55000`;
+- an old definer invocation that has not acquired the registry write lock
+  cannot insert until the migration commits, after which the committed
+  `ENABLE ALWAYS` registry guard rejects any pair without exact durable
+  instrument authority.
+
+The migration uses a five-second lock timeout and a thirty-second statement
+timeout. Any failure rolls back every function, trigger, ACL,
+runtime-revision, and journal change. A definite `55P03` or statement timeout
+is retryable only after the writer or administrative blocker is identified
+and drained and the prior 37-file state is proven intact. Every semantic
+`55000` is non-retryable: unexpected source mutation ACL,
+missing/malformed/extra authority trigger, impossible instrument-effect
+cardinality, noncanonical or out-of-domain exact instrument value, full
+current-instrument/latest-accepted-history projection mismatch, malformed or
+non-accepted history, conflicting authority, and any missing, extra, or
+mismatched registry row all require preserved evidence plus owner-reviewed
+proof and forward recovery, or a complete restore. Merely revoking a hostile
+grant or dropping/recreating a trigger does not classify facts written while
+that path existed and must never authorize retry. Never mutate registry,
+instrument, or receipt history in place.
+
+If the migration `COMMIT` acknowledgment is lost, keep all runtimes and new
+connection admission halted. Reconcile the exact filename and checksum, the
+38-file journal tip, raw table/column/function ACLs, function owner/security
+and `search_path`, exact trigger identities/timing/`ENABLE ALWAYS` state,
+runtime-revision body, registry row digest, relation owner and filenode, and
+bidirectional equality against historical accepted `InstrumentChanges`, plus
+full latest-snapshot and projection-version equality for every current
+instrument. Exact committed evidence selects the matching new binary; exact
+absent journal and catalog deltas permit retry only when no semantic `55000`
+evidence is present. Mixed or unproven evidence requires forensic owner review
+or complete restore.
+
+After a proven commit, start only the binary carrying runtime revision
+`20260730000200_phase3_currency_scale_authority_fence`. Require exact schema
+verification, fresh shard ownership, recovery, decision/state/checkpoint hash
+verification, and zero instrument/registry reconciliation mismatches before
+restoring traffic. Database rollback is a complete owner-authorized restore of
+the verified pre-migration boundary followed by the prior binary; down
+migration, selective restore, and frozen-migration edits are forbidden.
 
 After the migration commits, operational rollback is a reviewed forward fix
 with trading halted. If an owner authorizes full rollback, stop every writer

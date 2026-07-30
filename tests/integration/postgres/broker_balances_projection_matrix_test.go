@@ -36,12 +36,12 @@ func TestBrokerBalancesUsesExplicitCOrderAgainstHostileNumericCollation(
 		)`); err != nil {
 		t.Fatalf("create hostile broker balance collation: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO trading.currency_scales (currency, scale) VALUES
-			('X10X', 2),
-			('X2X', 2)`); err != nil {
-		t.Fatalf("seed hostile broker balance scales: %v", err)
-	}
+	seedBrokerBalanceScaleAuthorities(
+		t,
+		pool,
+		brokerBalanceScaleAuthority{currency: "X10X", scale: 2},
+		brokerBalanceScaleAuthority{currency: "X2X", scale: 2},
+	)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO ledger.balances (
 			account_id, currency, total, used, free, equity, ledger_sequence,
@@ -266,11 +266,11 @@ func seedBrokerBalancesValidBeforeCorruption(
 	pool *pgxpool.Pool,
 ) {
 	t.Helper()
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO trading.currency_scales (currency, scale)
-		VALUES ('AAA', 2)`); err != nil {
-		t.Fatalf("seed valid broker balance scale: %v", err)
-	}
+	seedBrokerBalanceScaleAuthorities(
+		t,
+		pool,
+		brokerBalanceScaleAuthority{currency: "AAA", scale: 2},
+	)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO ledger.balances (
 			account_id, currency, total, used, free, equity, ledger_sequence,
@@ -309,25 +309,30 @@ func seedBrokerBalancesCorruption(
 	case "invalid-currency":
 		if _, err := pool.Exec(ctx, `
 			ALTER TABLE trading.currency_scales
-			DROP CONSTRAINT currency_scales_currency_check;
+				DROP CONSTRAINT currency_scales_currency_check;
+			ALTER TABLE trading.currency_scales
+				DISABLE TRIGGER currency_scale_registry_requires_authority;
 			INSERT INTO trading.currency_scales (currency, scale)
-			VALUES ('bad!', 2)`); err != nil {
+			VALUES ('bad!', 2);
+			ALTER TABLE trading.currency_scales
+				ENABLE ALWAYS TRIGGER
+					currency_scale_registry_requires_authority`); err != nil {
 			t.Fatalf("permit invalid currency in disposable schema: %v", err)
 		}
 		currency = "bad!"
 	case "nonfinite":
-		if _, err := pool.Exec(ctx, `
-			INSERT INTO trading.currency_scales (currency, scale)
-			VALUES ('ZZZ', 2)`); err != nil {
-			t.Fatalf("seed nonfinite currency scale: %v", err)
-		}
+		seedBrokerBalanceScaleAuthorities(
+			t,
+			pool,
+			brokerBalanceScaleAuthority{currency: "ZZZ", scale: 2},
+		)
 		total = "NaN"
 	case "excess-scale":
-		if _, err := pool.Exec(ctx, `
-			INSERT INTO trading.currency_scales (currency, scale)
-			VALUES ('ZZZ', 2)`); err != nil {
-			t.Fatalf("seed excess-scale currency authority: %v", err)
-		}
+		seedBrokerBalanceScaleAuthorities(
+			t,
+			pool,
+			brokerBalanceScaleAuthority{currency: "ZZZ", scale: 2},
+		)
 		total = "1.001"
 	default:
 		t.Fatalf("unknown broker balance corruption kind %q", kind)

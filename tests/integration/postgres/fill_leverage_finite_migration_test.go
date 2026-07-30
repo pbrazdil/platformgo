@@ -275,12 +275,24 @@ func TestFillLeverageFiniteConstraintRejectsActiveEngineOwnerAndRetries(
 	resetDurableSchemas(t, pool)
 	seedFillLeverageFinitePreviousTip(t, ctx, pool, false)
 
-	store := platformpostgres.NewEngineStore(pool)
-	owner, err := store.AcquireShardOwnership(ctx, 7)
+	owner, err := pool.Acquire(ctx)
 	if err != nil {
-		t.Fatalf("acquire pre-migration engine owner: %v", err)
+		t.Fatalf("acquire pre-migration engine-owner connection: %v", err)
 	}
-	defer func() { _ = owner.Close(context.Background()) }()
+	defer owner.Release()
+	if _, err := owner.Exec(ctx, `
+		SELECT pg_advisory_lock(1346850639, 7)`); err != nil {
+		t.Fatalf("acquire pre-migration engine-owner lock: %v", err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			_, _ = owner.Exec(
+				context.Background(),
+				`SELECT pg_advisory_unlock(1346850639, 7)`,
+			)
+		}
+	}()
 	current := platformpostgres.NewMigrator(
 		pool,
 		migrationFilesThrough(t, fillLeverageFiniteConstraintMigration),
@@ -305,15 +317,13 @@ func TestFillLeverageFiniteConstraintRejectsActiveEngineOwnerAndRetries(
 				 WHERE conrelid = 'trading.fills'::regclass
 				   AND conname =
 				       'fills_effective_leverage_finite_positive'
-			)`,
+		)`,
 	).Scan(&count, &tip, &constraintExists); err != nil {
-		_ = owner.Close(ctx)
 		t.Fatalf("inspect active-owner migration refusal: %v", err)
 	}
 	if count != 34 ||
 		tip != fillLeverageFinitePreviousMigration ||
 		constraintExists {
-		_ = owner.Close(ctx)
 		t.Fatalf(
 			"active-owner migration state = count %d tip %q constraint %t",
 			count,
@@ -321,9 +331,14 @@ func TestFillLeverageFiniteConstraintRejectsActiveEngineOwnerAndRetries(
 			constraintExists,
 		)
 	}
-	if err := owner.Close(ctx); err != nil {
+	var unlocked bool
+	if err := owner.QueryRow(
+		ctx,
+		`SELECT pg_advisory_unlock(1346850639, 7)`,
+	).Scan(&unlocked); err != nil || !unlocked {
 		t.Fatalf("release pre-migration engine owner: %v", err)
 	}
+	released = true
 	if err := current.Migrate(ctx); err != nil {
 		t.Fatalf("retry constraint after engine drain: %v", err)
 	}

@@ -744,6 +744,22 @@ func TestFundingHistoryMigrationUpgradesPopulatedRealtimeSchema(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed previous-schema funding receipt: %v", err)
 	}
+	seedAcceptedInstrumentCurrencyReceiptForShard(
+		t,
+		pool,
+		41,
+		"20260725001100_phase3_committed_realtime_outbox",
+		"00000000-0000-4000-8000-000000000913",
+		2,
+		"BTC-PERP",
+		"USDC",
+		2,
+		"0.1",
+		"0.05",
+		"10",
+		"0",
+		"0",
+	)
 	const positionID = "019f9b6d-3154-4db1-b639-57c246e92201"
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO trading.funding_settlements (
@@ -970,6 +986,22 @@ func TestFillHistoryMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 		  FROM generate_series(1, 100) AS sequence(sequence_number)`); err != nil {
 		t.Fatalf("seed populated fill-history schema: %v", err)
 	}
+	seedAcceptedInstrumentCurrencyReceiptForShard(
+		t,
+		pool,
+		41,
+		"20260725001100_phase3_committed_realtime_outbox",
+		"00000000-0000-4000-8000-000000000914",
+		1,
+		"BTC-PERP",
+		"USDC",
+		2,
+		"0.1",
+		"0.05",
+		"10",
+		"-0.0001",
+		"0.0005",
+	)
 
 	lockingTx, err := pool.Begin(ctx)
 	if err != nil {
@@ -1124,6 +1156,22 @@ func TestFillFilterMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 		  FROM generate_series(1, 100) AS sequence(sequence_number)`); err != nil {
 		t.Fatalf("seed populated fill-filter schema: %v", err)
 	}
+	seedAcceptedInstrumentCurrencyReceiptForShard(
+		t,
+		pool,
+		42,
+		"20260725001100_phase3_committed_realtime_outbox",
+		"00000000-0000-4000-8000-000000000915",
+		1,
+		"BTC-PERP",
+		"USDC",
+		2,
+		"0.1",
+		"0.05",
+		"10",
+		"-0.0001",
+		"0.0005",
+	)
 
 	lockingTx, err := pool.Begin(ctx)
 	if err != nil {
@@ -1324,7 +1372,7 @@ func TestRuntimeMigrationVerificationIsExactAndOldEngineIsFenced(t *testing.T) {
 			SELECT
 				set_config(
 					'platformgo.runtime_schema_revision',
-					'20260728000200_phase3_command_market_sequence_binding',
+					'20260730000200_phase3_currency_scale_authority_fence',
 					true
 				),
 				set_config(
@@ -1803,7 +1851,7 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260728000200_phase3_command_market_sequence_binding',
+				'20260730000200_phase3_currency_scale_authority_fence',
 				false
 			),
 			set_config(
@@ -2095,7 +2143,7 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 			SELECT
 				set_config(
 					'platformgo.runtime_schema_revision',
-					'20260728000200_phase3_command_market_sequence_binding',
+					'20260730000200_phase3_currency_scale_authority_fence',
 					true
 				),
 				set_config(
@@ -3900,10 +3948,13 @@ func TestBalanceProjectionHashV3MigrationGuardsCurrencyScaleConflicts(
 			decode(repeat('62', 32), 'hex'),
 			decode(repeat('63', 32), 'hex'),
 			'{}',
-			'{"InstrumentChanges":[{
-				"SettlementCurrency":"USDC",
-				"SettlementCurrencyScale":2
-			}]}',
+			'{
+				"CommandResult":{"Status":"accepted"},
+				"InstrumentChanges":[{
+					"SettlementCurrency":"USDC",
+					"SettlementCurrencyScale":2
+				}]
+			}',
 			decode(repeat('64', 32), 'hex'),
 			1
 		)`); err != nil {
@@ -4982,10 +5033,10 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	).Scan(&count, &first, &last); err != nil {
 		t.Fatalf("inspect final migration history: %v", err)
 	}
-	if count != 37 ||
+	if count != 38 ||
 		first != "20260724000100_durable_execution_foundation.up.sql" ||
 		last !=
-			"20260730000100_phase3_broker_balances_acl.up.sql" {
+			"20260730000200_phase3_currency_scale_authority_fence.up.sql" {
 		t.Fatalf(
 			"final migration history = count %d first %q last %q",
 			count,
@@ -5739,7 +5790,7 @@ func assertReceiptIdentityConstraints(t *testing.T, pool *pgxpool.Pool) {
 		SELECT
 			set_config(
 				'platformgo.runtime_schema_revision',
-				'20260728000200_phase3_command_market_sequence_binding',
+				'20260730000200_phase3_currency_scale_authority_fence',
 				false
 			),
 			set_config(

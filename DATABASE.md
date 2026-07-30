@@ -310,6 +310,55 @@ validated through `domain.NewMoney` at the registered scale before any result
 is serialized. Missing scale authority, invalid currency, non-finite money,
 or excess scale rejects the whole read.
 
+### Phase 3 currency-scale authority fence
+
+Migration `20260730000200_phase3_currency_scale_authority_fence.up.sql`
+closes two preexisting authority paths without editing the frozen migrations
+that created or first exposed the registry. It takes the configured shard's
+engine-owner advisory lock, then `SHARE ROW EXCLUSIVE` locks
+`trading.instruments`, `trading.currency_scales`, and
+`engine.input_receipts` in production writer order. Those locks are acquired
+before validation or catalog changes and remain held through the atomic
+migration-journal commit.
+
+The migration independently reconstructs the exact registry exclusively from
+canonical accepted historical `InstrumentChanges` in committed business
+receipts. Every current instrument currency pair must also have matching
+accepted receipt provenance. Every historical instrument snapshot must use
+canonical exact decimal strings within the runtime and PostgreSQL domains, and
+the latest accepted snapshot fold plus change count must equal every field and
+`version` in the current instrument projection in both directions. Before
+trusting either source, the migration
+requires the exact frozen trigger inventory on `trading.instruments`,
+`trading.currency_scales`, and `engine.input_receipts`, and rejects any
+unexpected pre-cutover mutation grant on `trading.instruments` or
+`engine.input_receipts`. Revoking a grant or removing a trigger cannot prove
+that authority was not forged while it existed. An invalid source,
+missing/malformed/extra trigger, noncanonical or out-of-domain exact value,
+non-accepted instrument effect, full projection mismatch, conflicting scale,
+extra registry row, missing row, or scale mismatch raises SQLSTATE `55000`.
+The migration never repairs, deletes, updates, backfills, or otherwise derives
+an accepted economic fact from the registry being checked.
+
+New registrations use an exact-origin `AFTER INSERT OR UPDATE` instrument
+trigger. A separate `ENABLE ALWAYS BEFORE INSERT` registry trigger permits a
+new pair only when the same single scale is already visible in the current
+instrument catalog. An existing same-scale registry row takes a bounded fast
+path and does not rescan immutable receipt history. The existing
+update/delete/truncate guard is also `ENABLE ALWAYS`. All three trigger
+functions have exact relation, trigger name, timing, level, operation, and
+argument checks. All non-owner function, table, and column privileges are
+removed from the registry and both authority sources, including named grants
+and dependent grant chains, before restoring only the documented API, engine,
+and outbox allowlists. Runtime roles receive no function `EXECUTE`; only API
+and engine retain non-grantable registry `SELECT`.
+
+The runtime schema revision advances to
+`20260730000200_phase3_currency_scale_authority_fence`. A preverified old
+engine therefore cannot resume durable writes after the cutover. This is a
+catalog-and-authority migration with no table rewrite, but it is an enforced
+no-overlap engine boundary.
+
 ### Phase 3 admin fleet-fills ACL boundary
 
 Migration `20260728000300_phase3_admin_fleet_fills_acl.up.sql` changes only
