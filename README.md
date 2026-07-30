@@ -117,7 +117,7 @@ through the real least-privilege PostgreSQL 19 Beta 2 HTTP boundary. The frozen
 broker OpenAPI, compatibility manifest, generated artifact hash, runtime
 wiring, and intentional-deviation record activate atomically. Moving keyset
 cursors remain ordinary committed history rather than replay or catch-up.
-The broker account-balances candidate now returns the deterministic
+The broker account-balances route now returns the deterministic
 five-field exact balance projection while authorizing `Principal.Tenant`
 through both durable account authorities in the same PostgreSQL statement that
 returns balances and currency-scale authority. API-key subject is not tenant
@@ -125,11 +125,12 @@ authority, unauthorized corrupt rows cannot influence error selection,
 authorized corruption fails the complete response closed, and bytewise `C`
 ordering makes response bytes independent of database locale. The runtime,
 frozen broker OpenAPI, compatibility manifest and hash, and intentional
-deviation are implemented atomically in the current candidate, pending full
-validation, exact-SHA specialist and final review, hosted CI, and merge.
-Focused edge, adapter, runtime, contract, and PostgreSQL 19 Beta2 exact-output,
-18-case authority, hostile-collation, corruption, snapshot-transition, and
-cancellation tests are green.
+deviation landed atomically. Full local PostgreSQL 19 Beta 2 validation,
+exact-SHA money, determinism, security, and independent final review, and all
+seven hosted CI jobs passed on the accepted tree before merge. Focused edge,
+adapter, runtime, contract, and PostgreSQL exact-output, 18-case authority,
+hostile-collation, corruption, snapshot-transition, cancellation, restart, and
+ledger-fold tests are green.
 Its forward-only, catalog-only ACL migration scrubs hostile table, column,
 grant-option, and dependent grant-chain privileges from both tenant
 authorities and `ledger.balances`, then restores only the exact non-grantable
