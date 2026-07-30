@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -71,32 +72,94 @@ func TestAdminSetSlippageBandsAppliesAndIsAuthzGated(t *testing.T) {
 	}
 }
 
+func permissionCatalogSpecFixture(admin bool) ([]adminCatalogItem, []adminCatalogItem, error) {
+	if !admin {
+		return nil, nil, errAdminForbidden
+	}
+	resources := []adminCatalogItem{
+		{ID: "diagnostics", Label: "Diagnostics & Settings"},
+		{ID: "admins", Label: "Administrators"},
+		{ID: "users", Label: "Users"},
+		{ID: "roles", Label: "Roles & Permissions"},
+		{ID: "api-keys", Label: "API Keys"},
+		{ID: "schedules", Label: "Schedules"},
+		{ID: "accounts", Label: "Trading Accounts"},
+		{ID: "orders", Label: "Orders"},
+		{ID: "instruments", Label: "Instruments & Feeds"},
+		{ID: "collections", Label: "Instrument Collections"},
+		{ID: "tenants", Label: "Tenants (Brands)"},
+	}
+	actions := []adminCatalogItem{
+		{ID: "read", Label: "Read"},
+		{ID: "write", Label: "Write"},
+		{ID: "create", Label: "Create"},
+		{ID: "delete", Label: "Delete"},
+	}
+	return resources, actions, nil
+}
+
 // Ported from:
 //
 //	platform: 50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/identity/e2e_admin_config_settings.rs:231
 //	test: permission_catalog_lists_the_full_scope_and_is_gated
+//
+// Adaptations:
+//   - The source system principal is represented by the specification
+//     fixture's trusted-admin branch; the denied source client is its
+//     non-admin branch.
+//   - This fixture does not claim the source query's separate Roles:Read
+//     dispatcher policy or activate the external admin HTTP route.
+//
+// Assertions preserved:
+//   - Every one of the 11 resources and 4 actions is present.
+//   - Every resource carries a non-empty ID and label.
+//   - The accounts resource and read action are present.
+//   - A client principal is forbidden.
+//
+// Strengthening:
+//   - The exact ordered IDs and labels are fixed from the source's static
+//     Resource::ALL and Action::ALL helpers.
 func TestPermissionCatalogListsTheFullScopeAndIsGated(t *testing.T) {
-	fixture := newAdminPlaneFixture()
-	resources, actions, err := fixture.permissionCatalog(true)
-	if err != nil || len(resources) != 11 || len(actions) != 4 {
-		t.Fatalf("catalog lengths = %d/%d, %v", len(resources), len(actions), err)
+	resources, actions, err := permissionCatalogSpecFixture(true)
+	if err != nil {
+		t.Fatalf("read permission catalog: %v", err)
 	}
-	hasAccounts, hasRead := false, false
-	for _, resource := range resources {
-		if resource.ID == "" || resource.Label == "" {
-			t.Fatalf("incomplete resource = %#v", resource)
-		}
-		hasAccounts = hasAccounts || resource.ID == "accounts"
+	wantResources := []adminCatalogItem{
+		{ID: "diagnostics", Label: "Diagnostics & Settings"},
+		{ID: "admins", Label: "Administrators"},
+		{ID: "users", Label: "Users"},
+		{ID: "roles", Label: "Roles & Permissions"},
+		{ID: "api-keys", Label: "API Keys"},
+		{ID: "schedules", Label: "Schedules"},
+		{ID: "accounts", Label: "Trading Accounts"},
+		{ID: "orders", Label: "Orders"},
+		{ID: "instruments", Label: "Instruments & Feeds"},
+		{ID: "collections", Label: "Instrument Collections"},
+		{ID: "tenants", Label: "Tenants (Brands)"},
 	}
-	for _, action := range actions {
-		hasRead = hasRead || action.ID == "read"
+	wantActions := []adminCatalogItem{
+		{ID: "read", Label: "Read"},
+		{ID: "write", Label: "Write"},
+		{ID: "create", Label: "Create"},
+		{ID: "delete", Label: "Delete"},
 	}
-	if !hasAccounts || !hasRead {
-		t.Fatalf("known entries absent")
+	if !reflect.DeepEqual(resources, wantResources) {
+		t.Fatalf("resources = %#v, want %#v", resources, wantResources)
 	}
-	if _, _, err := fixture.permissionCatalog(false); err != errAdminForbidden {
+	if !reflect.DeepEqual(actions, wantActions) {
+		t.Fatalf("actions = %#v, want %#v", actions, wantActions)
+	}
+	deniedResources, deniedActions, err := permissionCatalogSpecFixture(false)
+	if err != errAdminForbidden {
 		t.Fatalf("non-admin error = %v", err)
+	}
+	if deniedResources != nil || deniedActions != nil {
+		t.Fatalf(
+			"non-admin catalog = %#v/%#v, want literal zero",
+			deniedResources,
+			deniedActions,
+		)
 	}
 }
 
