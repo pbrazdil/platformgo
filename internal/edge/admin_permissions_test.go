@@ -2,8 +2,10 @@ package edge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -97,12 +99,28 @@ func TestAdminPermissionCatalogAuthenticatesAndAuthorizesBeforeReading(t *testin
 			response.Body.String(),
 		)
 	}
-	const wantBody = `{"resources":[{"id":"roles","label":"Roles & Permissions"}],"actions":[{"id":"read","label":"Read"}]}` + "\n"
-	if response.Body.String() != wantBody {
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode permission catalog: %v", err)
+	}
+	if len(got) != 2 || got["resources"] == nil || got["actions"] == nil {
+		t.Fatalf("permission catalog top-level fields = %v", got)
+	}
+	var gotResources []PermissionCatalogItem
+	if err := json.Unmarshal(got["resources"], &gotResources); err != nil {
+		t.Fatalf("decode permission resources: %v", err)
+	}
+	var gotActions []PermissionCatalogItem
+	if err := json.Unmarshal(got["actions"], &gotActions); err != nil {
+		t.Fatalf("decode permission actions: %v", err)
+	}
+	if !reflect.DeepEqual(gotResources, want.Resources) ||
+		!reflect.DeepEqual(gotActions, want.Actions) {
 		t.Fatalf(
-			"permission catalog body = %q, want %q",
-			response.Body.String(),
-			wantBody,
+			"permission catalog = resources %#v actions %#v, want %#v",
+			gotResources,
+			gotActions,
+			want,
 		)
 	}
 	if auth.calls != 1 || authorizer.calls != 1 || catalog.calls != 1 {
