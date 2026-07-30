@@ -9,7 +9,7 @@ Source revision/files/tests:
 - `crates/persistence/src/accounts/mod.rs::list_by_user`
 - frozen route inventory `GET /broker/v1/accounts`
 - accepted current-Go `internal/edge/types.go::MyAccountView`
-- accepted current-Go UUID URNs in
+- accepted current-Go account and user URNs in
   `ports/decisions/broker-account-identifiers-preserve-current-go-urns.md`
 
 Conflict or ambiguity:
@@ -46,12 +46,13 @@ templates based only on filter presence. The unfiltered materialized ownership
 query first constrains `identity.user_accounts` by `broker_subject`. The
 filtered template performs a one-time tenant/user existence lookup through
 `identity.users(user_id, broker_subject)`, then constrains ownership by both
-`broker_subject` and `user_id`. Thus a generic plan neither scans the tenant
-prefix for an absent user nor scans a foreign user's ownership range. Only
-then may the statement left-join the
-tenant-constrained account profile and trading projection. Nullable joins
-never establish authority. An absent or foreign user filter therefore returns
-the same successful empty array and cannot act as an existence oracle.
+`broker_subject` and `user_id`. Both templates use pgx unnamed
+extended-protocol execution so PostgreSQL plans for the concrete authenticated
+tenant instead of eventually reusing a tenant-agnostic generic plan. Only then
+may the statement use tenant-constrained lateral account-profile and trading
+projection probes. Nullable projections never establish authority. An absent
+or foreign user filter therefore returns the same successful empty array and
+cannot act as an existence oracle.
 
 The complete result is scanned, validated, and buffered before the HTTP edge
 writes headers or JSON. Any tenant-owned incomplete, inconsistent, or corrupt
@@ -65,18 +66,21 @@ source login ordering and adds a deterministic byte-total tie-breaker.
 No rows serialize as exact `[]`, never `null`.
 
 Every returned account must pass the shared current-Go projection validator:
-canonical account and user UUID URNs, positive login, `USDC`, accepted account
-status/margin/OMS enums, `HYPERLIQUID`, the single `CRYPTOCURRENCY` permitted
-class, and an RFC3339-representable UTC creation time.
+positive login, `USDC`, accepted account status/margin/OMS enums,
+`HYPERLIQUID`, the single `CRYPTOCURRENCY` permitted class, and an
+RFC3339-representable UTC creation time. Identifier strings retain the
+already-accepted current-Go account and user URN behavior; only the optional
+list filter is newly constrained to a canonical UUID user URN.
 
 The source contract is intentionally unpaged. Adding pagination or a response
 cap would be a compatibility break and is not authorized. To prevent one
 tenant request from scanning ownership rows belonging to every tenant, this
 activation adds a new forward migration with a tenant-leading partial index on
 `identity.user_accounts (broker_subject, user_id, account_id)` where
-`broker_subject IS NOT NULL`. After that access-path correction, query work
-outside final sorting and rendering is bounded by the authorized tenant/filter
-result rather than global ownership cardinality.
+`broker_subject IS NOT NULL`. The store's per-request custom planning and
+lateral indexed projection probes keep work outside final sorting and
+rendering bounded by the authorized tenant/filter result rather than global
+ownership or projection cardinality.
 
 Economic/API impact:
 This is one read-only PostgreSQL statement and one statement-level MVCC
@@ -121,10 +125,14 @@ Required evidence:
 - relation digests proving every request is non-mutating;
 - repeated behavior after pool, reader, authenticator, and server
   reconstruction;
-- representative tenant and cross-tenant query plans, including
-  `plan_cache_mode = force_generic_plan`, proving the filtered template uses a
-  one-time tenant/user key lookup before its ownership lookup and the new index
-  removes global ownership-scan amplification from the unfiltered template;
+- representative tenant and cross-tenant
+  `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` custom execution plans under
+  normal planner settings, proving the fixed filtered template performs a
+  one-time tenant/user key lookup with zero ownership loops and buffers for a
+  large foreign user's range and the new index removes global ownership-scan
+  amplification from the unfiltered template;
+- production store evidence that both templates use pgx unnamed
+  extended-protocol execution and cannot age into cached generic plans;
 - current-main migration upgrade, retry/checksum, lock/timeout, ACL, and
   rollback evidence;
 - atomic OpenAPI, manifest/hash, runtime wiring, companion documentation, and
