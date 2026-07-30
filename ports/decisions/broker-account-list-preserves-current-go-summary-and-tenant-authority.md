@@ -44,10 +44,11 @@ Serde extractor, which does not deny unknown fields.
 `userId` are not. The store selects one of two fixed parameterized statement
 templates based only on filter presence. The unfiltered materialized ownership
 query first constrains `identity.user_accounts` by `broker_subject`. The
-filtered template performs a one-time tenant/user existence lookup, then
-constrains ownership by both `broker_subject` and `user_id`. Thus a generic
-plan neither scans the tenant prefix for an absent user nor scans a foreign
-user's ownership range. Only then may the statement left-join the
+filtered template performs a one-time tenant/user existence lookup through
+`identity.users(user_id, broker_subject)`, then constrains ownership by both
+`broker_subject` and `user_id`. Thus a generic plan neither scans the tenant
+prefix for an absent user nor scans a foreign user's ownership range. Only
+then may the statement left-join the
 tenant-constrained account profile and trading projection. Nullable joins
 never establish authority. An absent or foreign user filter therefore returns
 the same successful empty array and cannot act as an existence oracle.
@@ -112,6 +113,9 @@ Required evidence:
   scope, unfiltered and user-filtered reads, empty/absent/foreign filters,
   foreign corruption isolation, owned incomplete/corrupt late rows, and
   canonical returned identifiers;
+- exact statement inspection and unchanged relation digests covering
+  `identity.users`, `identity.user_accounts`, `identity.account_profiles`, and
+  `trading.accounts`;
 - exactly zero SQL statements for authentication, scope, and parse failures,
   and exactly one statement for every authorized valid request;
 - relation digests proving every request is non-mutating;
