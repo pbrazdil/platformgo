@@ -664,6 +664,22 @@ the new journal row is absent and the complete prior state matches. A mixed or
 divergent state requires a reviewed forward repair or explicitly authorized
 complete verified pre-migration restore; never edit frozen migration bytes.
 
+### Phase 3 broker-account read boundary
+
+The broker account point read requires no migration. The existing immutable
+schema and broker-balances ACL tip already grant `platformgo_api` non-grantable
+`SELECT` on `identity.user_accounts`, `identity.account_profiles`, and
+`trading.accounts`.
+
+One statement anchors authorization on the unique
+`identity.user_accounts(account_id)` row with
+`broker_subject = Principal.Tenant`. Tenant-constrained nullable joins then
+detect, but never authorize through, a missing or inconsistent account profile
+or trading projection. No ownership row means the generic unknown-account
+result; an owned incomplete or invalid graph fails closed. The statement is a
+single MVCC snapshot, returns at most one row, and performs no lock upgrade or
+durable write.
+
 ### Phase 3 frozen-effective-leverage migration boundary
 
 Migration `20260726000900_phase3_fill_effective_leverage_hash_v4.up.sql` is the

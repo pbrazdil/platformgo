@@ -249,10 +249,20 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 	if account["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
 		t.Fatalf("broker account contract status = %v", account["x-platformgo-contract-status"])
 	}
-	inventory := assertMethod(t, broker, "/broker/v1/accounts/{accountId}", "get")
-	if inventory["x-platformgo-contract-status"] != "source-route-inventory" {
-		t.Fatalf("broker account read inventory status = %v", inventory["x-platformgo-contract-status"])
+	brokerAccount := assertMethod(t, broker, "/broker/v1/accounts/{accountId}", "get")
+	for _, status := range []string{"200", "400", "401", "403", "503"} {
+		assertResponse(t, brokerAccount, status)
 	}
+	if brokerAccount["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
+		t.Fatalf("broker account read contract status = %v", brokerAccount["x-platformgo-contract-status"])
+	}
+	assertOperationSecurity(t, brokerAccount, "apiKey")
+	assertOperationParameterPattern(
+		t,
+		brokerAccount,
+		"accountId",
+		`^urn:xb:account:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
+	)
 	brokerFills := assertMethod(
 		t,
 		broker,
@@ -283,6 +293,12 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 		`^urn:xb:account:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
 	)
 	brokerSchemas := broker["components"].(map[string]any)["schemas"].(map[string]any)
+	if !reflect.DeepEqual(
+		brokerSchemas["MyAccountView"],
+		schemas["MyAccountView"],
+	) {
+		t.Fatal("broker MyAccountView schema differs from accepted client schema")
+	}
 	brokerBalances := assertMethod(
 		t,
 		broker,

@@ -1071,6 +1071,199 @@ type recordingBrokerBalancesReader struct {
 	err       error
 }
 
+type recordingBrokerAccountReader struct {
+	calls     int
+	tenant    string
+	accountID string
+	account   MyAccountView
+	err       error
+}
+
+func (reader *recordingBrokerAccountReader) BrokerAccount(
+	_ context.Context,
+	tenant string,
+	accountID string,
+) (MyAccountView, error) {
+	reader.calls++
+	reader.tenant = tenant
+	reader.accountID = accountID
+	return reader.account, reader.err
+}
+
+func TestBrokerAccountRouteFreezesGateOrderScopeAndTenantAuthority(t *testing.T) {
+	reader := &recordingBrokerAccountReader{
+		account: MyAccountView{
+			AccountID:        "urn:xb:account:00000000-0000-4000-8000-000000000009",
+			Login:            73000009,
+			UserID:           "urn:xb:user:00000000-0000-4000-8000-000000000009",
+			BaseCurrency:     "USDC",
+			MarginMode:       "cross",
+			OmsMode:          "netting",
+			MarketVenue:      "hyperliquid",
+			PermittedClasses: []string{"perps"},
+			Status:           "active",
+			CreatedAt:        "2026-07-30T08:09:10Z",
+		},
+	}
+	handler := NewServer(ServerConfig{
+		Authenticator: testAuthenticator{},
+		BrokerAccount: reader,
+		TrustedProxies: []netip.Prefix{
+			netip.MustParsePrefix("192.0.2.0/24"),
+		},
+		RequestID: func() string { return "broker-account-gate" },
+	}).Handler()
+
+	const malformedPath = "/broker/v1/accounts/not-a-canonical-account"
+	for _, test := range []struct {
+		name   string
+		key    string
+		status int
+		body   string
+	}{
+		{
+			name: "invalid credential dominates account parsing",
+			key:  "invalid", status: http.StatusUnauthorized,
+			body: `{"code":"unauthorized","message":"unauthorized","requestId":"broker-account-gate"}` + "\n",
+		},
+		{
+			name: "scope dominates account parsing",
+			key:  "broker-noscope", status: http.StatusForbidden,
+			body: `{"code":"forbidden","message":"forbidden","requestId":"broker-account-gate"}` + "\n",
+		},
+		{
+			name: "exact scope reaches account parsing",
+			key:  "broker-key", status: http.StatusBadRequest,
+			body: `{"code":"invalid_request","message":"invalid account id","requestId":"broker-account-gate"}` + "\n",
+		},
+		{
+			name: "wildcard reaches account parsing",
+			key:  "broker-wildcard", status: http.StatusBadRequest,
+			body: `{"code":"invalid_request","message":"invalid account id","requestId":"broker-account-gate"}` + "\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := performRequest(
+				t,
+				handler,
+				http.MethodGet,
+				malformedPath,
+				nil,
+				map[string]string{
+					"x-api-key":       test.key,
+					"x-forwarded-for": "203.0.113.7",
+				},
+			)
+			if response.Code != test.status || response.Body.String() != test.body {
+				t.Fatalf(
+					"status=%d body=%q, want status=%d body=%q",
+					response.Code,
+					response.Body.String(),
+					test.status,
+					test.body,
+				)
+			}
+		})
+	}
+	if reader.calls != 0 {
+		t.Fatalf("reader calls=%d, want 0 before valid account id", reader.calls)
+	}
+
+	response := performRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/broker/v1/accounts/"+reader.account.AccountID,
+		nil,
+		map[string]string{
+			"x-api-key":       "broker-wildcard",
+			"x-forwarded-for": "203.0.113.7",
+		},
+	)
+	const want = `{"accountId":"urn:xb:account:00000000-0000-4000-8000-000000000009","login":73000009,"userId":"urn:xb:user:00000000-0000-4000-8000-000000000009","baseCurrency":"USDC","marginMode":"cross","omsMode":"netting","marketVenue":"hyperliquid","permittedClasses":["perps"],"status":"active","createdAt":"2026-07-30T08:09:10Z"}` + "\n"
+	if response.Code != http.StatusOK || response.Body.String() != want {
+		t.Fatalf("status=%d body=%q, want 200 body=%q", response.Code, response.Body.String(), want)
+	}
+	if reader.calls != 1 ||
+		reader.tenant != "urn:xb:tenant:broker-1" ||
+		reader.accountID != reader.account.AccountID {
+		t.Fatalf(
+			"calls=%d tenant=%q account=%q",
+			reader.calls,
+			reader.tenant,
+			reader.accountID,
+		)
+	}
+}
+
+func TestBrokerAccountRouteMapsUnknownAndStorageErrorsWithoutPartialAccount(
+	t *testing.T,
+) {
+	for _, test := range []struct {
+		name   string
+		err    error
+		status int
+		body   string
+	}{
+		{
+			name:   "unknown or foreign account",
+			err:    ErrNotFound,
+			status: http.StatusBadRequest,
+			body: `{"code":"invalid_request","message":"unknown account","requestId":"broker-account-error"}` +
+				"\n",
+		},
+		{
+			name:   "storage or projection failure",
+			err:    errors.New("contains-sensitive-account-detail"),
+			status: http.StatusServiceUnavailable,
+			body: `{"code":"unavailable","message":"account view unavailable","requestId":"broker-account-error"}` +
+				"\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader := &recordingBrokerAccountReader{
+				account: MyAccountView{
+					AccountID: "must-not-leak",
+					UserID:    "must-not-leak",
+				},
+				err: test.err,
+			}
+			handler := NewServer(ServerConfig{
+				Authenticator: testAuthenticator{},
+				BrokerAccount: reader,
+				TrustedProxies: []netip.Prefix{
+					netip.MustParsePrefix("192.0.2.0/24"),
+				},
+				RequestID: func() string { return "broker-account-error" },
+			}).Handler()
+			response := performRequest(
+				t,
+				handler,
+				http.MethodGet,
+				"/broker/v1/accounts/urn:xb:account:00000000-0000-4000-8000-000000000009",
+				nil,
+				map[string]string{
+					"x-api-key":       "broker-key",
+					"x-forwarded-for": "203.0.113.7",
+				},
+			)
+			if response.Code != test.status || response.Body.String() != test.body {
+				t.Fatalf(
+					"status=%d body=%q, want status=%d body=%q",
+					response.Code,
+					response.Body.String(),
+					test.status,
+					test.body,
+				)
+			}
+			if strings.Contains(response.Body.String(), "must-not-leak") ||
+				strings.Contains(response.Body.String(), "sensitive") {
+				t.Fatalf("response leaked partial account or storage detail: %s", response.Body.String())
+			}
+		})
+	}
+}
+
 func (reader *recordingBrokerBalancesReader) BrokerBalances(
 	_ context.Context,
 	tenant string,

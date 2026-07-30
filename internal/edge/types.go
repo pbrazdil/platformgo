@@ -444,3 +444,9 @@ type BrokerFillsReader interface {
 type BrokerBalancesReader interface {
 	BrokerBalances(context.Context, string, string) ([]BalanceView, error)
 }
+
+// BrokerAccountReader keeps tenant authorization inside the same PostgreSQL
+// statement that reads the complete account projection.
+type BrokerAccountReader interface {
+	BrokerAccount(context.Context, string, string) (MyAccountView, error)
+}

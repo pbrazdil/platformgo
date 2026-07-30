@@ -31,6 +31,7 @@ type Server struct {
 	realtime       RealtimeTokenIssuer
 	identity       IdentityService
 	trading        TradingReader
+	brokerAccount  BrokerAccountReader
 	brokerFills    BrokerFillsReader
 	brokerBalances BrokerBalancesReader
 	readiness      []HealthCheck
@@ -47,6 +48,7 @@ type ServerConfig struct {
 	Realtime       RealtimeTokenIssuer
 	Identity       IdentityService
 	Trading        TradingReader
+	BrokerAccount  BrokerAccountReader
 	BrokerFills    BrokerFillsReader
 	BrokerBalances BrokerBalancesReader
 	Readiness      []HealthCheck
@@ -72,6 +74,7 @@ func NewServer(config ServerConfig) *Server {
 		realtime:       config.Realtime,
 		identity:       config.Identity,
 		trading:        config.Trading,
+		brokerAccount:  config.BrokerAccount,
 		brokerFills:    config.BrokerFills,
 		brokerBalances: config.BrokerBalances,
 		readiness:      append([]HealthCheck(nil), config.Readiness...),
@@ -120,6 +123,10 @@ func (server *Server) route(writer http.ResponseWriter, request *http.Request) {
 	case request.Method == http.MethodGet && request.URL.Path == "/broker/v1/ping":
 		server.handleBrokerPing(writer, request)
 	case request.Method == http.MethodGet:
+		if accountID, ok := brokerAccountRoute(request.URL.Path); ok {
+			server.handleBrokerAccount(writer, request, accountID)
+			return
+		}
 		if accountID, ok := brokerFillsRoute(request.URL.Path); ok {
 			server.handleBrokerFills(writer, request, accountID)
 			return
@@ -703,6 +710,68 @@ func (server *Server) handleBrokerPing(writer http.ResponseWriter, request *http
 	writeJSON(writer, http.StatusOK, map[string]bool{"ok": true})
 }
 
+func (server *Server) handleBrokerAccount(
+	writer http.ResponseWriter,
+	request *http.Request,
+	accountID string,
+) {
+	principal, ok := server.brokerPrincipal(writer, request)
+	if !ok {
+		return
+	}
+	if !principal.HasScope("accounts:read") {
+		writeError(writer, request, http.StatusForbidden, "forbidden", "forbidden")
+		return
+	}
+	const accountPrefix = "urn:xb:account:"
+	if !strings.HasPrefix(accountID, accountPrefix) ||
+		!canonicalUUID.MatchString(strings.TrimPrefix(accountID, accountPrefix)) {
+		writeError(
+			writer,
+			request,
+			http.StatusBadRequest,
+			"invalid_request",
+			"invalid account id",
+		)
+		return
+	}
+	if server.brokerAccount == nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"account view unavailable",
+		)
+		return
+	}
+	account, err := server.brokerAccount.BrokerAccount(
+		request.Context(),
+		principal.Tenant,
+		accountID,
+	)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		writeError(
+			writer,
+			request,
+			http.StatusBadRequest,
+			"invalid_request",
+			"unknown account",
+		)
+	case err != nil:
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"account view unavailable",
+		)
+	default:
+		writeJSON(writer, http.StatusOK, account)
+	}
+}
+
 func (server *Server) handleBrokerFills(
 	writer http.ResponseWriter,
 	request *http.Request,
@@ -1014,6 +1083,18 @@ func brokerFillsRoute(path string) (string, bool) {
 		return "", false
 	}
 	accountID := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	if accountID == "" || strings.Contains(accountID, "/") {
+		return "", false
+	}
+	return accountID, true
+}
+
+func brokerAccountRoute(path string) (string, bool) {
+	const prefix = "/broker/v1/accounts/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	accountID := strings.TrimPrefix(path, prefix)
 	if accountID == "" || strings.Contains(accountID, "/") {
 		return "", false
 	}

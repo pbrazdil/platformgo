@@ -238,6 +238,15 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "request": "BrokerAccountRequest",
         "success": "BrokerAccountResult",
     },
+    ("GET", "/broker/v1/accounts/{accountId}"): {
+        "statuses": [200, 400, 401, 403, 503],
+        "success": "MyAccountView",
+        "security": "apiKey",
+        "account_id_pattern": (
+            "^urn:xb:account:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            "[0-9a-f]{4}-[0-9a-f]{12}$"
+        ),
+    },
     ("GET", "/broker/v1/accounts/{accountId}/balances"): {
         "statuses": [200, 400, 401, 403, 503],
         "success_array": "BalanceView",
@@ -595,7 +604,7 @@ def schemas(client: bool, broker: bool) -> dict[str, object]:
                 "createdAt": {"type": "string", "format": "date-time"},
             },
         }}
-        if client
+        if client or broker
         else {}),
         "SubmitOrderRequest": {
             "type": "object",

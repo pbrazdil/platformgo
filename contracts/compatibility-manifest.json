@@ -30,6 +30,7 @@
   "intentionalDeviations": [
     "api-key-idempotent-resolution-precedes-rate-rejection",
     "broker-account-identifiers-preserve-current-go-urns",
+    "broker-account-read-preserves-current-go-summary-and-tenant-authority",
     "broker-balances-preserves-current-go-projection-and-tenant-authority",
     "broker-fills-preserves-current-go-projection-and-tenant-authority",
     "client-api-key-creation-requires-idempotency-key",
@@ -60,6 +61,7 @@
     "GET /v1/accounts/{accountId}/fills",
     "GET /v1/accounts/{accountId}/funding",
     "GET /broker/v1/ping",
+    "GET /broker/v1/accounts/{accountId}",
     "GET /broker/v1/accounts/{accountId}/balances",
     "GET /broker/v1/accounts/{accountId}/fills",
     "POST /broker/v1/echo",
@@ -79,7 +81,7 @@
   },
   "openAPIArtifacts": {
     "openapi/admin-v1.json": "615e8a49f9e6a71f6a3ea0108bd71353bd5b7050cc79cee6b17d98af84a6aeb3",
-    "openapi/broker-v1.json": "fa3769e5ae24dc1ec084d19fbebf91b431b6681f9023bff2fc6932dc1f04248a",
+    "openapi/broker-v1.json": "2db56eb03964713f38118e012ada14e3dd825a7775dd518fb56053fc5c48ceac",
     "openapi/client-v1.json": "42461474eb48058875938d75a8b428504ac3613ee41dd87e8157cae0e4dfc810"
   },
   "platformSourceRevision": "50141367492be46ebf5623f6191a14b94af2f2bd",
