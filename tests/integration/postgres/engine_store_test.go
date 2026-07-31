@@ -23,7 +23,8 @@ import (
 func TestEngineStoreCommitsReceiptLedgerStateAndCheckpointAtomically(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	migrator := platformpostgres.NewMigrator(
+	migrator := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -296,7 +297,8 @@ func TestEngineStoreCommitsReceiptLedgerStateAndCheckpointAtomically(t *testing.
 func TestEngineStorePersistsOrdersFillsPositionsAndEvents(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 8); err != nil {
@@ -476,7 +478,8 @@ func TestSagaReconcileSettlesOrphanedOrderFromFills(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 52); err != nil {
@@ -2382,7 +2385,8 @@ func TestReconcileShardPreservesNanosecondTimesAndCanonicalSlippage(t *testing.T
 func TestEngineStoreEnforcesInitialSingleShardDeployment(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 8); err != nil {
@@ -2499,7 +2503,8 @@ func seedReconciliationFixture(
 ) reconciliationFixture {
 	t.Helper()
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), shardID); err != nil {
@@ -2655,7 +2660,8 @@ func seedReconciliationFixtureWithStorePool(
 func TestEngineStoreRejectsCommandInputThatDiffersFromJournal(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 7); err != nil {
@@ -2789,7 +2795,8 @@ func TestEngineStoreRecoveryRejectsInvalidBusinessHashMetadata(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			pool := postgresPool(t)
 			resetDurableSchemas(t, pool)
-			if err := platformpostgres.NewMigrator(
+			if err := newCurrentTestMigrator(
+				t,
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 			).MigrateAndProvision(context.Background(), 7); err != nil {
@@ -2854,7 +2861,8 @@ func TestEngineStoreRecoveryRejectsInvalidBusinessHashMetadata(t *testing.T) {
 func TestEngineStoreBindsNonCommandAccountInputToOneShard(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 7); err != nil {
@@ -2992,7 +3000,8 @@ func TestEngineStoreBindsNonCommandAccountInputToOneShard(t *testing.T) {
 func TestEngineStoreMissingAccountShardFailsClosedWithoutBinding(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 8); err != nil {
@@ -3088,7 +3097,8 @@ func TestEngineStoreFailsClosedOnInvalidCommandShardAssignment(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			pool := postgresPool(t)
 			resetDurableSchemas(t, pool)
-			if err := platformpostgres.NewMigrator(
+			if err := newCurrentTestMigrator(
+				t,
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 			).MigrateAndProvision(context.Background(), 7); err != nil {
@@ -3366,7 +3376,8 @@ func TestEngineStoreBindsCompleteCommandEnvelope(t *testing.T) {
 		t.Run(mutation.name, func(t *testing.T) {
 			pool := postgresPool(t)
 			resetDurableSchemas(t, pool)
-			if err := platformpostgres.NewMigrator(
+			if err := newCurrentTestMigrator(
+				t,
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 			).MigrateAndProvision(context.Background(), 7); err != nil {
@@ -3435,7 +3446,8 @@ func TestEngineStoreBindsCompleteCommandEnvelope(t *testing.T) {
 func TestEngineStoreRejectsAccountCommandBeforePredecessorCommits(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 7); err != nil {
@@ -3582,7 +3594,8 @@ func TestEngineStoreBindsRedundantCommandMetadata(t *testing.T) {
 			ctx := context.Background()
 			pool := postgresPool(t)
 			resetDurableSchemas(t, pool)
-			if err := platformpostgres.NewMigrator(
+			if err := newCurrentTestMigrator(
+				t,
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 			).MigrateAndProvision(ctx, 7); err != nil {
@@ -3636,7 +3649,8 @@ func TestEngineStoreDurablyHaltsNonCommandReuseOfCommandID(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 7); err != nil {
@@ -3720,7 +3734,8 @@ func TestEngineStoreRecoversDecisionHashV2V3AndExtendsTheChainWithV4(
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 8); err != nil {
@@ -4133,7 +4148,8 @@ func TestEngineStoreRestoredMarkRepairsProjectionWithoutLedgerDelta(
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 8); err != nil {
@@ -4410,7 +4426,8 @@ func TestEngineStoreRejectsCurrencyScaleAliasesAndRecoversExactly(
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 8); err != nil {
@@ -4689,7 +4706,8 @@ func TestEngineStoreRetainsMigratedCatalogCurrencyAfterReconfiguration(
 		"USDC",
 		2,
 	)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(ctx); err != nil {

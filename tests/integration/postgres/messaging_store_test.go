@@ -18,7 +18,8 @@ import (
 func TestOutboxRetriesUnknownOutcomeWithStableMessageID(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 7); err != nil {
@@ -90,7 +91,8 @@ func TestOutboxRetriesUnknownOutcomeWithStableMessageID(t *testing.T) {
 func TestOutboxDoesNotPublishLaterAccountCommandBeforeEarlierCommand(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 7); err != nil {
@@ -208,7 +210,8 @@ func TestOutboxBlocksMissingPredecessorAndRejectsCorruptCommandBinding(t *testin
 			ctx := context.Background()
 			pool := postgresPool(t)
 			resetDurableSchemas(t, pool)
-			if err := platformpostgres.NewMigrator(
+			if err := newCurrentTestMigrator(
+				t,
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 			).MigrateAndProvision(ctx, 7); err != nil {
@@ -277,7 +280,8 @@ func TestOutboxBlocksMissingPredecessorAndRejectsCorruptCommandBinding(t *testin
 func TestOutboxRuntimeRoleExecutesProductionClaimAndRepublish(t *testing.T) {
 	adminPool := postgresPool(t)
 	resetDurableSchemas(t, adminPool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		adminPool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 7); err != nil {
@@ -426,7 +430,8 @@ func TestOutboxRuntimeRoleExecutesProductionClaimAndRepublish(t *testing.T) {
 func TestInboxClaimAndConsumerEffectCommitTogether(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(context.Background()); err != nil {

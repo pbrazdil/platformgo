@@ -48,7 +48,8 @@ func TestFillSurfacesFrozenEffectiveLeverage(t *testing.T) {
 	resetDurableSchemas(t, pool)
 
 	const shardID engine.ShardID = 63
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, shardID); err != nil {

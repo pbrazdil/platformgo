@@ -1005,14 +1005,34 @@ object or default privilege. The migration also validates the exact four-table
 RBAC catalog and authorization-function owner, signature, security metadata,
 configuration, and body before reusing them, and refuses a nonempty RBAC graph.
 This one migration must run as a superuser. It rejects every enabled database
-event trigger before its first DDL. Before validation it takes bounded `SHARE`
-locks on the role, membership, event-trigger, class, attribute, inheritance,
-namespace, function, shared-dependency, and default-ACL catalogs; row-locks
-every reused authority tuple; requires the migration owner to own
+event trigger before its first DDL. Before any catalog fence, it takes
+transaction-retained `AccessShareLock` object locks in fixed order on the
+existing `audit` and `identity` schemas and the reused immutable-guard and
+permission functions. Each object-lock acquisition has a one-second bound;
+these pre-fence waits cannot hold a catalog lock while a concurrent
+multi-object DDL statement continues its catalog work. Every resolved object
+address must have nonnull class and object identifiers; a missing or wrong-kind
+target returns `55000` before the next acquisition. The transaction-local
+deadlock detector is set to two seconds, so the one-second object lock timeout
+classifies a reverse multi-object order as `55P03` and releases earlier object
+locks before deadlock detection. Before validation it then takes bounded
+`SHARE` locks on the
+role, membership, event-trigger, class, attribute, inheritance, namespace,
+function, shared-dependency, and default-ACL catalogs; row-locks every reused
+authority tuple; requires the migration owner to own
 `engine`/`identity`/`audit` with no nonowner `CREATE`; and revalidates all six
-ordinary runtime roles inside that fence. It then takes
-`SHARE ROW EXCLUSIVE` locks on the exact migration journal and all four RBAC
-relations in fixed order. The migrator reloads and compares the complete
+ordinary runtime roles inside that fence. PostgreSQL maintenance and DDL use
+incompatible catalog lock orders, so every protected catalog `SHARE` lock uses
+`NOWAIT`: contention returns `55P03` and rolls back the whole attempt instead
+of retaining a partial fence that could join a deadlock. Protected catalog
+tuple locks and every subsequent journal, RBAC, and audit relation fence also
+use `NOWAIT`, so neither a tuple nor relation blocker can follow with other
+catalog work and form the inverse cycle. For a definite pre-commit `55P03`,
+the migrator rolls back and returns the error for explicit operator handling.
+It never automatically retries this contention, a `COMMIT` error, or another
+unknown outcome. After identifying and draining the blocker, an operator may
+retry the identical migration bytes from the exact predecessor state. The
+migrator reloads and compares the complete
 applied manifest after acquiring the journal lock. The journal and relation
 catalogs include exact owner/kind/persistence/RLS, standalone
 nonpartitioned/noninherited topology, columns/defaults, constraints, indexes,

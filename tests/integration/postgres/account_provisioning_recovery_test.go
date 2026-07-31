@@ -27,7 +27,8 @@ func TestBrokerAccountProvisioningRecoversAfterPreCommitFaultAndTimeout(
 	defer cancel()
 	rootPool := postgresPool(t)
 	resetDurableSchemas(t, rootPool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		rootPool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 7); err != nil {

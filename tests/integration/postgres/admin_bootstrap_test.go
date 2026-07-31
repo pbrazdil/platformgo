@@ -22,7 +22,7 @@ import (
 
 const (
 	adminBootstrapMigration            = "20260731000100_phase3_admin_bootstrap_authority.up.sql"
-	adminBootstrapMigrationChecksumHex = "298d77c39400f2907337cdd6681ca209f0bcbf431bd41fee0dfce80eb3f03e3b"
+	adminBootstrapMigrationChecksumHex = "a7818c6d3b60167b7d2dcea3d926cc473f85204e1bdbb44238fd26c3a8b3ffb7"
 	adminBootstrapRoleID               = "00000000-0000-4000-8000-000000000001"
 	adminBootstrapRoleName             = "platformgo-superadmin"
 )
@@ -41,10 +41,14 @@ func TestAdminBootstrapCreatesAndReplaysOneAuditedAuthority(t *testing.T) {
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := platformpostgres.NewMigrator(
-		admin,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		platformpostgres.NewMigrator(
+			admin,
+			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+		),
+	); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
 	}
 
@@ -278,10 +282,7 @@ func TestAdminBootstrapRejectsNullInputs(t *testing.T) {
 			admin := postgresPool(t)
 			requireBrokerFundingPostgres19Beta2(t, admin)
 			resetDurableSchemas(t, admin)
-			if err := platformpostgres.NewMigrator(
-				admin,
-				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-			).Migrate(ctx); err != nil {
+			if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
 				t.Fatalf("migrate admin bootstrap authority: %v", err)
 			}
 
@@ -393,10 +394,7 @@ func TestAdminBootstrapRejectsDivergentRuntimeJournal(t *testing.T) {
 			admin := postgresPool(t)
 			requireBrokerFundingPostgres19Beta2(t, admin)
 			resetDurableSchemas(t, admin)
-			if err := platformpostgres.NewMigrator(
-				admin,
-				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-			).Migrate(ctx); err != nil {
+			if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
 				t.Fatalf("migrate admin bootstrap authority: %v", err)
 			}
 
@@ -514,10 +512,7 @@ func TestAdminBootstrapRejectsUnsafeEngineNamespaceAuthority(t *testing.T) {
 			admin := postgresPool(t)
 			requireBrokerFundingPostgres19Beta2(t, admin)
 			resetDurableSchemas(t, admin)
-			if err := platformpostgres.NewMigrator(
-				admin,
-				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-			).Migrate(ctx); err != nil {
+			if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
 				t.Fatalf("migrate admin bootstrap authority: %v", err)
 			}
 			if _, err := admin.Exec(ctx, testCase.install); err != nil {
@@ -589,6 +584,206 @@ func TestAdminBootstrapRejectsUnsafeEngineNamespaceAuthority(t *testing.T) {
 	}
 }
 
+func TestAdminBootstrapRejectsCatalogContentionWithoutDeadlock(t *testing.T) {
+	for index, testCase := range []struct {
+		name          string
+		heldCatalog   string
+		followCatalog string
+	}{
+		{
+			name:          "pg_proc then pg_class",
+			heldCatalog:   "pg_proc",
+			followCatalog: "pg_class",
+		},
+		{
+			name:          "pg_authid then pg_class",
+			heldCatalog:   "pg_authid",
+			followCatalog: "pg_class",
+		},
+		{
+			name:          "pg_class then pg_attribute",
+			heldCatalog:   "pg_class",
+			followCatalog: "pg_attribute",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := context.Background()
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+			if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
+				t.Fatalf("migrate admin bootstrap authority: %v", err)
+			}
+
+			login := fmt.Sprintf(
+				"platformgo_admin_bootstrap_catalog_lock_login_%d",
+				index,
+			)
+			terminal := runtimeRoleLoginPool(
+				t,
+				admin,
+				login,
+				"platformgo_admin_bootstrap",
+			)
+			catalogWriter, err := admin.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin catalog writer: %v", err)
+			}
+			target := "pg_catalog." +
+				pgx.Identifier{testCase.heldCatalog}.Sanitize()
+			if _, err := catalogWriter.Exec(
+				ctx,
+				"LOCK TABLE "+target+" IN ROW EXCLUSIVE MODE",
+			); err != nil {
+				_ = catalogWriter.Rollback(ctx)
+				t.Fatalf(
+					"lock %s as catalog writer: %v",
+					testCase.heldCatalog,
+					err,
+				)
+			}
+
+			requestID := fmt.Sprintf(
+				"bootstrap-request-catalog-lock-%d",
+				index,
+			)
+			subject := fmt.Sprintf(
+				"admin::urn:xb:admin:00000000-0000-4000-8000-%012d",
+				140+index,
+			)
+			eventID := fmt.Sprintf(
+				"00000000-0000-4000-8000-%012d",
+				140+index,
+			)
+			logicalTime := "2026-07-31T00:00:00.000000Z"
+			keyHash := sha256.Sum256(
+				[]byte(fmt.Sprintf("bootstrap-catalog-lock-key-%d", index)),
+			)
+			bootstrapCtx, bootstrapCancel := context.WithTimeout(
+				ctx,
+				2*time.Second,
+			)
+			defer bootstrapCancel()
+			assertAdminBootstrapSQLStateContext(
+				t,
+				bootstrapCtx,
+				terminal,
+				"55P03",
+				requestID,
+				keyHash[:],
+				subject,
+				eventID,
+				logicalTime,
+			)
+			assertAdminBootstrapAuthorityCounts(t, admin, 0, 0)
+
+			follow := "pg_catalog." +
+				pgx.Identifier{testCase.followCatalog}.Sanitize()
+			lockCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			if _, err := catalogWriter.Exec(
+				lockCtx,
+				"LOCK TABLE "+follow+" IN ROW EXCLUSIVE MODE",
+			); err != nil {
+				_ = catalogWriter.Rollback(ctx)
+				t.Fatalf(
+					"catalog writer could not continue %s -> %s: %v",
+					testCase.heldCatalog,
+					testCase.followCatalog,
+					err,
+				)
+			}
+			if err := catalogWriter.Commit(ctx); err != nil {
+				t.Fatalf("commit catalog writer: %v", err)
+			}
+			got := callAdminBootstrap(
+				t,
+				terminal,
+				requestID,
+				keyHash[:],
+				subject,
+				eventID,
+				logicalTime,
+			)
+			if got.outcome != "created" {
+				t.Fatalf("bootstrap after catalog writer drain = %#v", got)
+			}
+		})
+	}
+}
+
+func TestAdminBootstrapRejectsRelationContentionWithoutDeadlock(t *testing.T) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
+		t.Fatalf("migrate admin bootstrap authority: %v", err)
+	}
+	terminal := runtimeRoleLoginPool(
+		t,
+		admin,
+		"platformgo_admin_bootstrap_relation_lock_login",
+		"platformgo_admin_bootstrap",
+	)
+
+	relationWriter, err := admin.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin authority relation writer: %v", err)
+	}
+	if _, err := relationWriter.Exec(ctx, `
+		LOCK TABLE identity.rbac_roles IN ACCESS EXCLUSIVE MODE`,
+	); err != nil {
+		_ = relationWriter.Rollback(ctx)
+		t.Fatalf("lock authority relation: %v", err)
+	}
+
+	requestID := "bootstrap-request-relation-lock"
+	subject := "admin::urn:xb:admin:00000000-0000-4000-8000-000000000150"
+	eventID := "00000000-0000-4000-8000-000000000150"
+	logicalTime := "2026-07-31T00:00:00.000000Z"
+	keyHash := sha256.Sum256([]byte("bootstrap-relation-lock-key"))
+	bootstrapCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	assertAdminBootstrapSQLStateContext(
+		t,
+		bootstrapCtx,
+		terminal,
+		"55P03",
+		requestID,
+		keyHash[:],
+		subject,
+		eventID,
+		logicalTime,
+	)
+	assertAdminBootstrapAuthorityCounts(t, admin, 0, 0)
+
+	followCtx, followCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer followCancel()
+	if _, err := relationWriter.Exec(followCtx, `
+		LOCK TABLE pg_catalog.pg_class IN ROW EXCLUSIVE MODE;
+		LOCK TABLE pg_catalog.pg_attribute IN ROW EXCLUSIVE MODE`,
+	); err != nil {
+		_ = relationWriter.Rollback(ctx)
+		t.Fatalf("relation writer could not continue with catalog DDL: %v", err)
+	}
+	if err := relationWriter.Commit(ctx); err != nil {
+		t.Fatalf("commit authority relation writer: %v", err)
+	}
+	got := callAdminBootstrap(
+		t,
+		terminal,
+		requestID,
+		keyHash[:],
+		subject,
+		eventID,
+		logicalTime,
+	)
+	if got.outcome != "created" {
+		t.Fatalf("bootstrap after relation writer drain = %#v", got)
+	}
+}
+
 func TestAdminBootstrapReplayFailsClosedWhenCommittedAuthorityDiverges(
 	t *testing.T,
 ) {
@@ -596,10 +791,7 @@ func TestAdminBootstrapReplayFailsClosedWhenCommittedAuthorityDiverges(
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := platformpostgres.NewMigrator(
-		admin,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
 	}
 
@@ -651,10 +843,7 @@ func TestAdminBootstrapReplayRejectsCorruptedReceiptFields(t *testing.T) {
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := platformpostgres.NewMigrator(
-		admin,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
 	}
 
@@ -710,10 +899,7 @@ func TestAdminBootstrapPostWriteGraphValidationRejectsInjectedAssignment(
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := platformpostgres.NewMigrator(
-		admin,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
 	}
 	if _, err := admin.Exec(ctx, `
@@ -960,10 +1146,7 @@ func TestAdminBootstrapRejectsUnexpectedCatalogAuthority(
 			admin := postgresPool(t)
 			requireBrokerFundingPostgres19Beta2(t, admin)
 			resetDurableSchemas(t, admin)
-			if err := platformpostgres.NewMigrator(
-				admin,
-				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-			).Migrate(ctx); err != nil {
+			if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
 				t.Fatalf("migrate admin bootstrap authority: %v", err)
 			}
 			if _, err := admin.Exec(ctx, `
@@ -1120,10 +1303,7 @@ func TestAdminBootstrapRejectsUnsafeTemporaryMemberAuthority(t *testing.T) {
 			admin := postgresPool(t)
 			requireBrokerFundingPostgres19Beta2(t, admin)
 			resetDurableSchemas(t, admin)
-			if err := platformpostgres.NewMigrator(
-				admin,
-				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-			).Migrate(ctx); err != nil {
+			if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
 				t.Fatalf("migrate admin bootstrap authority: %v", err)
 			}
 			login := fmt.Sprintf(
@@ -1210,10 +1390,7 @@ func TestAdminBootstrapUnknownCommitReplaysAfterTerminalRestart(t *testing.T) {
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := platformpostgres.NewMigrator(
-		admin,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
 	}
 
@@ -1275,10 +1452,7 @@ func TestAdminBootstrapAcknowledgesOnlyAfterCommitAndFreshSessionVerification(
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := platformpostgres.NewMigrator(
-		admin,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
 	}
 
@@ -1512,10 +1686,7 @@ func TestAdminBootstrapAuditReceiptRejectsOwnerTruncate(t *testing.T) {
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := platformpostgres.NewMigrator(
-		admin,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
 	}
 	terminal := runtimeRoleLoginPool(
@@ -1620,10 +1791,14 @@ func TestAdminBootstrapMigrationUpgradesPopulatedPreviousTipWithoutRewrite(
 	}
 
 	beforeDigest, beforeFiles := readAdminBootstrapPreservedState(t, admin)
-	if err := platformpostgres.NewMigrator(
-		admin,
-		migrationFilesThrough(t, adminBootstrapMigration),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		platformpostgres.NewMigrator(
+			admin,
+			migrationFilesThrough(t, adminBootstrapMigration),
+		),
+	); err != nil {
 		t.Fatalf("upgrade admin bootstrap authority: %v", err)
 	}
 	afterDigest, afterFiles := readAdminBootstrapPreservedState(t, admin)
@@ -1685,7 +1860,7 @@ func TestAdminBootstrapMigrationRejectsNonemptyGraphAndRetries(
 		admin,
 		migrationFilesThrough(t, adminBootstrapMigration),
 	)
-	err := current.Migrate(ctx)
+	err := migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 	if !adminBootstrapIsPostgresCode(err, "55000") {
 		t.Fatalf("nonempty graph migration error = %v, want 55000", err)
 	}
@@ -1696,7 +1871,11 @@ func TestAdminBootstrapMigrationRejectsNonemptyGraphAndRetries(
 	); err != nil {
 		t.Fatalf("remove rejected graph fixture: %v", err)
 	}
-	if err := current.Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); err != nil {
 		t.Fatalf("retry bootstrap migration after graph repair: %v", err)
 	}
 	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
@@ -1744,7 +1923,11 @@ func TestAdminBootstrapMigrationRejectsEnabledEventTriggers(t *testing.T) {
 		admin,
 		migrationFilesThrough(t, adminBootstrapMigration),
 	)
-	if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(err, "55000") {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); !adminBootstrapIsPostgresCode(err, "55000") {
 		t.Fatalf("enabled event-trigger migration error = %v, want 55000", err)
 	}
 	assertAdminBootstrapMigrationAbsent(t, admin)
@@ -1766,7 +1949,11 @@ func TestAdminBootstrapMigrationRejectsEnabledEventTriggers(t *testing.T) {
 		DROP FUNCTION public.observe_admin_bootstrap_ddl()`); err != nil {
 		t.Fatalf("remove enabled event-trigger fixture: %v", err)
 	}
-	if err := current.Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); err != nil {
 		t.Fatalf("retry migration after event-trigger repair: %v", err)
 	}
 	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
@@ -1801,7 +1988,11 @@ func TestAdminBootstrapMigrationFencesExactJournalCatalog(t *testing.T) {
 		admin,
 		migrationFilesThrough(t, adminBootstrapMigration),
 	)
-	if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(err, "55000") {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); !adminBootstrapIsPostgresCode(err, "55000") {
 		t.Fatalf("divergent journal migration error = %v, want 55000", err)
 	}
 	assertAdminBootstrapMigrationAbsent(t, admin)
@@ -1810,7 +2001,11 @@ func TestAdminBootstrapMigrationFencesExactJournalCatalog(t *testing.T) {
 			ON engine.schema_migrations`); err != nil {
 		t.Fatalf("repair migration journal catalog: %v", err)
 	}
-	if err := current.Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); err != nil {
 		t.Fatalf("retry migration after journal repair: %v", err)
 	}
 	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
@@ -1822,7 +2017,11 @@ func TestAdminBootstrapMigratorRejectsSuppressedJournalInsert(t *testing.T) {
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
 	files := migrationFilesThrough(t, adminBootstrapMigration)
-	if err := platformpostgres.NewMigrator(admin, files).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		platformpostgres.NewMigrator(admin, files),
+	); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
 	}
 
@@ -1882,7 +2081,11 @@ func TestAdminBootstrapMigratorRejectsSuppressedJournalInsert(t *testing.T) {
 			ON engine.schema_migrations`); err != nil {
 		t.Fatalf("repair suppressed journal insert: %v", err)
 	}
-	if err := current.Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); err != nil {
 		t.Fatalf("retry migration after journal-rule repair: %v", err)
 	}
 	if err := admin.QueryRow(ctx, `
@@ -2026,7 +2229,11 @@ func TestAdminBootstrapMigrationRevalidatesLockedJournalRows(t *testing.T) {
 	); err != nil {
 		t.Fatalf("repair previous-tip checksum: %v", err)
 	}
-	if err := current.Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); err != nil {
 		t.Fatalf("retry migration after journal repair: %v", err)
 	}
 	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
@@ -2056,7 +2263,11 @@ func TestAdminBootstrapMigrationRejectsDisabledInternalTriggers(t *testing.T) {
 		admin,
 		migrationFilesThrough(t, adminBootstrapMigration),
 	)
-	if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(err, "55000") {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); !adminBootstrapIsPostgresCode(err, "55000") {
 		t.Fatalf("disabled internal-trigger migration error = %v, want 55000", err)
 	}
 	assertAdminBootstrapMigrationAbsent(t, admin)
@@ -2064,7 +2275,11 @@ func TestAdminBootstrapMigrationRejectsDisabledInternalTriggers(t *testing.T) {
 		ALTER TABLE identity.rbac_admin_roles ENABLE TRIGGER ALL`); err != nil {
 		t.Fatalf("repair RBAC internal triggers: %v", err)
 	}
-	if err := current.Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); err != nil {
 		t.Fatalf("retry migration after internal-trigger repair: %v", err)
 	}
 	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
@@ -2104,7 +2319,11 @@ func TestAdminBootstrapMigrationRejectsExternalAuthoritySchemaOwners(
 				admin,
 				migrationFilesThrough(t, adminBootstrapMigration),
 			)
-			if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(
+			if err := migrateAdminBootstrapAfterTransientLockContention(
+				t,
+				ctx,
+				current,
+			); !adminBootstrapIsPostgresCode(
 				err,
 				"55000",
 			) {
@@ -2134,7 +2353,11 @@ func TestAdminBootstrapMigrationRejectsExternalAuthoritySchemaOwners(
 			); err != nil {
 				t.Fatalf("repair schema owner: %v", err)
 			}
-			if err := current.Migrate(ctx); err != nil {
+			if err := migrateAdminBootstrapAfterTransientLockContention(
+				t,
+				ctx,
+				current,
+			); err != nil {
 				t.Fatalf("retry migration after schema-owner repair: %v", err)
 			}
 			assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
@@ -2169,7 +2392,11 @@ func TestAdminBootstrapMigrationRejectsInheritedAuthorityRelations(
 		admin,
 		migrationFilesThrough(t, adminBootstrapMigration),
 	)
-	if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(err, "55000") {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); !adminBootstrapIsPostgresCode(err, "55000") {
 		t.Fatalf("inherited authority migration error = %v, want 55000", err)
 	}
 	assertAdminBootstrapMigrationAbsent(t, admin)
@@ -2177,8 +2404,144 @@ func TestAdminBootstrapMigrationRejectsInheritedAuthorityRelations(
 		DROP TABLE public.inherited_admin_assignments`); err != nil {
 		t.Fatalf("remove inherited authority relation: %v", err)
 	}
-	if err := current.Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); err != nil {
 		t.Fatalf("retry migration after inheritance repair: %v", err)
+	}
+	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
+}
+
+func TestAdminBootstrapMigrationMapsMissingObjectPrelockToDivergence(
+	t *testing.T,
+) {
+	for _, test := range []struct {
+		name       string
+		installSQL string
+	}{
+		{
+			name:       "missing audit schema",
+			installSQL: `DROP SCHEMA audit CASCADE`,
+		},
+		{
+			name: "missing permission function",
+			installSQL: `
+				DROP FUNCTION
+					identity.admin_has_permission(text,text,text)`,
+		},
+		{
+			name: "permission procedure replaces function",
+			installSQL: `
+				DROP FUNCTION
+					identity.admin_has_permission(text,text,text);
+				CREATE PROCEDURE identity.admin_has_permission(
+					text,
+					text,
+					text
+				)
+				LANGUAGE sql
+				AS 'SELECT'`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+			if err := platformpostgres.NewMigrator(
+				admin,
+				migrationFilesThrough(t, adminPermissionMigration),
+			).Migrate(ctx); err != nil {
+				t.Fatalf("apply previous migration tip: %v", err)
+			}
+			if _, err := admin.Exec(ctx, test.installSQL); err != nil {
+				t.Fatalf("install divergent object catalog: %v", err)
+			}
+
+			current := platformpostgres.NewMigrator(
+				admin,
+				migrationFilesThrough(t, adminBootstrapMigration),
+			)
+			err := migrateAdminBootstrapAfterTransientLockContention(
+				t,
+				ctx,
+				current,
+			)
+			if !adminBootstrapIsPostgresCode(err, "55000") {
+				t.Fatalf(
+					"divergent object catalog error = %v, want 55000",
+					err,
+				)
+			}
+			assertAdminBootstrapMigrationAbsent(t, admin)
+		})
+	}
+}
+
+func TestAdminBootstrapMigrationRejectsMissingEarlierObjectBeforeLaterWait(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminPermissionMigration),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("apply previous migration tip: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `
+		ALTER SCHEMA audit RENAME TO audit_prelock_missing`); err != nil {
+		t.Fatalf("hide earlier prelock schema: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), `
+			ALTER SCHEMA audit_prelock_missing RENAME TO audit`)
+	})
+
+	laterObjectTx, err := admin.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin later prelock object blocker: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = laterObjectTx.Rollback(context.Background())
+	})
+	if _, err := laterObjectTx.Exec(ctx, `
+		DROP FUNCTION identity.admin_has_permission(text,text,text)`); err != nil {
+		t.Fatalf("lock later prelock function object: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminBootstrapMigration),
+	)
+	migrateCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	err = current.Migrate(migrateCtx)
+	cancel()
+	if !adminBootstrapIsPostgresCode(err, "55000") {
+		t.Fatalf(
+			"missing earlier prelock object error = %v, want 55000",
+			err,
+		)
+	}
+	assertAdminBootstrapMigrationAbsent(t, admin)
+
+	if err := laterObjectTx.Rollback(ctx); err != nil {
+		t.Fatalf("release later prelock object blocker: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `
+		ALTER SCHEMA audit_prelock_missing RENAME TO audit`); err != nil {
+		t.Fatalf("restore earlier prelock schema: %v", err)
+	}
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); err != nil {
+		t.Fatalf("retry after prelock object repair: %v", err)
 	}
 	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
 }
@@ -2216,7 +2579,7 @@ func TestAdminBootstrapMigrationRejectsDivergentPermissionAuthority(
 		admin,
 		migrationFilesThrough(t, adminBootstrapMigration),
 	)
-	err := current.Migrate(ctx)
+	err := migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 	if !adminBootstrapIsPostgresCode(err, "55000") {
 		t.Fatalf("altered permission function migration error = %v, want 55000", err)
 	}
@@ -2244,7 +2607,7 @@ func TestAdminBootstrapMigrationRejectsDivergentPermissionAuthority(
 	); err != nil {
 		t.Fatalf("drop trusted RBAC constraint: %v", err)
 	}
-	err = current.Migrate(ctx)
+	err = migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 	if !adminBootstrapIsPostgresCode(err, "55000") {
 		t.Fatalf("missing RBAC constraint migration error = %v, want 55000", err)
 	}
@@ -2286,7 +2649,7 @@ func TestAdminBootstrapMigrationRejectsDivergentPermissionAuthority(
 	); err != nil {
 		t.Fatalf("alter immutable-change guard: %v", err)
 	}
-	err = current.Migrate(ctx)
+	err = migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 	if !adminBootstrapIsPostgresCode(err, "55000") {
 		t.Fatalf("altered immutable guard migration error = %v, want 55000", err)
 	}
@@ -2319,7 +2682,11 @@ $function$`,
 	); err != nil {
 		t.Fatalf("repair immutable-change guard: %v", err)
 	}
-	if err := current.Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); err != nil {
 		t.Fatalf("retry migration after immutable guard repair: %v", err)
 	}
 }
@@ -2389,10 +2756,11 @@ func TestAdminBootstrapMigrationRejectsUnsafeProvisionedRole(
 		)
 	})
 
-	err := platformpostgres.NewMigrator(
+	current := platformpostgres.NewMigrator(
 		admin,
 		migrationFilesThrough(t, adminBootstrapMigration),
-	).Migrate(ctx)
+	)
+	err := migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 	if !adminBootstrapIsPostgresCode(err, "42501") {
 		t.Fatalf("unsafe bootstrap role migration error = %v, want 42501", err)
 	}
@@ -2407,10 +2775,7 @@ func TestAdminBootstrapMigrationRejectsUnsafeProvisionedRole(
 	); err != nil {
 		t.Fatalf("replace unsafe parent with unsafe member: %v", err)
 	}
-	err = platformpostgres.NewMigrator(
-		admin,
-		migrationFilesThrough(t, adminBootstrapMigration),
-	).Migrate(ctx)
+	err = migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 	if !adminBootstrapIsPostgresCode(err, "42501") {
 		t.Fatalf("bootstrap role with member migration error = %v, want 42501", err)
 	}
@@ -2426,10 +2791,7 @@ func TestAdminBootstrapMigrationRejectsUnsafeProvisionedRole(
 	); err != nil {
 		t.Fatalf("install residual bootstrap function privilege: %v", err)
 	}
-	err = platformpostgres.NewMigrator(
-		admin,
-		migrationFilesThrough(t, adminBootstrapMigration),
-	).Migrate(ctx)
+	err = migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 	if !adminBootstrapIsPostgresCode(err, "42501") {
 		t.Fatalf("bootstrap role with function grant error = %v, want 42501", err)
 	}
@@ -2443,10 +2805,7 @@ func TestAdminBootstrapMigrationRejectsUnsafeProvisionedRole(
 	); err != nil {
 		t.Fatalf("install residual bootstrap schema privilege: %v", err)
 	}
-	err = platformpostgres.NewMigrator(
-		admin,
-		migrationFilesThrough(t, adminBootstrapMigration),
-	).Migrate(ctx)
+	err = migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 	if !adminBootstrapIsPostgresCode(err, "42501") {
 		t.Fatalf("bootstrap role with schema grant error = %v, want 42501", err)
 	}
@@ -2459,10 +2818,7 @@ func TestAdminBootstrapMigrationRejectsUnsafeProvisionedRole(
 	); err != nil {
 		t.Fatalf("install residual bootstrap ownership: %v", err)
 	}
-	err = platformpostgres.NewMigrator(
-		admin,
-		migrationFilesThrough(t, adminBootstrapMigration),
-	).Migrate(ctx)
+	err = migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 	if !adminBootstrapIsPostgresCode(err, "42501") {
 		t.Fatalf("bootstrap role with object ownership error = %v, want 42501", err)
 	}
@@ -2474,10 +2830,7 @@ func TestAdminBootstrapMigrationRejectsUnsafeProvisionedRole(
 	); err != nil {
 		t.Fatalf("install residual bootstrap default privilege: %v", err)
 	}
-	err = platformpostgres.NewMigrator(
-		admin,
-		migrationFilesThrough(t, adminBootstrapMigration),
-	).Migrate(ctx)
+	err = migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 	if !adminBootstrapIsPostgresCode(err, "42501") {
 		t.Fatalf("bootstrap role with default grant error = %v, want 42501", err)
 	}
@@ -2510,16 +2863,31 @@ func TestAdminBootstrapMigrationLockTimeoutRollsBackAndRetries(t *testing.T) {
 		admin,
 		migrationFilesThrough(t, adminBootstrapMigration),
 	)
-	err = current.Migrate(ctx)
+	migrateCtx, migrateCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer migrateCancel()
+	err = current.Migrate(migrateCtx)
 	if !adminBootstrapIsPostgresCode(err, "55P03") {
 		_ = lockingTx.Rollback(ctx)
 		t.Fatalf("contended bootstrap migration error = %v, want 55P03", err)
 	}
 	assertAdminBootstrapMigrationAbsent(t, admin)
+	lockCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if _, err := lockingTx.Exec(lockCtx, `
+		LOCK TABLE pg_catalog.pg_class IN ROW EXCLUSIVE MODE;
+		LOCK TABLE pg_catalog.pg_attribute IN ROW EXCLUSIVE MODE`,
+	); err != nil {
+		_ = lockingTx.Rollback(ctx)
+		t.Fatalf("relation blocker could not continue with catalog DDL: %v", err)
+	}
 	if err := lockingTx.Rollback(ctx); err != nil {
 		t.Fatalf("release bootstrap migration blocker: %v", err)
 	}
-	if err := current.Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); err != nil {
 		t.Fatalf("retry bootstrap migration after lock drain: %v", err)
 	}
 	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
@@ -2586,50 +2954,24 @@ func TestAdminBootstrapMigrationRevalidatesCatalogAfterWaitingForDDL(
 		admin,
 		migrationFilesThrough(t, adminBootstrapMigration),
 	)
-	migrationResult := make(chan error, 1)
-	go func() {
-		migrationResult <- current.Migrate(ctx)
-	}()
-
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		var waiting bool
-		if err := admin.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1
-				  FROM pg_catalog.pg_locks
-				 WHERE relation =
-					'identity.rbac_admin_roles'::pg_catalog.regclass
-				   AND mode = 'ShareRowExclusiveLock'
-				   AND NOT granted
-			)`,
-		).Scan(&waiting); err != nil {
-			_ = ddlTx.Rollback(ctx)
-			t.Fatalf("inspect waiting bootstrap migration lock: %v", err)
-		}
-		if waiting {
-			break
-		}
-		if time.Now().After(deadline) {
-			_ = ddlTx.Rollback(ctx)
-			t.Fatal("bootstrap migration did not wait behind concurrent DDL")
-		}
-		select {
-		case migrationErr := <-migrationResult:
-			_ = ddlTx.Rollback(ctx)
-			t.Fatalf(
-				"bootstrap migration completed before concurrent DDL: %v",
-				migrationErr,
-			)
-		case <-time.After(10 * time.Millisecond):
-		}
+	if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(
+		err,
+		"55P03",
+	) {
+		_ = ddlTx.Rollback(ctx)
+		t.Fatalf(
+			"migration during concurrent DDL error = %v, want 55P03",
+			err,
+		)
 	}
+	assertAdminBootstrapMigrationAbsent(t, admin)
 
 	if err := ddlTx.Commit(ctx); err != nil {
 		t.Fatalf("commit concurrent bootstrap catalog change: %v", err)
 	}
 
-	migrationErr := <-migrationResult
+	migrationErr :=
+		migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 	if !adminBootstrapIsPostgresCode(migrationErr, "55000") {
 		t.Fatalf(
 			"bootstrap migration after concurrent DDL error = %v, want 55000",
@@ -2644,8 +2986,410 @@ func TestAdminBootstrapMigrationRevalidatesCatalogAfterWaitingForDDL(
 		DROP FUNCTION public.concurrent_admin_assignment()`); err != nil {
 		t.Fatalf("repair concurrent bootstrap catalog change: %v", err)
 	}
-	if err := current.Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); err != nil {
 		t.Fatalf("retry bootstrap migration after catalog repair: %v", err)
+	}
+	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
+}
+
+func TestAdminBootstrapMigrationRejectsCatalogContentionWithoutDeadlock(
+	t *testing.T,
+) {
+	for _, testCase := range []struct {
+		name          string
+		heldCatalog   string
+		followCatalog string
+	}{
+		{
+			name:          "pg_proc then pg_class",
+			heldCatalog:   "pg_proc",
+			followCatalog: "pg_class",
+		},
+		{
+			name:          "pg_authid then pg_class",
+			heldCatalog:   "pg_authid",
+			followCatalog: "pg_class",
+		},
+		{
+			name:          "pg_class then pg_attribute",
+			heldCatalog:   "pg_class",
+			followCatalog: "pg_attribute",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := context.Background()
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+			if err := platformpostgres.NewMigrator(
+				admin,
+				migrationFilesThrough(t, adminPermissionMigration),
+			).Migrate(ctx); err != nil {
+				t.Fatalf("apply previous migration tip: %v", err)
+			}
+
+			catalogWriter, err := admin.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin catalog writer: %v", err)
+			}
+			target := "pg_catalog." +
+				pgx.Identifier{testCase.heldCatalog}.Sanitize()
+			if _, err := catalogWriter.Exec(
+				ctx,
+				"LOCK TABLE "+target+" IN ROW EXCLUSIVE MODE",
+			); err != nil {
+				_ = catalogWriter.Rollback(ctx)
+				t.Fatalf(
+					"lock %s as catalog writer: %v",
+					testCase.heldCatalog,
+					err,
+				)
+			}
+
+			current := platformpostgres.NewMigrator(
+				admin,
+				migrationFilesThrough(t, adminBootstrapMigration),
+			)
+			migrateCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			migrationErr := current.Migrate(migrateCtx)
+			if !adminBootstrapIsPostgresCode(migrationErr, "55P03") {
+				_ = catalogWriter.Rollback(ctx)
+				t.Fatalf(
+					"catalog contention error = %v, want 55P03",
+					migrationErr,
+				)
+			}
+			assertAdminBootstrapMigrationAbsent(t, admin)
+
+			follow := "pg_catalog." +
+				pgx.Identifier{testCase.followCatalog}.Sanitize()
+			lockCtx, lockCancel := context.WithTimeout(ctx, 2*time.Second)
+			defer lockCancel()
+			if _, err := catalogWriter.Exec(
+				lockCtx,
+				"LOCK TABLE "+follow+" IN ROW EXCLUSIVE MODE",
+			); err != nil {
+				_ = catalogWriter.Rollback(ctx)
+				t.Fatalf(
+					"catalog writer could not continue %s -> %s: %v",
+					testCase.heldCatalog,
+					testCase.followCatalog,
+					err,
+				)
+			}
+			if err := catalogWriter.Commit(ctx); err != nil {
+				t.Fatalf("commit ordered catalog writer: %v", err)
+			}
+			if err := migrateAdminBootstrapAfterTransientLockContention(
+				t,
+				ctx,
+				current,
+			); err != nil {
+				t.Fatalf("retry after catalog writer drain: %v", err)
+			}
+			assertMigrationHistoryTip(
+				t,
+				admin,
+				42,
+				adminBootstrapMigration,
+			)
+		})
+	}
+}
+
+func TestAdminBootstrapMigrationFencesFunctionObjectBeforeCatalogs(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminPermissionMigration),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("apply previous migration tip: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `
+		CREATE FUNCTION public.admin_bootstrap_lock_guard()
+		RETURNS void
+		LANGUAGE sql
+		AS 'SELECT'`); err != nil {
+		t.Fatalf("create function object lock guard: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), `
+			DROP FUNCTION IF EXISTS public.admin_bootstrap_lock_guard()`)
+	})
+
+	guardTx, err := admin.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin function object lock guard: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = guardTx.Rollback(context.Background())
+	})
+	if _, err := guardTx.Exec(ctx, `
+		SELECT pg_catalog.pg_get_object_address(
+			'function',
+			ARRAY['public', 'admin_bootstrap_lock_guard'],
+			ARRAY[]::text[]
+		)`); err != nil {
+		_ = guardTx.Rollback(ctx)
+		t.Fatalf("lock function object guard: %v", err)
+	}
+
+	dropTx, err := admin.Begin(ctx)
+	if err != nil {
+		_ = guardTx.Rollback(ctx)
+		t.Fatalf("begin multi-function drop: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = dropTx.Rollback(context.Background())
+	})
+	var dropPID int32
+	if err := dropTx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(
+		&dropPID,
+	); err != nil {
+		_ = dropTx.Rollback(ctx)
+		_ = guardTx.Rollback(ctx)
+		t.Fatalf("read multi-function drop backend PID: %v", err)
+	}
+	dropResult := make(chan error, 1)
+	go func() {
+		_, dropErr := dropTx.Exec(ctx, `
+			DROP FUNCTION
+				identity.admin_has_permission(text,text,text),
+				public.admin_bootstrap_lock_guard()`)
+		dropResult <- dropErr
+	}()
+	awaitAdminBootstrapFunctionObjectLockWait(
+		t,
+		admin,
+		dropResult,
+		dropPID,
+		"identity.admin_has_permission(text,text,text)",
+		"public.admin_bootstrap_lock_guard()",
+	)
+
+	current := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminBootstrapMigration),
+	)
+	migrateCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	migrationResult := make(chan error, 1)
+	go func() {
+		migrationResult <- current.Migrate(migrateCtx)
+	}()
+	awaitAdminBootstrapFunctionObjectAccessWait(
+		t,
+		admin,
+		migrationResult,
+		"identity.admin_has_permission(text,text,text)",
+	)
+
+	catalogProbe, err := admin.Begin(ctx)
+	if err != nil {
+		_ = guardTx.Rollback(ctx)
+		_ = dropTx.Rollback(ctx)
+		t.Fatalf("begin catalog progress probe: %v", err)
+	}
+	if _, err := catalogProbe.Exec(ctx, `
+		LOCK TABLE pg_catalog.pg_proc
+		IN ROW EXCLUSIVE MODE NOWAIT`); err != nil {
+		_ = catalogProbe.Rollback(ctx)
+		_ = guardTx.Rollback(ctx)
+		_ = dropTx.Rollback(ctx)
+		t.Fatalf(
+			"catalog writer blocked behind object-waiting migration: %v",
+			err,
+		)
+	}
+	if err := catalogProbe.Rollback(ctx); err != nil {
+		_ = guardTx.Rollback(ctx)
+		_ = dropTx.Rollback(ctx)
+		t.Fatalf("release catalog progress probe: %v", err)
+	}
+
+	var migrationErr error
+	select {
+	case migrationErr = <-migrationResult:
+	case <-time.After(2 * time.Second):
+		_ = guardTx.Rollback(ctx)
+		_ = dropTx.Rollback(ctx)
+		t.Fatal("function object contention exceeded its pre-fence bound")
+	}
+	if !adminBootstrapIsPostgresCode(migrationErr, "55P03") {
+		_ = guardTx.Rollback(ctx)
+		_ = dropTx.Rollback(ctx)
+		t.Fatalf(
+			"function object contention error = %v, want 55P03",
+			migrationErr,
+		)
+	}
+	assertAdminBootstrapMigrationAbsent(t, admin)
+
+	if err := guardTx.Rollback(ctx); err != nil {
+		_ = dropTx.Rollback(ctx)
+		t.Fatalf("release function object lock guard: %v", err)
+	}
+	select {
+	case err := <-dropResult:
+		if err != nil {
+			_ = dropTx.Rollback(ctx)
+			t.Fatalf("multi-function drop did not continue: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		_ = dropTx.Rollback(ctx)
+		t.Fatal("multi-function drop remained blocked after guard release")
+	}
+	if err := dropTx.Rollback(ctx); err != nil {
+		t.Fatalf("repair rolled-back multi-function drop: %v", err)
+	}
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); err != nil {
+		t.Fatalf("retry after function object blocker repair: %v", err)
+	}
+	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
+}
+
+func TestAdminBootstrapMigrationTimesOutBeforeObjectDeadlockDetection(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminPermissionMigration),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("apply previous migration tip: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `
+		CREATE FUNCTION public.admin_bootstrap_object_order_guard()
+		RETURNS void
+		LANGUAGE sql
+		AS 'SELECT'`); err != nil {
+		t.Fatalf("create object-order guard: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), `
+			DROP FUNCTION IF EXISTS
+				public.admin_bootstrap_object_order_guard()`)
+	})
+
+	guardTx, err := admin.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin object-order guard: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = guardTx.Rollback(context.Background())
+	})
+	if _, err := guardTx.Exec(ctx, `
+		SELECT pg_catalog.pg_get_object_address(
+			'function',
+			ARRAY['public', 'admin_bootstrap_object_order_guard'],
+			ARRAY[]::text[]
+		)`); err != nil {
+		t.Fatalf("lock object-order guard: %v", err)
+	}
+
+	dropTx, err := admin.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin reverse-order multi-function drop: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = dropTx.Rollback(context.Background())
+	})
+	var dropPID int32
+	if err := dropTx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(
+		&dropPID,
+	); err != nil {
+		t.Fatalf("read reverse-order drop backend PID: %v", err)
+	}
+	dropResult := make(chan error, 1)
+	go func() {
+		_, dropErr := dropTx.Exec(ctx, `
+			DROP FUNCTION
+				identity.admin_has_permission(text,text,text),
+				public.admin_bootstrap_object_order_guard(),
+				engine.reject_immutable_change()
+			CASCADE`)
+		dropResult <- dropErr
+	}()
+	awaitAdminBootstrapFunctionObjectLockWait(
+		t,
+		admin,
+		dropResult,
+		dropPID,
+		"identity.admin_has_permission(text,text,text)",
+		"public.admin_bootstrap_object_order_guard()",
+	)
+
+	current := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminBootstrapMigration),
+	)
+	migrateCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	migrationResult := make(chan error, 1)
+	go func() {
+		migrationResult <- current.Migrate(migrateCtx)
+	}()
+	awaitAdminBootstrapFunctionObjectAccessWait(
+		t,
+		admin,
+		migrationResult,
+		"identity.admin_has_permission(text,text,text)",
+	)
+	if err := guardTx.Rollback(ctx); err != nil {
+		t.Fatalf("release object-order guard: %v", err)
+	}
+
+	var migrationErr error
+	select {
+	case migrationErr = <-migrationResult:
+	case <-time.After(2 * time.Second):
+		t.Fatal("migration did not resolve reverse object-lock order")
+	}
+	if !adminBootstrapIsPostgresCode(migrationErr, "55P03") {
+		t.Fatalf(
+			"reverse object-lock order migration error = %v, want 55P03",
+			migrationErr,
+		)
+	}
+	assertAdminBootstrapMigrationAbsent(t, admin)
+
+	select {
+	case err := <-dropResult:
+		if err != nil {
+			t.Fatalf(
+				"reverse-order drop did not drain after migration timeout: %v",
+				err,
+			)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reverse-order drop remained blocked after migration timeout")
+	}
+	if err := dropTx.Rollback(ctx); err != nil {
+		t.Fatalf("repair reverse-order multi-function drop: %v", err)
+	}
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		current,
+	); err != nil {
+		t.Fatalf("retry after reverse object-order repair: %v", err)
 	}
 	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
 }
@@ -2655,14 +3399,12 @@ func TestAdminBootstrapMigrationFencesConcurrentTrustedFunctionReplacement(
 ) {
 	tests := []struct {
 		name          string
-		catalog       string
 		replacement   string
 		inspectBody   string
 		hostileMarker string
 	}{
 		{
-			name:    "permission function",
-			catalog: "pg_catalog.pg_proc",
+			name: "permission function",
 			replacement: `
 				CREATE OR REPLACE FUNCTION identity.admin_has_permission(
 					requested_subject text,
@@ -2683,8 +3425,7 @@ func TestAdminBootstrapMigrationFencesConcurrentTrustedFunctionReplacement(
 			hostileMarker: "SELECT true",
 		},
 		{
-			name:    "immutable guard",
-			catalog: "pg_catalog.pg_proc",
+			name: "immutable guard",
 			replacement: `
 				CREATE OR REPLACE FUNCTION engine.reject_immutable_change()
 				RETURNS trigger
@@ -2730,21 +3471,24 @@ func TestAdminBootstrapMigrationFencesConcurrentTrustedFunctionReplacement(
 				admin,
 				migrationFilesThrough(t, adminBootstrapMigration),
 			)
-			migrationResult := make(chan error, 1)
-			go func() {
-				migrationResult <- current.Migrate(ctx)
-			}()
-			awaitAdminBootstrapMigrationCatalogWait(
-				t,
-				admin,
-				migrationResult,
-				test.catalog,
-			)
+			if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(
+				err,
+				"55P03",
+			) {
+				_ = hostileTx.Rollback(ctx)
+				t.Fatalf(
+					"migration during concurrent function replacement "+
+						"error = %v, want 55P03",
+					err,
+				)
+			}
+			assertAdminBootstrapMigrationAbsent(t, admin)
 			if err := hostileTx.Commit(ctx); err != nil {
 				t.Fatalf("commit concurrent function replacement: %v", err)
 			}
 
-			migrationErr := <-migrationResult
+			migrationErr :=
+				migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 			if !adminBootstrapIsPostgresCode(migrationErr, "55000") {
 				t.Fatalf(
 					"migration after concurrent function replacement "+
@@ -2804,20 +3548,23 @@ func TestAdminBootstrapMigrationFencesConcurrentRoleAuthorityChange(
 				admin,
 				migrationFilesThrough(t, adminBootstrapMigration),
 			)
-			migrationResult := make(chan error, 1)
-			go func() {
-				migrationResult <- current.Migrate(ctx)
-			}()
-			awaitAdminBootstrapMigrationCatalogWait(
-				t,
-				admin,
-				migrationResult,
-				"pg_catalog.pg_authid",
-			)
+			if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(
+				err,
+				"55P03",
+			) {
+				_ = hostileTx.Rollback(ctx)
+				t.Fatalf(
+					"migration during concurrent role attribute change "+
+						"error = %v, want 55P03",
+					err,
+				)
+			}
+			assertAdminBootstrapMigrationAbsent(t, admin)
 			if err := hostileTx.Commit(ctx); err != nil {
 				t.Fatalf("commit concurrent role attribute change: %v", err)
 			}
-			migrationErr := <-migrationResult
+			migrationErr :=
+				migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 			if !adminBootstrapIsPostgresCode(migrationErr, "42501") {
 				t.Fatalf(
 					"migration after concurrent role attribute change "+
@@ -2887,20 +3634,23 @@ func TestAdminBootstrapMigrationFencesConcurrentRoleAuthorityChange(
 			admin,
 			migrationFilesThrough(t, adminBootstrapMigration),
 		)
-		migrationResult := make(chan error, 1)
-		go func() {
-			migrationResult <- current.Migrate(ctx)
-		}()
-		awaitAdminBootstrapMigrationCatalogWait(
-			t,
-			admin,
-			migrationResult,
-			"pg_catalog.pg_auth_members",
-		)
+		if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(
+			err,
+			"55P03",
+		) {
+			_ = hostileTx.Rollback(ctx)
+			t.Fatalf(
+				"migration during concurrent role membership change "+
+					"error = %v, want 55P03",
+				err,
+			)
+		}
+		assertAdminBootstrapMigrationAbsent(t, admin)
 		if err := hostileTx.Commit(ctx); err != nil {
 			t.Fatalf("commit concurrent role membership change: %v", err)
 		}
-		migrationErr := <-migrationResult
+		migrationErr :=
+			migrateAdminBootstrapAfterTransientLockContention(t, ctx, current)
 		if !adminBootstrapIsPostgresCode(migrationErr, "42501") {
 			t.Fatalf(
 				"migration after concurrent role membership change "+
@@ -2930,10 +3680,14 @@ func TestAdminBootstrapFencesConcurrentAuthorityACLUpgrade(t *testing.T) {
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := platformpostgres.NewMigrator(
-		admin,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		platformpostgres.NewMigrator(
+			admin,
+			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+		),
+	); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
 	}
 	terminal := runtimeRoleLoginPool(
@@ -2961,52 +3715,32 @@ func TestAdminBootstrapFencesConcurrentAuthorityACLUpgrade(t *testing.T) {
 		t.Fatalf("stage concurrent bootstrap ACL upgrade: %v", err)
 	}
 
-	bootstrapResult := make(chan error, 1)
-	go func() {
-		keyHash := sha256.Sum256([]byte("bootstrap-acl-race-key"))
-		var outcome string
-		bootstrapResult <- terminal.QueryRow(ctx, `
-			SELECT outcome
-			  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
-			"bootstrap-request-acl-race",
-			keyHash[:],
-			"admin::urn:xb:admin:00000000-0000-4000-8000-00000000008a",
-			"00000000-0000-4000-8000-00000000008a",
-			"2026-07-31T00:00:00.000000Z",
-			adminBootstrapMigrationChecksum(t),
-		).Scan(&outcome)
-	}()
-	awaitAdminBootstrapMigrationCatalogWait(
+	keyHash := sha256.Sum256([]byte("bootstrap-acl-race-key"))
+	assertAdminBootstrapSQLState(
 		t,
-		admin,
-		bootstrapResult,
-		"pg_catalog.pg_namespace",
+		terminal,
+		"55P03",
+		"bootstrap-request-acl-race",
+		keyHash[:],
+		"admin::urn:xb:admin:00000000-0000-4000-8000-00000000008a",
+		"00000000-0000-4000-8000-00000000008a",
+		"2026-07-31T00:00:00.000000Z",
 	)
+	assertAdminBootstrapAuthorityCounts(t, admin, 0, 0)
 	if err := hostileTx.Commit(ctx); err != nil {
 		t.Fatalf("commit concurrent bootstrap ACL upgrade: %v", err)
 	}
-	if err := <-bootstrapResult; !adminBootstrapIsPostgresCode(err, "55000") {
-		t.Fatalf(
-			"bootstrap after concurrent ACL upgrade error = %v, want 55000",
-			err,
-		)
-	}
-
-	var assignments, receipts int
-	if err := admin.QueryRow(ctx, `
-		SELECT
-			(SELECT count(*) FROM identity.rbac_admin_roles),
-			(SELECT count(*) FROM audit.admin_bootstrap_events)`,
-	).Scan(&assignments, &receipts); err != nil {
-		t.Fatalf("inspect rejected concurrent ACL upgrade: %v", err)
-	}
-	if assignments != 0 || receipts != 0 {
-		t.Fatalf(
-			"concurrent ACL rejection state = assignments %d receipts %d",
-			assignments,
-			receipts,
-		)
-	}
+	assertAdminBootstrapSQLState(
+		t,
+		terminal,
+		"55000",
+		"bootstrap-request-acl-race",
+		keyHash[:],
+		"admin::urn:xb:admin:00000000-0000-4000-8000-00000000008a",
+		"00000000-0000-4000-8000-00000000008a",
+		"2026-07-31T00:00:00.000000Z",
+	)
+	assertAdminBootstrapAuthorityCounts(t, admin, 0, 0)
 }
 
 func TestAdminBootstrapTransactionCannotBlockMigratorIndefinitely(t *testing.T) {
@@ -3014,10 +3748,14 @@ func TestAdminBootstrapTransactionCannotBlockMigratorIndefinitely(t *testing.T) 
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := platformpostgres.NewMigrator(
-		admin,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		platformpostgres.NewMigrator(
+			admin,
+			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+		),
+	); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
 	}
 	terminal := runtimeRoleLoginPool(
@@ -3064,10 +3802,7 @@ func TestAdminBootstrapTransactionCannotBlockMigratorIndefinitely(t *testing.T) 
 	if err := bootstrapTx.Rollback(ctx); err != nil {
 		t.Fatalf("release open bootstrap transaction: %v", err)
 	}
-	if err := platformpostgres.NewMigrator(
-		admin,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
 		t.Fatalf("retry migrator after bootstrap rollback: %v", err)
 	}
 }
@@ -3144,10 +3879,14 @@ func TestAdminBootstrapMigrationScrubsHostileGrantChains(t *testing.T) {
 		t.Fatalf("commit hostile bootstrap delegation: %v", err)
 	}
 
-	if err := platformpostgres.NewMigrator(
-		admin,
-		migrationFilesThrough(t, adminBootstrapMigration),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		platformpostgres.NewMigrator(
+			admin,
+			migrationFilesThrough(t, adminBootstrapMigration),
+		),
+	); err != nil {
 		t.Fatalf("apply bootstrap ACL scrub: %v", err)
 	}
 	for _, relation := range []string{
@@ -3214,10 +3953,14 @@ func TestAdminBootstrapConcurrentDistinctRequestsCreateOneAdmin(t *testing.T) {
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := platformpostgres.NewMigrator(
-		admin,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		platformpostgres.NewMigrator(
+			admin,
+			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+		),
+	); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
 	}
 
@@ -3235,10 +3978,12 @@ func TestAdminBootstrapConcurrentDistinctRequestsCreateOneAdmin(t *testing.T) {
 	)
 	start := make(chan struct{})
 	type result struct {
-		outcome string
-		err     error
+		outcome  string
+		attempts int
+		err      error
 	}
 	results := make(chan result, 2)
+	migrationChecksum := adminBootstrapMigrationChecksum(t)
 	var ready sync.WaitGroup
 	ready.Add(2)
 	invoke := func(
@@ -3251,26 +3996,22 @@ func TestAdminBootstrapConcurrentDistinctRequestsCreateOneAdmin(t *testing.T) {
 		defer ready.Done()
 		<-start
 		keyHash := sha256.Sum256([]byte(keyMaterial))
-		var got adminBootstrapResult
-		err := pool.QueryRow(ctx, `
-			SELECT outcome, admin_subject, role_name,
-			       configuration_version, event_id::text, logical_time_text
-			  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
-			requestID,
-			keyHash[:],
-			subject,
-			eventID,
-			"2026-07-31T00:00:00.000000Z",
-			adminBootstrapMigrationChecksum(t),
-		).Scan(
-			&got.outcome,
-			&got.adminSubject,
-			&got.roleName,
-			&got.configurationVersion,
-			&got.eventID,
-			&got.logicalTimeText,
-		)
-		results <- result{outcome: got.outcome, err: err}
+		got, attempts, err :=
+			queryAdminBootstrapAfterTransientLockContention(
+				ctx,
+				pool,
+				requestID,
+				keyHash[:],
+				subject,
+				eventID,
+				"2026-07-31T00:00:00.000000Z",
+				migrationChecksum,
+			)
+		results <- result{
+			outcome:  got.outcome,
+			attempts: attempts,
+			err:      err,
+		}
 	}
 
 	go invoke(
@@ -3294,6 +4035,13 @@ func TestAdminBootstrapConcurrentDistinctRequestsCreateOneAdmin(t *testing.T) {
 	created := 0
 	rejected := 0
 	for got := range results {
+		if got.attempts > 1 {
+			t.Logf(
+				"concurrent runtime bootstrap lock-contention retry "+
+					"reached its result on attempt %d",
+				got.attempts,
+			)
+		}
 		switch {
 		case got.err == nil && got.outcome == "created":
 			created++
@@ -3324,10 +4072,14 @@ func TestAdminBootstrapMigrationMakesPreviousArtifactSchemaAhead(t *testing.T) {
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := platformpostgres.NewMigrator(
-		admin,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		platformpostgres.NewMigrator(
+			admin,
+			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+		),
+	); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
 	}
 	if err := platformpostgres.NewMigrator(
@@ -3352,8 +4104,41 @@ func callAdminBootstrap(
 	logicalTime string,
 ) adminBootstrapResult {
 	t.Helper()
+	got, attempts, err := queryAdminBootstrapAfterTransientLockContention(
+		context.Background(),
+		pool,
+		requestID,
+		keyHash,
+		subject,
+		eventID,
+		logicalTime,
+		adminBootstrapMigrationChecksum(t),
+	)
+	if attempts > 1 {
+		t.Logf(
+			"explicit runtime bootstrap lock-contention retry succeeded "+
+				"on attempt %d",
+			attempts,
+		)
+	}
+	if err != nil {
+		t.Fatalf("bootstrap first admin: %v", err)
+	}
+	return got
+}
+
+func queryAdminBootstrapOnce(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	requestID string,
+	keyHash []byte,
+	subject string,
+	eventID string,
+	logicalTime string,
+	migrationChecksum []byte,
+) (adminBootstrapResult, error) {
 	var got adminBootstrapResult
-	if err := pool.QueryRow(context.Background(), `
+	err := pool.QueryRow(ctx, `
 		SELECT outcome, admin_subject, role_name,
 		       configuration_version, event_id::text, logical_time_text
 		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
@@ -3362,7 +4147,7 @@ func callAdminBootstrap(
 		subject,
 		eventID,
 		logicalTime,
-		adminBootstrapMigrationChecksum(t),
+		migrationChecksum,
 	).Scan(
 		&got.outcome,
 		&got.adminSubject,
@@ -3370,10 +4155,66 @@ func callAdminBootstrap(
 		&got.configurationVersion,
 		&got.eventID,
 		&got.logicalTimeText,
-	); err != nil {
-		t.Fatalf("bootstrap first admin: %v", err)
+	)
+	return got, err
+}
+
+func queryAdminBootstrapAfterTransientLockContention(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	requestID string,
+	keyHash []byte,
+	subject string,
+	eventID string,
+	logicalTime string,
+	migrationChecksum []byte,
+) (adminBootstrapResult, int, error) {
+	const (
+		attempts = 250
+		delay    = 20 * time.Millisecond
+	)
+	var last adminBootstrapResult
+	for attempt := 1; attempt <= attempts; attempt++ {
+		var err error
+		last, err = queryAdminBootstrapOnce(
+			ctx,
+			pool,
+			requestID,
+			keyHash,
+			subject,
+			eventID,
+			logicalTime,
+			migrationChecksum,
+		)
+		if !adminBootstrapIsPostgresCode(err, "55P03") {
+			return last, attempt, err
+		}
+		if attempt == attempts {
+			return last, attempt, fmt.Errorf(
+				"explicit runtime bootstrap lock contention remained "+
+					"after %d attempts: %w",
+				attempt,
+				err,
+			)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return last, attempt, fmt.Errorf(
+				"explicit runtime bootstrap lock-contention retry "+
+					"stopped after %d attempts: %w",
+				attempt,
+				ctx.Err(),
+			)
+		case <-timer.C:
+		}
 	}
-	return got
+	return last, attempts, errors.New(
+		"runtime bootstrap retry exhausted without a result",
+	)
 }
 
 func adminBootstrapMigrationChecksum(t *testing.T) []byte {
@@ -3423,25 +4264,68 @@ func assertAdminBootstrapSQLState(
 	logicalTime string,
 ) {
 	t.Helper()
-	var ignored adminBootstrapResult
-	err := pool.QueryRow(context.Background(), `
-		SELECT outcome, admin_subject, role_name,
-		       configuration_version, event_id::text, logical_time_text
-		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
+	assertAdminBootstrapSQLStateContext(
+		t,
+		context.Background(),
+		pool,
+		code,
 		requestID,
 		keyHash,
 		subject,
 		eventID,
 		logicalTime,
-		adminBootstrapMigrationChecksum(t),
-	).Scan(
-		&ignored.outcome,
-		&ignored.adminSubject,
-		&ignored.roleName,
-		&ignored.configurationVersion,
-		&ignored.eventID,
-		&ignored.logicalTimeText,
 	)
+}
+
+func assertAdminBootstrapSQLStateContext(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	code string,
+	requestID string,
+	keyHash []byte,
+	subject string,
+	eventID string,
+	logicalTime string,
+) {
+	t.Helper()
+	checksum := adminBootstrapMigrationChecksum(t)
+	var (
+		attempts int
+		err      error
+	)
+	if code == "55P03" {
+		_, err = queryAdminBootstrapOnce(
+			ctx,
+			pool,
+			requestID,
+			keyHash,
+			subject,
+			eventID,
+			logicalTime,
+			checksum,
+		)
+		attempts = 1
+	} else {
+		_, attempts, err = queryAdminBootstrapAfterTransientLockContention(
+			ctx,
+			pool,
+			requestID,
+			keyHash,
+			subject,
+			eventID,
+			logicalTime,
+			checksum,
+		)
+	}
+	if attempts > 1 {
+		t.Logf(
+			"explicit runtime bootstrap lock-contention retry reached "+
+				"SQLSTATE %s on attempt %d",
+			code,
+			attempts,
+		)
+	}
 	if !adminBootstrapIsPostgresCode(err, code) {
 		t.Fatalf("bootstrap SQLSTATE = %v, want %s", err, code)
 	}
@@ -3579,53 +4463,6 @@ func existingAdminBootstrapLoginPool(
 	return pool
 }
 
-func awaitAdminBootstrapMigrationCatalogWait(
-	t *testing.T,
-	admin *pgxpool.Pool,
-	migrationResult <-chan error,
-	catalog string,
-) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		var waiting bool
-		if err := admin.QueryRow(context.Background(), `
-			SELECT EXISTS (
-				SELECT 1
-				  FROM pg_catalog.pg_locks
-				 WHERE NOT granted
-				   AND (
-						locktype = 'advisory'
-						OR locktype = 'transactionid'
-						OR
-						(
-							relation = pg_catalog.to_regclass($1)
-							AND mode = 'ShareLock'
-						)
-				   )
-			)`,
-			catalog,
-		).Scan(&waiting); err != nil {
-			t.Fatalf("inspect waiting bootstrap catalog fence: %v", err)
-		}
-		if waiting {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("bootstrap migration did not wait at a catalog fence")
-		}
-		select {
-		case migrationErr := <-migrationResult:
-			t.Fatalf(
-				"bootstrap migration completed before concurrent catalog "+
-					"change committed: %v",
-				migrationErr,
-			)
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-}
-
 func awaitAdminBootstrapRelationLockWait(
 	t *testing.T,
 	admin *pgxpool.Pool,
@@ -3666,6 +4503,129 @@ func awaitAdminBootstrapRelationLockWait(
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+}
+
+func awaitAdminBootstrapFunctionObjectAccessWait(
+	t *testing.T,
+	admin *pgxpool.Pool,
+	result <-chan error,
+	function string,
+) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var waiting bool
+		if err := admin.QueryRow(context.Background(), `
+			SELECT EXISTS (
+				SELECT 1
+				  FROM pg_catalog.pg_locks
+				 WHERE locktype = 'object'
+				   AND classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+				   AND objid = $1::pg_catalog.regprocedure
+				   AND mode = 'AccessShareLock'
+				   AND NOT granted
+			)`,
+			function,
+		).Scan(&waiting); err != nil {
+			t.Fatalf("inspect migration function object lock wait: %v", err)
+		}
+		if waiting {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("migration did not reach the pre-fence object lock wait")
+		}
+		select {
+		case resultErr := <-result:
+			t.Fatalf(
+				"migration completed before function object wait: %v",
+				resultErr,
+			)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func awaitAdminBootstrapFunctionObjectLockWait(
+	t *testing.T,
+	admin *pgxpool.Pool,
+	result <-chan error,
+	pid int32,
+	heldFunction string,
+	waitedFunction string,
+) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var ready bool
+		if err := admin.QueryRow(context.Background(), `
+			SELECT
+				EXISTS (
+					SELECT 1
+					  FROM pg_catalog.pg_locks
+					 WHERE pid = $1
+					   AND locktype = 'object'
+					   AND classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+					   AND objid = $2::pg_catalog.regprocedure
+					   AND mode = 'AccessExclusiveLock'
+					   AND granted
+				)
+				AND EXISTS (
+					SELECT 1
+					  FROM pg_catalog.pg_locks
+					 WHERE pid = $1
+					   AND locktype = 'object'
+					   AND classid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+					   AND objid = $3::pg_catalog.regprocedure
+					   AND mode = 'AccessExclusiveLock'
+					   AND NOT granted
+				)`,
+			pid,
+			heldFunction,
+			waitedFunction,
+		).Scan(&ready); err != nil {
+			t.Fatalf("inspect multi-function object lock wait: %v", err)
+		}
+		if ready {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("multi-function drop did not reach object lock wait")
+		}
+		select {
+		case resultErr := <-result:
+			t.Fatalf(
+				"multi-function drop completed before guard release: %v",
+				resultErr,
+			)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func migrateAdminBootstrapCurrent(
+	t *testing.T,
+	ctx context.Context,
+	admin *pgxpool.Pool,
+) error {
+	t.Helper()
+	return migrateAdminBootstrapAfterTransientLockContention(
+		t,
+		ctx,
+		platformpostgres.NewMigrator(
+			admin,
+			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+		),
+	)
+}
+
+func migrateAdminBootstrapAfterTransientLockContention(
+	t *testing.T,
+	ctx context.Context,
+	migrator *platformpostgres.Migrator,
+) error {
+	t.Helper()
+	return (&currentTestMigrator{t: t, migrator: migrator}).Migrate(ctx)
 }
 
 func adminBootstrapIsPostgresCode(err error, code string) bool {

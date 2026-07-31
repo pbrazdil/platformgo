@@ -516,7 +516,26 @@ back the migration SQL. Migration 42 additionally fences the role, membership,
 event-trigger, class, attribute, inheritance, namespace, function,
 shared-dependency, and default-ACL catalogs; row-locks reused authority tuples;
 requires the migration owner to own `engine`, `identity`, and `audit` with no
-nonowner `CREATE`; and revalidates all six normal runtime roles. It
+nonowner `CREATE`; and revalidates all six normal runtime roles. Before taking
+the first catalog fence, it takes transaction-retained object locks in fixed
+order on the existing `audit` and `identity` schemas and reused immutable-guard
+and permission functions. Each pre-fence object-lock acquisition has a
+one-second lock timeout. These waits hold no protected catalog lock and prevent
+a multi-object DDL statement from forming an object-lock-to-catalog inverse
+cycle. A missing or wrong-kind object yields `55000` immediately because every
+resolved address must contain nonnull class and object identifiers. The
+transaction sets `deadlock_timeout` to two seconds, strictly beyond the
+one-second per-object lock timeout, so reverse multi-object ordering returns
+`55P03` and releases earlier locks before deadlock detection. PostgreSQL
+maintenance and DDL use incompatible catalog lock orders, so every protected
+catalog `SHARE` lock uses `NOWAIT`. Contention returns `55P03` and rolls back
+the complete attempt. The migrator does not automatically retry it, a `COMMIT`
+error, or another unknown outcome. After `55P03`, identify and drain the
+protected lock blocker, prove the exact predecessor state, and then
+explicitly retry the identical bytes. Protected catalog tuple locks and every
+later journal, RBAC, and audit relation fence also use `NOWAIT`, preventing a
+blocked tuple or relation writer from following with catalog DDL and closing
+an inverse lock cycle. It
 exact-validates `engine.schema_migrations`, then locks all four RBAC relations
 in fixed order. Validation covers standalone nonpartitioned topology, full
 relation shape, indexes, internal and user trigger behavior, rules, and
@@ -607,8 +626,11 @@ same authority when the prior transaction did not commit. Replay observability
 must not change that idempotent response. After the retry commits, repeat the
 fresh-session verification in step 4 before credential cleanup. SQLSTATE
 `22023` is a null, malformed, or noncanonical request; `22000` is an
-idempotency conflict; and `55000` is either an already-established or divergent
-authority requiring a halt and catalog/audit investigation.
+idempotency conflict; `55P03` is protected lock contention (catalog, journal,
+RBAC/audit, or migration/runtime fence) that rolls back the attempt and may be
+retried unchanged after the writer or maintenance operation drains; and
+`55000` is either an already-established or divergent authority requiring a
+halt and catalog/audit investigation.
 Inventory the exact receipt, assignment, fixed role/policy graph, both enabled
 immutability triggers, function definition and ACL, migration checksum, and
 actor before deciding whether to retry. There is intentionally no unassign,

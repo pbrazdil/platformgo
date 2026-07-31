@@ -21,28 +21,108 @@ BEGIN
 END
 $$;
 
+-- DDL and ACL statements below also acquire PostgreSQL object locks. Obtain
+-- every existing schema and function object lock before any catalog fence, in
+-- one fixed order. A bounded wait here holds no protected catalog lock, so a
+-- concurrent multi-object DDL statement can continue its catalog work without
+-- forming an object-lock -> catalog-lock inverse cycle.
+SET LOCAL deadlock_timeout = '2s';
+SET LOCAL lock_timeout = '1s';
+
+DO $$
+DECLARE
+    locked_classid pg_catalog.oid;
+    locked_objid pg_catalog.oid;
+BEGIN
+    SELECT address.classid, address.objid
+      INTO locked_classid, locked_objid
+      FROM pg_catalog.pg_get_object_address(
+               'schema',
+               ARRAY['audit'],
+               ARRAY[]::text[]
+           ) AS address;
+    IF locked_classid IS NULL OR locked_objid IS NULL OR locked_objid = 0 THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE =
+                'admin bootstrap authority object catalog is divergent';
+    END IF;
+
+    SELECT address.classid, address.objid
+      INTO locked_classid, locked_objid
+      FROM pg_catalog.pg_get_object_address(
+               'schema',
+               ARRAY['identity'],
+               ARRAY[]::text[]
+           ) AS address;
+    IF locked_classid IS NULL OR locked_objid IS NULL OR locked_objid = 0 THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE =
+                'admin bootstrap authority object catalog is divergent';
+    END IF;
+
+    SELECT address.classid, address.objid
+      INTO locked_classid, locked_objid
+      FROM pg_catalog.pg_get_object_address(
+               'function',
+               ARRAY['engine', 'reject_immutable_change'],
+               ARRAY[]::text[]
+           ) AS address;
+    IF locked_classid IS NULL OR locked_objid IS NULL OR locked_objid = 0 THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE =
+                'admin bootstrap authority object catalog is divergent';
+    END IF;
+
+    SELECT address.classid, address.objid
+      INTO locked_classid, locked_objid
+      FROM pg_catalog.pg_get_object_address(
+               'function',
+               ARRAY['identity', 'admin_has_permission'],
+               ARRAY['text', 'text', 'text']
+           ) AS address;
+    IF locked_classid IS NULL OR locked_objid IS NULL OR locked_objid = 0 THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE =
+                'admin bootstrap authority object catalog is divergent';
+    END IF;
+EXCEPTION
+    WHEN invalid_schema_name OR undefined_function OR wrong_object_type THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE =
+                'admin bootstrap authority object catalog is divergent';
+END
+$$;
+
+SET LOCAL lock_timeout = '5s';
+
 -- Global role, membership, namespace/function ACL, dependency, and
 -- default-privilege facts are shared outside the four RBAC relations. A
--- bounded SHARE fence makes any concurrent catalog writer finish before the
--- exact preflight obtains its snapshot, then retains the accepted authority
--- through commit.
-LOCK TABLE pg_catalog.pg_authid IN SHARE MODE;
-LOCK TABLE pg_catalog.pg_auth_members IN SHARE MODE;
-LOCK TABLE pg_catalog.pg_event_trigger IN SHARE MODE;
-LOCK TABLE pg_catalog.pg_class IN SHARE MODE;
-LOCK TABLE pg_catalog.pg_attribute IN SHARE MODE;
-LOCK TABLE pg_catalog.pg_inherits IN SHARE MODE;
-LOCK TABLE pg_catalog.pg_namespace IN SHARE MODE;
-LOCK TABLE pg_catalog.pg_proc IN SHARE MODE;
-LOCK TABLE pg_catalog.pg_shdepend IN SHARE MODE;
-LOCK TABLE pg_catalog.pg_default_acl IN SHARE MODE;
+-- bounded SHARE fence rejects any concurrent catalog writer before the exact
+-- preflight obtains its snapshot, then retains the accepted authority through
+-- commit. PostgreSQL maintenance and DDL use incompatible catalog lock orders,
+-- so never wait while retaining a partial catalog fence.
+LOCK TABLE pg_catalog.pg_default_acl IN SHARE MODE NOWAIT;
+LOCK TABLE pg_catalog.pg_shdepend IN SHARE MODE NOWAIT;
+LOCK TABLE pg_catalog.pg_attribute IN SHARE MODE NOWAIT;
+LOCK TABLE pg_catalog.pg_proc IN SHARE MODE NOWAIT;
+LOCK TABLE pg_catalog.pg_authid IN SHARE MODE NOWAIT;
+LOCK TABLE pg_catalog.pg_auth_members IN SHARE MODE NOWAIT;
+LOCK TABLE pg_catalog.pg_inherits IN SHARE MODE NOWAIT;
+LOCK TABLE pg_catalog.pg_namespace IN SHARE MODE NOWAIT;
+LOCK TABLE pg_catalog.pg_event_trigger IN SHARE MODE NOWAIT;
+LOCK TABLE pg_catalog.pg_class IN SHARE MODE NOWAIT;
 
 DO $$
 BEGIN
     PERFORM 1
       FROM pg_catalog.pg_event_trigger AS event_trigger
      ORDER BY event_trigger.oid
-     FOR UPDATE;
+     FOR UPDATE NOWAIT;
 
     IF EXISTS (
         SELECT 1
@@ -112,7 +192,7 @@ BEGIN
                )
            )
      ORDER BY procedure.oid
-     FOR UPDATE;
+     FOR UPDATE NOWAIT;
     GET DIAGNOSTICS locked_function_count = ROW_COUNT;
     IF locked_function_count <> 2 THEN
         RAISE EXCEPTION USING
@@ -134,7 +214,7 @@ BEGIN
                'audit'::pg_catalog.regnamespace
            )
      ORDER BY namespace.oid
-     FOR UPDATE;
+     FOR UPDATE NOWAIT;
     GET DIAGNOSTICS locked_row_count = ROW_COUNT;
     IF locked_row_count <> 3
         OR EXISTS (
@@ -173,7 +253,7 @@ BEGIN
                'identity.rbac_policies'::pg_catalog.regclass
            )
      ORDER BY relation.oid
-     FOR UPDATE;
+     FOR UPDATE NOWAIT;
     GET DIAGNOSTICS locked_row_count = ROW_COUNT;
     IF locked_row_count <> 5 THEN
         RAISE EXCEPTION USING
@@ -193,7 +273,7 @@ BEGIN
        AND attribute.attnum > 0
        AND NOT attribute.attisdropped
      ORDER BY attribute.attrelid, attribute.attnum
-     FOR UPDATE;
+     FOR UPDATE NOWAIT;
     GET DIAGNOSTICS locked_row_count = ROW_COUNT;
     IF locked_row_count <> 14 THEN
         RAISE EXCEPTION USING
@@ -203,7 +283,7 @@ BEGIN
 END
 $$;
 
-LOCK TABLE engine.schema_migrations IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE engine.schema_migrations IN SHARE ROW EXCLUSIVE MODE NOWAIT;
 
 DO $$
 DECLARE
@@ -344,13 +424,13 @@ $$;
 DO $$
 BEGIN
     EXECUTE
-        'LOCK TABLE identity.rbac_roles IN SHARE ROW EXCLUSIVE MODE';
+        'LOCK TABLE identity.rbac_roles IN SHARE ROW EXCLUSIVE MODE NOWAIT';
     EXECUTE
-        'LOCK TABLE identity.rbac_role_parents IN SHARE ROW EXCLUSIVE MODE';
+        'LOCK TABLE identity.rbac_role_parents IN SHARE ROW EXCLUSIVE MODE NOWAIT';
     EXECUTE
-        'LOCK TABLE identity.rbac_admin_roles IN SHARE ROW EXCLUSIVE MODE';
+        'LOCK TABLE identity.rbac_admin_roles IN SHARE ROW EXCLUSIVE MODE NOWAIT';
     EXECUTE
-        'LOCK TABLE identity.rbac_policies IN SHARE ROW EXCLUSIVE MODE';
+        'LOCK TABLE identity.rbac_policies IN SHARE ROW EXCLUSIVE MODE NOWAIT';
 EXCEPTION
     WHEN undefined_table THEN
         RAISE EXCEPTION USING
@@ -1020,15 +1100,16 @@ BEGIN
     -- then the same protected catalogs and RBAC relations as the migration.
     PERFORM pg_catalog.pg_advisory_xact_lock_shared(88288443778895);
     PERFORM pg_catalog.pg_advisory_xact_lock(88288443778896);
-    EXECUTE 'LOCK TABLE pg_catalog.pg_authid IN SHARE MODE';
-    EXECUTE 'LOCK TABLE pg_catalog.pg_auth_members IN SHARE MODE';
-    EXECUTE 'LOCK TABLE pg_catalog.pg_class IN SHARE MODE';
-    EXECUTE 'LOCK TABLE pg_catalog.pg_attribute IN SHARE MODE';
-    EXECUTE 'LOCK TABLE pg_catalog.pg_inherits IN SHARE MODE';
-    EXECUTE 'LOCK TABLE pg_catalog.pg_namespace IN SHARE MODE';
-    EXECUTE 'LOCK TABLE pg_catalog.pg_proc IN SHARE MODE';
-    EXECUTE 'LOCK TABLE pg_catalog.pg_shdepend IN SHARE MODE';
-    EXECUTE 'LOCK TABLE pg_catalog.pg_default_acl IN SHARE MODE';
+    -- Never wait while retaining a partial catalog fence.
+    EXECUTE 'LOCK TABLE pg_catalog.pg_default_acl IN SHARE MODE NOWAIT';
+    EXECUTE 'LOCK TABLE pg_catalog.pg_shdepend IN SHARE MODE NOWAIT';
+    EXECUTE 'LOCK TABLE pg_catalog.pg_attribute IN SHARE MODE NOWAIT';
+    EXECUTE 'LOCK TABLE pg_catalog.pg_proc IN SHARE MODE NOWAIT';
+    EXECUTE 'LOCK TABLE pg_catalog.pg_authid IN SHARE MODE NOWAIT';
+    EXECUTE 'LOCK TABLE pg_catalog.pg_auth_members IN SHARE MODE NOWAIT';
+    EXECUTE 'LOCK TABLE pg_catalog.pg_inherits IN SHARE MODE NOWAIT';
+    EXECUTE 'LOCK TABLE pg_catalog.pg_namespace IN SHARE MODE NOWAIT';
+    EXECUTE 'LOCK TABLE pg_catalog.pg_class IN SHARE MODE NOWAIT';
     PERFORM 1
       FROM pg_catalog.pg_proc AS procedure
      WHERE procedure.oid IN (
@@ -1040,7 +1121,7 @@ BEGIN
                )
            )
      ORDER BY procedure.oid
-     FOR UPDATE;
+     FOR UPDATE NOWAIT;
     GET DIAGNOSTICS locked_function_count = ROW_COUNT;
     IF locked_function_count <> 2 THEN
         RAISE EXCEPTION USING
@@ -1055,7 +1136,7 @@ BEGIN
                'audit'::pg_catalog.regnamespace
            )
      ORDER BY namespace.oid
-     FOR UPDATE;
+     FOR UPDATE NOWAIT;
     GET DIAGNOSTICS locked_function_count = ROW_COUNT;
     IF locked_function_count <> 3
         OR EXISTS (
@@ -1094,7 +1175,7 @@ BEGIN
                'audit.admin_bootstrap_events'::pg_catalog.regclass
            )
      ORDER BY relation.oid
-     FOR UPDATE;
+     FOR UPDATE NOWAIT;
     GET DIAGNOSTICS locked_function_count = ROW_COUNT;
     IF locked_function_count <> 6 THEN
         RAISE EXCEPTION USING
@@ -1114,19 +1195,19 @@ BEGIN
        AND attribute.attnum > 0
        AND NOT attribute.attisdropped
      ORDER BY attribute.attrelid, attribute.attnum
-     FOR UPDATE;
+     FOR UPDATE NOWAIT;
     GET DIAGNOSTICS locked_function_count = ROW_COUNT;
     IF locked_function_count <> 28 THEN
         RAISE EXCEPTION USING
             ERRCODE = '55000',
             MESSAGE = 'admin bootstrap authority is divergent';
     END IF;
-    LOCK TABLE engine.schema_migrations IN SHARE ROW EXCLUSIVE MODE;
-    LOCK TABLE identity.rbac_roles IN SHARE ROW EXCLUSIVE MODE;
-    LOCK TABLE identity.rbac_role_parents IN SHARE ROW EXCLUSIVE MODE;
-    LOCK TABLE identity.rbac_admin_roles IN SHARE ROW EXCLUSIVE MODE;
-    LOCK TABLE identity.rbac_policies IN SHARE ROW EXCLUSIVE MODE;
-    LOCK TABLE audit.admin_bootstrap_events IN SHARE ROW EXCLUSIVE MODE;
+    LOCK TABLE engine.schema_migrations IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE identity.rbac_roles IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE identity.rbac_role_parents IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE identity.rbac_admin_roles IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE identity.rbac_policies IN SHARE ROW EXCLUSIVE MODE NOWAIT;
+    LOCK TABLE audit.admin_bootstrap_events IN SHARE ROW EXCLUSIVE MODE NOWAIT;
 
     FOREACH relation_name IN ARRAY ARRAY[
         'engine.schema_migrations',

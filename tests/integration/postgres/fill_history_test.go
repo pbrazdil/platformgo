@@ -37,7 +37,8 @@ func TestFillFilledAtIsEngineExecutionTimeNotInsertNow(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(ctx); err != nil {
@@ -157,7 +158,8 @@ func TestFilterFillExecutionsRejectsRealizedPnLBeyondRegisteredCurrencyScale(
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(ctx); err != nil {
@@ -313,7 +315,8 @@ func TestFillsHistoryReadsAndPaginates(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(ctx); err != nil {
@@ -805,7 +808,8 @@ func TestFillRealizedIsolatesHedgedLegsByPosition(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 7); err != nil {
@@ -1056,7 +1060,8 @@ func TestFillsHistoryFiltersBySideAndTradeID(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(ctx); err != nil {
@@ -1182,7 +1187,8 @@ func TestFillHistoryReturnsSideAndTradeType(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(ctx); err != nil {
@@ -1503,7 +1509,8 @@ func TestFillOrderIDIsTheCorrelatableOrderURN(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(ctx); err != nil {
@@ -1595,7 +1602,8 @@ func TestFillHistoryQueriesUseKeysetIndex(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(ctx); err != nil {

@@ -927,7 +927,8 @@ func migrateBrokerFundingTestSchema(
 	pool *pgxpool.Pool,
 ) {
 	t.Helper()
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(ctx); err != nil {

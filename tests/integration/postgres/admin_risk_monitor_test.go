@@ -304,7 +304,8 @@ func migratedAdminRiskMonitorPools(
 	ctx := context.Background()
 	adminPool := postgresPool(t)
 	resetDurableSchemas(t, adminPool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		adminPool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 7); err != nil {

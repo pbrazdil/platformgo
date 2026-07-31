@@ -122,7 +122,8 @@ func TestOrderIntentIdempotencyPersistsOneReplayableAdmissionGraph(t *testing.T)
 	t.Logf("PostgreSQL server version: %s", serverVersion)
 
 	const shardID engine.ShardID = 7
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		rootPool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, shardID); err != nil {
