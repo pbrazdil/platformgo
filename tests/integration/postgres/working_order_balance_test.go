@@ -44,7 +44,8 @@ func TestAWorkingOrderLocksItsReservedMargin(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
 	const shardID = engine.ShardID(9)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, shardID); err != nil {
@@ -954,7 +955,8 @@ func TestEngineStoreRejectsCommandOutsideCommittedMarketHighWatermark(
 			pool := postgresPool(t)
 			resetDurableSchemas(t, pool)
 			const shardID = engine.ShardID(12)
-			if err := platformpostgres.NewMigrator(
+			if err := newCurrentTestMigrator(
+				t,
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 			).MigrateAndProvision(ctx, shardID); err != nil {
@@ -1116,7 +1118,8 @@ func TestTimerInputRetainsCommittedMarketHighWatermarkAcrossRecoveryAndRedeliver
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
 	const shardID engine.ShardID = 13
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, shardID); err != nil {
@@ -1322,7 +1325,8 @@ func TestEngineStoreRejectsTimerOutsideCommittedMarketHighWatermark(
 			pool := postgresPool(t)
 			resetDurableSchemas(t, pool)
 			const shardID engine.ShardID = 14
-			if err := platformpostgres.NewMigrator(
+			if err := newCurrentTestMigrator(
+				t,
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 			).MigrateAndProvision(ctx, shardID); err != nil {

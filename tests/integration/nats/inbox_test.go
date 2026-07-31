@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -59,11 +58,8 @@ func TestDuplicateDeliveryIsDedupedByTheInbox(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	pool := isolatedOutboxDatabase(t, ctx, postgresDSN)
-	if err := platformpostgres.NewMigrator(
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	pool := resetOutboxDatabase(t, ctx, postgresDSN)
+	if err := migrateNATSFixture(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `

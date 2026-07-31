@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
-
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -16,7 +14,8 @@ func TestFundingHistoryQueriesUseKeysetIndexes(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(ctx); err != nil {

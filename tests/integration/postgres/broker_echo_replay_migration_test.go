@@ -582,7 +582,7 @@ func TestBrokerEchoCapacityMigrationWaitsForSkewedApplicationExpiryAuthority(
 		brokerEchoReplayRowsSnapshot(t, pool, false),
 	)
 
-	if err := migrateBrokerEchoCurrentSchema(pool); err != nil {
+	if err := migrateBrokerEchoCurrentSchema(t, pool); err != nil {
 		t.Fatalf("retry skewed broker-echo migration after time catch-up: %v", err)
 	}
 	legacyMarker := false
@@ -914,7 +914,7 @@ func TestBrokerEchoReplayMigrationRejectsInvalidLiveLegacyShapesAtomically(
 				t.Fatalf("seed invalid live legacy replay: %v", err)
 			}
 
-			err := migrateBrokerEchoCurrentSchema(pool)
+			err := migrateBrokerEchoCurrentSchema(t, pool)
 			requireBrokerEchoPostgresCode(t, err, "55000")
 			assertBrokerEchoMigrationAbsent(t, pool)
 
@@ -958,7 +958,7 @@ func TestBrokerEchoReplayMigrationUsesBoundedLockAndRetriesAtomically(
 	}
 
 	startedAt := time.Now()
-	err = migrateBrokerEchoCurrentSchema(pool)
+	err = migrateBrokerEchoCurrentSchema(t, pool)
 	elapsed := time.Since(startedAt)
 	requireBrokerEchoPostgresCode(t, err, "55P03")
 	if elapsed < 4*time.Second || elapsed > 8*time.Second {
@@ -1020,7 +1020,7 @@ func TestBrokerEchoReplayMigrationEnforcesLiveRowBackfillBound(t *testing.T) {
 				t.Fatalf("seed %d bounded legacy rows: %v", test.rows, err)
 			}
 
-			err := migrateBrokerEchoCurrentSchema(pool)
+			err := migrateBrokerEchoCurrentSchema(t, pool)
 			if test.wantCode != "" {
 				requireBrokerEchoPostgresCode(t, err, test.wantCode)
 				assertBrokerEchoMigrationAbsent(t, pool)
@@ -1113,7 +1113,7 @@ func TestBrokerEchoReplayMigrationEnforcesPerPrincipalBackfillBound(
 				)
 			}
 
-			err := migrateBrokerEchoCurrentSchema(pool)
+			err := migrateBrokerEchoCurrentSchema(t, pool)
 			if test.wantCode != "" {
 				requireBrokerEchoPostgresCode(t, err, test.wantCode)
 				assertBrokerEchoCapacityIntermediateTip(t, pool)
@@ -4681,7 +4681,7 @@ func applyBrokerEchoPreviousSchema(t *testing.T, pool *pgxpool.Pool) {
 
 func applyBrokerEchoCurrentSchema(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	if err := migrateBrokerEchoCurrentSchema(pool); err != nil {
+	if err := migrateBrokerEchoCurrentSchema(t, pool); err != nil {
 		t.Fatalf("apply broker-echo exact replay migration: %v", err)
 	}
 }
@@ -4719,8 +4719,13 @@ func migrateBrokerEchoFinalGuardSchema(
 	).Migrate(context.Background())
 }
 
-func migrateBrokerEchoCurrentSchema(pool *pgxpool.Pool) error {
-	return platformpostgres.NewMigrator(
+func migrateBrokerEchoCurrentSchema(
+	t *testing.T,
+	pool *pgxpool.Pool,
+) error {
+	t.Helper()
+	return newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(context.Background())

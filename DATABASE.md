@@ -994,6 +994,111 @@ does not compose this authority yet: production activation requires a separate
 reviewed bootstrap and role-administration design with an auditable first
 administrator, recovery, and lockout procedure.
 
+### Phase 3 terminal first-administrator bootstrap authority
+
+Migration `20260731000100_phase3_admin_bootstrap_authority.up.sql` advances the
+immutable journal from tip 41 to tip 42. Before changing any RBAC row, it
+requires a pre-provisioned `platformgo_admin_bootstrap` role that is `NOLOGIN`,
+has no elevated role attributes, and has no role membership in either
+direction. The role must have no ACL or ownership dependency on any database
+object or default privilege. The migration also validates the exact four-table
+RBAC catalog and authorization-function owner, signature, security metadata,
+configuration, and body before reusing them, and refuses a nonempty RBAC graph.
+This one migration must run as a superuser. It rejects every enabled database
+event trigger before its first DDL. Before any catalog fence, it takes
+transaction-retained `AccessShareLock` object locks in fixed order on the
+existing `audit` and `identity` schemas and the reused immutable-guard and
+permission functions. Each object-lock acquisition has a one-second bound;
+these pre-fence waits cannot hold a catalog lock while a concurrent
+multi-object DDL statement continues its catalog work. Every resolved object
+address must have nonnull class and object identifiers; a missing or wrong-kind
+target returns `55000` before the next acquisition. The transaction-local
+deadlock detector is set to two seconds, so the one-second object lock timeout
+classifies a reverse multi-object order as `55P03` and releases earlier object
+locks before deadlock detection. Before validation it then takes bounded
+`SHARE` locks on the
+role, membership, event-trigger, class, attribute, inheritance, namespace,
+function, shared-dependency, and default-ACL catalogs; row-locks every reused
+authority tuple; requires the migration owner to own
+`engine`/`identity`/`audit` with no nonowner `CREATE`; and revalidates all six
+ordinary runtime roles inside that fence. PostgreSQL maintenance and DDL use
+incompatible catalog lock orders, so every protected catalog `SHARE` lock uses
+`NOWAIT`: contention returns `55P03` and rolls back the whole attempt instead
+of retaining a partial fence that could join a deadlock. Protected catalog
+tuple locks and every subsequent journal, RBAC, and audit relation fence also
+use `NOWAIT`, so neither a tuple nor relation blocker can follow with other
+catalog work and form the inverse cycle. For a definite pre-commit `55P03`,
+the migrator rolls back and returns the error for explicit operator handling.
+It never automatically retries this contention, a `COMMIT` error, or another
+unknown outcome. After identifying and draining the blocker, an operator may
+retry the identical migration bytes from the exact predecessor state. The
+migrator reloads and compares the complete
+applied manifest after acquiring the journal lock. The journal and relation
+catalogs include exact owner/kind/persistence/RLS, standalone
+nonpartitioned/noninherited topology, columns/defaults, constraints, indexes,
+internal and user triggers, rules, table/column ACLs, and graph state.
+All fences are retained through the checksum journal commit, so concurrent
+role, function, ACL, journal, or RBAC DDL cannot enter between validation and
+seeding. It then seeds exactly one fixed built-in
+`platformgo-superadmin` role with one `*/*/allow` policy; it does not seed an
+administrator, credential, session, token, or runtime route.
+
+`identity.bootstrap_first_admin(text,bytea,text,uuid,text,bytea)` is the sole
+mutation boundary. A member login supplies an explicit request ID, SHA-256
+idempotency key hash, canonical lowercase-UUID admin subject, event UUID,
+canonical microsecond UTC logical time, and the expected 32-byte checksum of
+migration 42. The checksum is a deployment precondition and is not part of the
+business idempotency hash. Under the journal lock, the function requires the
+exact 42-row tip, the requested migration-42 checksum, and the canonical
+ordered checksum of all 41 predecessor rows before any authority write. It
+rejects a null, malformed, or noncanonical input with SQLSTATE `22023`, before
+any authority write. It then derives an exact request hash,
+serializes through fixed advisory locks, and writes the sole assignment plus
+the append-only `audit.admin_bootstrap_events` receipt atomically within the
+caller's transaction. The returned row is provisional until that transaction
+commits successfully; durable acknowledgment requires a fresh-session
+verification after `COMMIT`. An identical retry returns the same persisted
+`created` result; replay observability is not encoded by changing the
+idempotent response. Reused keys or identities conflict, every later distinct
+bootstrap fails closed, and replay first verifies that the receipt's exact
+role, policy, parent, and assignment graph and every receipt field, including
+the occurrence time and canonical detail, still exist. Before returning
+`created`, the function holds the same protected-catalog, authority-tuple,
+RBAC, and audit fences. It verifies the exact inert bootstrap role and resolves
+the exact case-sensitive `session_user` row from `pg_authid` to its OID under
+the catalog fence rather than parsing the login as `regrole` text. This rejects
+numeric or case-colliding indirect callers. Migration and runtime owner checks
+likewise resolve the exact case-sensitive `current_user` catalog row to its OID;
+they never parse a dynamic owner name as `regrole`. It verifies every other
+temporary member as an unprivileged login with the same non-grantable
+membership options, the only two role dependencies and their exact ACL
+bits/grantors, zero other membership or shared dependency for every temporary
+member, both trusted function bodies and allowlists, exact
+`engine`/`identity`/`audit` schema ownership, and every journal/RBAC/audit
+relation field listed above, including zero journal user triggers and rewrite
+rules. The first-write path then revalidates the complete
+one-role, zero-parent, one-assignment, one-policy, and one-receipt graph;
+unexpected topology, constraints, defaults, indexes, rules, ACLs, or
+immediate/deferred trigger authority raises `55000` before any write and rolls
+back the caller's transaction.
+Row-level update/delete and statement-level truncate triggers make the receipt
+append-only even to the migration owner.
+
+The function is `SECURITY DEFINER` with `search_path=pg_catalog`.
+Its migration-owner superuser authority exists only to acquire the protected
+catalog and catalog-tuple fences above; exact function metadata/body and
+least-privilege schema/function ACLs are part of the fail-closed boundary.
+`platformgo_admin_bootstrap` receives only non-grantable schema usage and
+function execute; it has no raw RBAC or audit table privilege. The migration
+removes `PUBLIC`, default-derived, named, column, grant-option, and dependent
+same-object grants from all five authority relations and both permission
+functions. Existing identity, API-key, and audit relations are neither
+rewritten nor changed. A tip-41 binary must reject tip 42 as schema-ahead.
+The migrator requires exactly one inserted checksum row and reloads the full
+expected post-insert manifest before committing each migration.
+Operational invocation and unknown-commit recovery are defined in
+`OPERATIONS.md`.
+
 ## 11. Retention and partitioning
 
 High-volume append-only tables may be time partitioned:

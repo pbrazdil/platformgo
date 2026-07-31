@@ -153,7 +153,8 @@ func TestFillEffectiveLeverageV3RemediationUpgrade(t *testing.T) {
 		)
 	}
 
-	currentTip := platformpostgres.NewMigrator(
+	currentTip := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)

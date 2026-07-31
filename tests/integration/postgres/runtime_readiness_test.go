@@ -22,7 +22,8 @@ func TestRuntimeReadinessRequiresPostRecoveryAndPreDrainLeases(t *testing.T) {
 	defer cancel()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 7); err != nil {
@@ -130,7 +131,8 @@ func TestCommandAdmissionCannotCrossReadinessDrainBarrier(t *testing.T) {
 	defer cancel()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 7); err != nil {
@@ -274,7 +276,8 @@ func TestBeginReplaysCommittedCommandAfterReadinessDrain(t *testing.T) {
 	defer cancel()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 7); err != nil {
@@ -390,7 +393,8 @@ func TestBeginSerializesInFlightWinnerAcrossReadinessDrain(t *testing.T) {
 			defer cancel()
 			pool := postgresPool(t)
 			resetDurableSchemas(t, pool)
-			if err := platformpostgres.NewMigrator(
+			if err := newCurrentTestMigrator(
+				t,
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 			).MigrateAndProvision(ctx, 7); err != nil {

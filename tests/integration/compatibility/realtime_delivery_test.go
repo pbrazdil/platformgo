@@ -35,10 +35,7 @@ func TestRealtimeWorkerRetriesCommittedPublicationWithStableIdentity(t *testing.
 	if err := resetCompatibilityDatabase(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	if err := platformpostgres.NewMigrator(
-		pool,
-		migrations.Files,
-	).MigrateAndProvision(ctx, 23); err != nil {
+	if err := migrateAndProvisionCompatibilityFixture(t, ctx, pool, migrations.Files, 23); err != nil {
 		t.Fatal(err)
 	}
 	projectorURL := provisionRuntimeLogin(
@@ -452,10 +449,7 @@ func TestRealtimeGatewayJSONEventPublishAndToken(t *testing.T) {
 	if err := resetCompatibilityDatabase(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	if err := platformpostgres.NewMigrator(
-		pool,
-		migrations.Files,
-	).MigrateAndProvision(ctx, 24); err != nil {
+	if err := migrateAndProvisionCompatibilityFixture(t, ctx, pool, migrations.Files, 24); err != nil {
 		t.Fatal(err)
 	}
 	projectorURL := provisionRuntimeLogin(

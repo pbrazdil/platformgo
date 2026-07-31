@@ -490,6 +490,164 @@ cutover. A 40-file binary must reject this database as schema-ahead; rollback
 is a forward code artifact that still embeds migration 41, or an explicitly
 authorized complete pre-migration restore before any later durable fact.
 
+### Phase 3 terminal first-administrator bootstrap
+
+Migration `20260731000100_phase3_admin_bootstrap_authority.up.sql` is a
+forward-only cutover from exact tip 41 to tip 42. Before migration, keep the
+admin runtime uncomposed, verify the four RBAC relations are empty, and
+pre-provision `platformgo_admin_bootstrap` as `NOLOGIN`, `NOSUPERUSER`,
+`NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, and `NOBYPASSRLS`, with no role
+membership, object ownership, direct or grantable ACL, or default-privilege
+dependency. A missing or unsafe role returns `42501`; a divergent tip-41 RBAC
+catalog or nonempty graph returns `55000`. Migration 42 is an exceptional
+one-shot superuser migration so it can fence protected catalogs; do not grant
+that authority to the application or ordinary steady-state migrator. Inventory
+database event triggers before the window and disable every enabled one;
+migration 42 refuses to run while any remains enabled. On an existing database
+the migrator detects the journal read-only and skips preliminary no-op metadata
+DDL that could fire an event trigger. It bounds acquisition of its global
+advisory lock at five seconds before executing a migration. Every pending-file
+transaction then locks the journal and reloads the complete filename/checksum
+manifest before executing SQL; drift from the first read is a checksum mismatch
+and rolls back. After executing SQL, the migrator requires exactly one inserted
+checksum row and reloads the complete expected post-insert manifest before
+commit; a suppressed, rewritten, duplicated, or altered journal effect rolls
+back the migration SQL. Migration 42 additionally fences the role, membership,
+event-trigger, class, attribute, inheritance, namespace, function,
+shared-dependency, and default-ACL catalogs; row-locks reused authority tuples;
+resolves the exact case-sensitive `current_user` catalog row to its OID without
+parsing dynamic owner text as `regrole`; requires that owner to own `engine`,
+`identity`, and `audit` with no nonowner `CREATE`; and revalidates all six
+normal runtime roles. Before taking the first catalog fence, it takes
+transaction-retained object locks in fixed order on the existing `audit` and
+`identity` schemas and reused immutable-guard and permission functions. Each
+pre-fence object-lock acquisition has a
+one-second lock timeout. These waits hold no protected catalog lock and prevent
+a multi-object DDL statement from forming an object-lock-to-catalog inverse
+cycle. A missing or wrong-kind object yields `55000` immediately because every
+resolved address must contain nonnull class and object identifiers. The
+transaction sets `deadlock_timeout` to two seconds, strictly beyond the
+one-second per-object lock timeout, so reverse multi-object ordering returns
+`55P03` and releases earlier locks before deadlock detection. PostgreSQL
+maintenance and DDL use incompatible catalog lock orders, so every protected
+catalog `SHARE` lock uses `NOWAIT`. Contention returns `55P03` and rolls back
+the complete attempt. The migrator does not automatically retry it, a `COMMIT`
+error, or another unknown outcome. After `55P03`, identify and drain the
+protected lock blocker, prove the exact predecessor state, and then
+explicitly retry the identical bytes. Protected catalog tuple locks and every
+later journal, RBAC, and audit relation fence also use `NOWAIT`, preventing a
+blocked tuple or relation writer from following with catalog DDL and closing
+an inverse lock cycle. It
+exact-validates `engine.schema_migrations`, then locks all four RBAC relations
+in fixed order. Validation covers standalone nonpartitioned topology, full
+relation shape, indexes, internal and user trigger behavior, rules, and
+table/column/schema/function ACLs. It retains every fence through the checksum
+insert and commit and separately bounds lock acquisition at five seconds and
+each migration statement at fifteen seconds. Concurrent role, function, ACL,
+journal, topology, or RBAC DDL/data changes committed while the migration waits
+are therefore inspected and rejected. Either failure must leave migration 42
+unjournaled and all tip-41 state unchanged before a repaired retry; these are
+per-acquisition and per-statement bounds, not a fifteen-second end-to-end
+transaction deadline.
+
+After migration, verify the exact checksum and tip, the sole built-in
+`platformgo-superadmin` role, its sole `*/*/allow` policy, zero assignments and
+zero bootstrap events, unchanged preexisting identity/API-key/audit digests
+and relation files, the enabled exact internal FK and audit immutability
+triggers, zero rewrite rules, the exact trusted journal/RBAC/function catalog,
+standalone zero-inheritance topology, exact `engine`/`identity`/`audit` owners,
+and the documented table, column, schema, and function ACL allowlists. Restore
+only reviewed event triggers after this verification and before unrelated DDL.
+Do not activate an HTTP route, issue an admin token, or invent a
+password/session record.
+
+For the one terminal bootstrap:
+
+1. Create a short-lived, individually attributable login outside the
+   application, give it a strong out-of-band credential, and grant it only
+   membership in `platformgo_admin_bootstrap`. It must have no other parent
+   membership, object ownership, ACL/default-ACL dependency, or direct grant;
+   the function enforces this under the protected catalogs by resolving the
+   exact case-sensitive `session_user` catalog row to its OID. It never parses
+   the operator login as `regrole` text, so case-colliding and numeric indirect
+   logins cannot substitute another role.
+2. Generate and durably record one request ID, one random idempotency key whose
+   SHA-256 digest is supplied to PostgreSQL, one canonical
+   `admin::urn:xb:admin:<lowercase UUID>` subject, one event UUID, and one
+   canonical `YYYY-MM-DDTHH:MM:SS.ffffffZ` logical time. Record the reviewed
+   operator login with the exact `session_user` spelling; that spelling is
+   bound into the request hash and immutable receipt and must be reused for
+   replay or unknown-commit reconciliation. Record the reviewed
+   SHA-256 checksum of migration 42 from the exact deployed artifact as
+   `migration_checksum_sha256_hex`; the function uses it as a pre-write
+   deployment precondition.
+3. Connect as that login with client-side stop-on-error enabled. Run the
+   bootstrap in an explicit transaction and require a successful `COMMIT`:
+
+   ```sql
+   \set ON_ERROR_STOP on
+   BEGIN;
+
+   SELECT outcome, admin_subject, role_name, configuration_version,
+          event_id, logical_time_text
+     FROM identity.bootstrap_first_admin(
+       :'request_id',
+       pg_catalog.decode(:'idempotency_key_sha256_hex', 'hex'),
+       :'admin_subject',
+       :'event_id'::uuid,
+       :'logical_time',
+       pg_catalog.decode(:'migration_checksum_sha256_hex', 'hex')
+     );
+
+   COMMIT;
+   ```
+
+   Before writing, the function locks and exact-validates the `engine` namespace
+   plus the 42-row migration journal, including zero user triggers/rules, the
+   supplied migration-42 checksum, and the canonical ordered manifest through
+   migration 41. The returned `created` row is
+   provisional until PostgreSQL confirms `COMMIT`. Do not acknowledge success
+   or begin credential cleanup from a result observed inside an open
+   transaction.
+4. Close that session. From a fresh, independently authorized database session,
+   verify the exact migration checksum and the complete graph cardinality:
+   exactly one fixed built-in role, zero parents, exactly one intended
+   assignment, exactly one fixed `*/*/allow` policy, and exactly one immutable
+   receipt. Verify every receipt identity, request/key/request hash, event,
+   logical/occurrence time, role/version/outcome, and canonical detail field,
+   plus
+   `identity.admin_has_permission(subject, 'roles', 'read') = true`. Only this
+   post-commit observation establishes durable success. The stored wildcard
+   policy applies to each concrete catalog request; `*` is not itself a valid
+   requested resource or action.
+5. Only after step 4 succeeds, revoke the login's bootstrap-role membership,
+   disable its login credential, and remove the short-lived login after
+   retaining the actor name in the audit/operations record. The group role
+   remains inert as `NOLOGIN`.
+
+A connection loss before or during `COMMIT`, including after the function
+returned `created`, is an unknown outcome. Do not acknowledge success, remove
+the actor, or issue new identities or keys. Reconnect as the same actor and
+repeat the exact request; the exact persisted `created` response is returned
+again after a committed prior attempt, or the retry creates and commits the
+same authority when the prior transaction did not commit. Replay observability
+must not change that idempotent response. After the retry commits, repeat the
+fresh-session verification in step 4 before credential cleanup. SQLSTATE
+`22023` is a null, malformed, or noncanonical request; `22000` is an
+idempotency conflict; `55P03` is protected lock contention (catalog, journal,
+RBAC/audit, or migration/runtime fence) that rolls back the attempt and may be
+retried unchanged after the writer or maintenance operation drains; and
+`55000` is either an already-established or divergent authority requiring a
+halt and catalog/audit investigation.
+Inventory the exact receipt, assignment, fixed role/policy graph, both enabled
+immutability triggers, function definition and ACL, migration checksum, and
+actor before deciding whether to retry. There is intentionally no unassign,
+delete, role-edit, or lockout-recovery mutation in this slice. Any such
+capability and production admin route activation require a separately reviewed
+forward change. Rollback after a committed tip 42 is a forward-compatible code
+artifact or an explicitly authorized complete restore; never edit migration 42
+or its journal row.
+
 ### Phase 3 command market-sequence binding upgrade
 
 Migration

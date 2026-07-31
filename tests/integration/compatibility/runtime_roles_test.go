@@ -13,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	platformnats "github.com/upcomers-org/platformgo/internal/adapters/nats"
-	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	platformruntime "github.com/upcomers-org/platformgo/internal/runtime"
 	"github.com/upcomers-org/platformgo/internal/testsupport/postgresfixture"
 	"github.com/upcomers-org/platformgo/migrations"
@@ -37,10 +36,7 @@ func TestRuntimeCompositionRejectsPrivilegedAndWrongDatabaseLogins(
 	if err := resetCompatibilityDatabase(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
-	if err := platformpostgres.NewMigrator(
-		admin,
-		migrations.Files,
-	).MigrateAndProvision(ctx, 7); err != nil {
+	if err := migrateAndProvisionCompatibilityFixture(t, ctx, admin, migrations.Files, 7); err != nil {
 		t.Fatal(err)
 	}
 
@@ -154,6 +150,12 @@ func resetCompatibilityDatabase(
 				 WHERE rolname = 'platformgo_realtime_repair'
 			) THEN
 				CREATE ROLE platformgo_realtime_repair NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles
+				 WHERE rolname = 'platformgo_admin_bootstrap'
+			) THEN
+				CREATE ROLE platformgo_admin_bootstrap NOLOGIN;
 			END IF;
 		END;
 		$$`); err != nil {

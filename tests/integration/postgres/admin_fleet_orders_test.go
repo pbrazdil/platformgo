@@ -71,7 +71,8 @@ func TestAdminFleetOrdersBlotterReadsAndIsGated(t *testing.T) {
 	t.Run("fresh read authorization and admitted intent", func(t *testing.T) {
 		adminPool := postgresPool(t)
 		resetDurableSchemas(t, adminPool)
-		if err := platformpostgres.NewMigrator(
+		if err := newCurrentTestMigrator(
+			t,
 			adminPool,
 			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 		).MigrateAndProvision(ctx, 7); err != nil {
@@ -139,7 +140,8 @@ func TestAdminFleetOrdersBlotterReadsAndIsGated(t *testing.T) {
 	t.Run("materialized order survives reader reconstruction", func(t *testing.T) {
 		adminPool := postgresPool(t)
 		resetDurableSchemas(t, adminPool)
-		if err := platformpostgres.NewMigrator(
+		if err := newCurrentTestMigrator(
+			t,
 			adminPool,
 			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 		).Migrate(ctx); err != nil {

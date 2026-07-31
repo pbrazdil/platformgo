@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/upcomers-org/platformgo/internal/engine"
@@ -175,23 +176,76 @@ func (migrator *Migrator) Migrate(ctx context.Context) error {
 		return fmt.Errorf("migrate: %w", versionErr)
 	}
 
-	if _, lockErr := connection.Exec(
+	var previousLockTimeout string
+	if lockTimeoutErr := connection.QueryRow(
+		ctx,
+		"SELECT current_setting('lock_timeout')",
+	).Scan(&previousLockTimeout); lockTimeoutErr != nil {
+		return fmt.Errorf(
+			"migrate: read advisory lock timeout: %w",
+			lockTimeoutErr,
+		)
+	}
+	if _, lockTimeoutErr := connection.Exec(
+		ctx,
+		"SELECT set_config('lock_timeout', $1, false)",
+		migrationLockTimeout,
+	); lockTimeoutErr != nil {
+		return fmt.Errorf(
+			"migrate: configure advisory lock timeout: %w",
+			lockTimeoutErr,
+		)
+	}
+	_, lockErr := connection.Exec(
 		ctx,
 		"SELECT pg_advisory_lock($1)",
 		migrationAdvisoryLockKey,
-	); lockErr != nil {
+	)
+	_, restoreLockTimeoutErr := connection.Exec(
+		context.WithoutCancel(ctx),
+		"SELECT set_config('lock_timeout', $1, false)",
+		previousLockTimeout,
+	)
+	if lockErr != nil {
+		if restoreLockTimeoutErr != nil {
+			return fmt.Errorf(
+				"migrate: acquire advisory lock: %w; restore lock timeout: %w",
+				lockErr,
+				restoreLockTimeoutErr,
+			)
+		}
 		return fmt.Errorf("migrate: acquire advisory lock: %w", lockErr)
 	}
 	defer releaseMigrationLock(context.WithoutCancel(ctx), connection)
+	if restoreLockTimeoutErr != nil {
+		return fmt.Errorf(
+			"migrate: restore advisory lock timeout: %w",
+			restoreLockTimeoutErr,
+		)
+	}
 
-	if _, metadataErr := connection.Exec(ctx, `
-		CREATE SCHEMA IF NOT EXISTS engine;
-		CREATE TABLE IF NOT EXISTS engine.schema_migrations (
-			filename text PRIMARY KEY,
-			checksum bytea NOT NULL CHECK (octet_length(checksum) = 32),
-			applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
-		)`); metadataErr != nil {
-		return fmt.Errorf("migrate: initialize migration metadata: %w", metadataErr)
+	var migrationMetadataExists bool
+	if metadataErr := connection.QueryRow(
+		ctx,
+		`SELECT pg_catalog.to_regclass(
+			'engine.schema_migrations'
+		) IS NOT NULL`,
+	).Scan(&migrationMetadataExists); metadataErr != nil {
+		return fmt.Errorf("migrate: inspect migration metadata: %w", metadataErr)
+	}
+	if !migrationMetadataExists {
+		if _, metadataErr := connection.Exec(ctx, `
+			CREATE SCHEMA IF NOT EXISTS engine;
+			CREATE TABLE engine.schema_migrations (
+				filename text PRIMARY KEY,
+				checksum bytea NOT NULL CHECK (octet_length(checksum) = 32),
+				applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
+			)`); metadataErr != nil {
+			return fmt.Errorf(
+				"migrate: initialize migration metadata: %w",
+				metadataErr,
+			)
+		}
 	}
 
 	applied, err := loadAppliedMigrations(ctx, connection)
@@ -234,7 +288,7 @@ func (migrator *Migrator) Migrate(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("migrate %s: begin: %w", file.name, err)
 		}
-		if _, err := transaction.Exec(
+		if _, err = transaction.Exec(
 			ctx,
 			"SELECT set_config('lock_timeout', $1, true)",
 			migrationLockTimeout,
@@ -246,23 +300,76 @@ func (migrator *Migrator) Migrate(ctx context.Context) error {
 				err,
 			)
 		}
-		if _, err := transaction.Exec(ctx, string(file.contents)); err != nil {
+		if _, err = transaction.Exec(
+			ctx,
+			`LOCK TABLE engine.schema_migrations
+			 IN SHARE ROW EXCLUSIVE MODE`,
+		); err != nil {
+			_ = transaction.Rollback(ctx)
+			return fmt.Errorf(
+				"migrate %s: lock migration metadata: %w",
+				file.name,
+				err,
+			)
+		}
+		lockedApplied, err := loadAppliedMigrations(ctx, transaction)
+		if err != nil {
+			_ = transaction.Rollback(ctx)
+			return err
+		}
+		if !equalAppliedMigrations(applied, lockedApplied) {
+			_ = transaction.Rollback(ctx)
+			return fmt.Errorf(
+				"migrate %s: %w: journal changed before migration",
+				file.name,
+				ErrMigrationChecksumMismatch,
+			)
+		}
+		if _, err = transaction.Exec(ctx, string(file.contents)); err != nil {
 			_ = transaction.Rollback(ctx)
 			return fmt.Errorf("migrate %s: execute: %w", file.name, err)
 		}
-		if _, err := transaction.Exec(
+		tag, err := transaction.Exec(
 			ctx,
 			`INSERT INTO engine.schema_migrations (filename, checksum)
 			 VALUES ($1, $2)`,
 			file.name,
 			file.checksum[:],
-		); err != nil {
+		)
+		if err != nil {
 			_ = transaction.Rollback(ctx)
 			return fmt.Errorf("migrate %s: record checksum: %w", file.name, err)
+		}
+		if tag.RowsAffected() != 1 {
+			_ = transaction.Rollback(ctx)
+			return fmt.Errorf(
+				"migrate %s: record checksum: unexpected row count %d",
+				file.name,
+				tag.RowsAffected(),
+			)
+		}
+		expectedApplied := make(map[string][]byte, len(lockedApplied)+1)
+		for name, checksum := range lockedApplied {
+			expectedApplied[name] = append([]byte(nil), checksum...)
+		}
+		expectedApplied[file.name] = append([]byte(nil), file.checksum[:]...)
+		recordedApplied, err := loadAppliedMigrations(ctx, transaction)
+		if err != nil {
+			_ = transaction.Rollback(ctx)
+			return err
+		}
+		if !equalAppliedMigrations(expectedApplied, recordedApplied) {
+			_ = transaction.Rollback(ctx)
+			return fmt.Errorf(
+				"migrate %s: %w: journal changed while recording migration",
+				file.name,
+				ErrMigrationChecksumMismatch,
+			)
 		}
 		if err := transaction.Commit(ctx); err != nil {
 			return fmt.Errorf("migrate %s: commit: %w", file.name, err)
 		}
+		applied[file.name] = append([]byte(nil), file.checksum[:]...)
 	}
 	return nil
 }
@@ -586,7 +693,9 @@ func readMigrationFiles(migrations fs.FS) ([]migrationFile, error) {
 
 func loadAppliedMigrations(
 	ctx context.Context,
-	connection *pgxpool.Conn,
+	connection interface {
+		Query(context.Context, string, ...any) (pgx.Rows, error)
+	},
 ) (map[string][]byte, error) {
 	rows, err := connection.Query(
 		ctx,
@@ -612,4 +721,19 @@ func loadAppliedMigrations(
 		return nil, fmt.Errorf("migrate: iterate applied migrations: %w", err)
 	}
 	return applied, nil
+}
+
+func equalAppliedMigrations(
+	left map[string][]byte,
+	right map[string][]byte,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for name, checksum := range left {
+		if !bytes.Equal(checksum, right[name]) {
+			return false
+		}
+	}
+	return true
 }

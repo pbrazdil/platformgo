@@ -147,10 +147,7 @@ func TestIdempotencyReplayDoesNotBypassScopeGate(t *testing.T) {
 	if err := resetCompatibilityDatabase(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
-	if err := platformpostgres.NewMigrator(
-		admin,
-		migrations.Files,
-	).MigrateAndProvision(ctx, 71); err != nil {
+	if err := migrateAndProvisionCompatibilityFixture(t, ctx, admin, migrations.Files, 71); err != nil {
 		t.Fatal(err)
 	}
 

@@ -122,7 +122,8 @@ func TestCommandMarketSequenceBindingMigrationClassifiesPopulatedHistory(
 		t.Fatalf("read command relation file before upgrade: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -630,7 +631,8 @@ func TestCommandMarketSequenceBindingMigrationFencesPreverifiedLegacyEngine(
 		t.Fatalf("bind preverified legacy engine runtime: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -972,7 +974,8 @@ func TestCommandMarketSequenceBindingMigrationRefusesPendingExplicitHistory(
 		t.Fatalf("commit pending explicit command: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -1186,7 +1189,8 @@ func TestCommandMarketSequenceBindingMigrationPreservesRejectedMarketHistory(
 		t.Fatalf("commit rejected historical market seed: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -1549,7 +1553,8 @@ func TestCommandMarketSequenceBindingMigrationRecoversLegacyMarketFencePhysicall
 	if err := seed.Commit(ctx); err != nil {
 		t.Fatalf("commit mismatched historical market seed: %v", err)
 	}
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -1676,7 +1681,8 @@ func TestCommandMarketSequenceBindingMigrationWaitsForInFlightLegacyAdmission(
 		t.Fatalf("stage in-flight legacy admission: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -1760,7 +1766,8 @@ func TestCommandMarketSequenceBindingMigrationRejectsActiveEngineOwnerAndRetries
 	if err != nil {
 		t.Fatalf("acquire pre-cutover engine owner: %v", err)
 	}
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -1840,7 +1847,8 @@ func TestCommandMarketSequenceBindingMigrationRollsBackAndRetriesAfterLockTimeou
 		t.Fatalf("lock command table: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -1908,7 +1916,8 @@ func TestCommandMarketSequenceBindingMigrationFencesWaitingLegacyMarketWriter(
 		_ = blocker.Rollback(ctx)
 		t.Fatalf("block command ALTER: %v", err)
 	}
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -2077,7 +2086,8 @@ func TestCommandMarketSequenceBindingMigrationRollsBackOnStatementTimeout(
 			migrationExists,
 		)
 	}
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(ctx); err != nil {

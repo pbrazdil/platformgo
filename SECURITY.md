@@ -70,6 +70,40 @@ Validate at each boundary. Internal origin does not make a payload valid.
   owner's default-privilege template.
 - NATS permissions prevent cross-role subject publication/subscription.
 - Privileged risk settings, kill switch and account operations require explicit permissions and audit.
+- First-administrator authority is created only through the terminal bootstrap
+  function by a short-lived named login that is a member of the inert
+  `NOLOGIN` bootstrap role. The function stores only the idempotency-key hash,
+  writes the sole assignment and immutable audit receipt atomically in the
+  caller's transaction, and fails replay closed if the durable authority graph
+  diverges. Under protected system-catalog, authority-tuple, RBAC, and audit
+  locks, it verifies the exact bootstrap-role membership and ACL dependencies,
+  resolving the case-sensitive `session_user` catalog row directly to its OID
+  instead of parsing actor-controlled login text as `regrole`. Migration and
+  runtime definer-owner checks resolve exact case-sensitive `current_user`
+  catalog OIDs by the same rule. It verifies every temporary member's lack of
+  other membership/dependency, trusted function bodies/allowlists, exact schema
+  owners, full relation catalogs, standalone topology, internal and user
+  triggers, rules, indexes, and table/column ACLs before writing. Under the
+  migration-journal lock it also
+  requires exact `engine` namespace authority, zero journal user triggers or
+  rewrite rules, the exact 42-row tip, the caller-supplied migration-42
+  checksum, and the canonical ordered predecessor manifest. It revalidates the
+  complete graph and every receipt field after its writes and before returning;
+  unexpected
+  immediate or deferred catalog authority raises `55000` and rolls back.
+  Treat the returned result as provisional until successful `COMMIT`; close
+  that session and verify the checksum, exact total graph cardinality, every
+  receipt field, and permission from a fresh independently authorized session
+  before removing the operator membership or disabling its credential. The
+  one-shot migration rejects enabled database event triggers; the migrator
+  skips metadata DDL for an existing journal and revalidates its complete
+  manifest under the pending-file transaction lock. The migration exact-fences
+  journal catalog/data and authority namespace ownership. The migration and
+  definer owner require superuser authority only to acquire those
+  protected-catalog fences; the application never receives it.
+  Before migration the bootstrap role must own nothing and have no
+  privilege/default-ACL dependency, and afterward it has only identity schema
+  usage plus non-grantable bootstrap-function execution.
 
 ## 6. Input hardening
 

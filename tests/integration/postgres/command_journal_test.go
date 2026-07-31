@@ -18,7 +18,8 @@ import (
 func TestCommandJournalRejectsConflictsAndReplaysCompletedResponse(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 7); err != nil {
@@ -137,7 +138,8 @@ func TestCommandJournalRejectsConflictsAndReplaysCompletedResponse(t *testing.T)
 func TestCommandJournalRejectsOutOfOrderAndPrematureCompletion(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 7); err != nil {
@@ -218,7 +220,8 @@ func TestCommandJournalRejectsOutOfOrderAndPrematureCompletion(t *testing.T) {
 func TestCommandJournalDurablyBindsAccountToOneShard(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 7); err != nil {
@@ -310,7 +313,8 @@ func TestCommandJournalDurablyBindsAccountToOneShard(t *testing.T) {
 func TestDeploymentShardProvisioningDeterminesConcurrentAuthority(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(context.Background()); err != nil {
@@ -356,7 +360,8 @@ func TestDeploymentShardProvisioningDeterminesConcurrentAuthority(t *testing.T) 
 			t.Fatalf("%s rows before provisioning = %d, want 0", relation, count)
 		}
 	}
-	migrator := platformpostgres.NewMigrator(
+	migrator := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -486,7 +491,8 @@ func TestDeploymentShardProvisioningDeterminesConcurrentAuthority(t *testing.T) 
 func TestCommandJournalRejectsRedundantMetadataMismatch(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 7); err != nil {

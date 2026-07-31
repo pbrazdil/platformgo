@@ -30,7 +30,8 @@ func TestAdminPermissionAuthorizerUsesDurableAllowDenyHierarchy(t *testing.T) {
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		admin,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(ctx); err != nil {
@@ -177,7 +178,8 @@ func TestAdminPermissionEdgeComposesExactCatalogWithPostgreSQLAuthority(
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		admin,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(ctx); err != nil {

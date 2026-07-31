@@ -31,7 +31,8 @@ func TestPhase3IdentityCatalogAndDurableOrderIntentUsePostgreSQL(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 7); err != nil {
@@ -370,7 +371,8 @@ func TestBrokerEchoClaimConvergesUnderConcurrentDelivery(t *testing.T) {
 	ctx := context.Background()
 	adminPool := postgresPool(t)
 	resetDurableSchemas(t, adminPool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		adminPool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 7); err != nil {
@@ -663,7 +665,8 @@ func TestBrokerEchoCapacityIsSharedAndReplayPrecedesAdmission(t *testing.T) {
 	ctx := context.Background()
 	adminPool := postgresPool(t)
 	resetDurableSchemas(t, adminPool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		adminPool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 7); err != nil {
@@ -902,7 +905,8 @@ func TestBrokerEchoCapacitySerializesFinalPrincipalAndGlobalSlots(
 	ctx := context.Background()
 	adminPool := postgresPool(t)
 	resetDurableSchemas(t, adminPool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		adminPool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 7); err != nil {
@@ -1014,7 +1018,8 @@ func TestBrokerEchoClaimAndPurgeShareOneLockOrder(t *testing.T) {
 	defer cancel()
 	adminPool := postgresPool(t)
 	resetDurableSchemas(t, adminPool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		adminPool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 7); err != nil {

@@ -6,8 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 )
 
 type postgresExplainPlan struct {
@@ -21,7 +19,8 @@ func TestRealtimeClaimQueryUsesHotPathIndexes(t *testing.T) {
 	ctx := context.Background()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	migrator := platformpostgres.NewMigrator(
+	migrator := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)

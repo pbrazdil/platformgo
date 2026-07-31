@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -37,10 +36,7 @@ func TestOrderSubmissionBindsCommittedMarketWatermarkThroughJetStream(
 	t.Cleanup(pool.Close)
 	resetDurableSchemas(t, ctx, pool)
 	const shardID = engine.ShardID(31)
-	if err := platformpostgres.NewMigrator(
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(ctx, shardID); err != nil {
+	if err := migrateAndProvisionNATSFixture(ctx, pool, shardID); err != nil {
 		t.Fatalf("migrate market-watermark database: %v", err)
 	}
 

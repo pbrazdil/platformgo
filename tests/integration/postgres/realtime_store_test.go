@@ -20,7 +20,8 @@ import (
 func TestCommittedRealtimeOutboxPreservesChannelOrderAndBusinessIdentity(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 19); err != nil {
@@ -373,7 +374,8 @@ func TestCommittedRealtimeOutboxPreservesChannelOrderAndBusinessIdentity(t *test
 func TestImmediateFillRealtimeSequenceMatchesAuthoritativeViews(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 29); err != nil {
@@ -535,7 +537,8 @@ func TestImmediateFillRealtimeSequenceMatchesAuthoritativeViews(t *testing.T) {
 func TestRestingTriggerThenSameTimeAmendPublishesTriggeredOnce(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 30); err != nil {

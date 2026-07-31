@@ -31,7 +31,7 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 	resetDurableSchemas(t, pool)
 
 	migrations := os.DirFS(filepath.Join("..", "..", "..", "migrations"))
-	migrator := platformpostgres.NewMigrator(pool, migrations)
+	migrator := newCurrentTestMigrator(t, pool, migrations)
 	if err := migrator.Migrate(context.Background()); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
@@ -156,7 +156,8 @@ func TestCommandIdempotencyAuthorityMigrationUpgradesPopulatedBaseline(t *testin
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit populated previous baseline: %v", err)
 	}
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(migrationDirectory),
 	).Migrate(ctx); err != nil {
@@ -216,7 +217,8 @@ func TestPhase3MigrationsUpgradePopulatedPhase2Schema(t *testing.T) {
 		VALUES ('phase2-account', 17)`); err != nil {
 		t.Fatalf("seed populated Phase 2 schema: %v", err)
 	}
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(migrationDirectory),
 	).Migrate(ctx); err != nil {
@@ -489,7 +491,8 @@ func TestRealtimeMigrationUpgradesPopulatedPreviousSchema(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed previous schema: %v", err)
 	}
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -551,7 +554,8 @@ func TestRealtimeMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 		t.Fatalf("lock identity users: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -826,7 +830,8 @@ func TestFundingHistoryMigrationUpgradesPopulatedRealtimeSchema(t *testing.T) {
 		t.Fatalf("read pre-upgrade EngineStore funding: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -1046,7 +1051,8 @@ func TestFillHistoryMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 		t.Fatalf("lock fills: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -1216,7 +1222,8 @@ func TestFillFilterMigrationUsesBoundedLockAcquisitionAndRetriesCleanly(
 		t.Fatalf("lock fills: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -1311,7 +1318,8 @@ func TestRuntimeMigrationVerificationIsExactAndOldEngineIsFenced(t *testing.T) {
 		MigrateAndProvision(ctx, 31); err != nil {
 		t.Fatalf("apply previous schema: %v", err)
 	}
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -1548,7 +1556,8 @@ func TestPhase3UpgradeRejectsAmbiguousCandidateIdentityData(t *testing.T) {
 		CASCADE`); err != nil {
 		t.Fatalf("owner-directed candidate reset: %v", err)
 	}
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(migrationDirectory),
 	).Migrate(ctx); err != nil {
@@ -1651,7 +1660,8 @@ func TestPhase3UpgradeRejectsCandidateTimestampEqualToAuthorityCutover(
 	if _, err := pool.Exec(ctx, "TRUNCATE identity.users CASCADE"); err != nil {
 		t.Fatal(err)
 	}
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(migrationDirectory),
 	).Migrate(ctx); err != nil {
@@ -1807,7 +1817,8 @@ func TestPhase3UpgradeUsesBoundedLockAcquisitionAndRetriesCleanly(
 	if err := lockingTx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(migrationDirectory),
 	).Migrate(ctx); err != nil {
@@ -1866,7 +1877,8 @@ func TestCommandIdempotencyAuthorityMigrationRejectsCorruptBaseline(t *testing.T
 func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(context.Background()); err != nil {
@@ -2096,7 +2108,8 @@ func TestFinalBaselineAcceptsRepresentativePopulatedGraph(t *testing.T) {
 func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(context.Background(), 9); err != nil {
@@ -2318,7 +2331,9 @@ func TestFinalBaselineRuntimeRolesEnforceTransactionOwnership(t *testing.T) {
 	}
 }
 
-func TestFinalBaselineMigratesWithNoCreateRole(t *testing.T) {
+func TestAdminBootstrapMigrationRequiresSuperuserAfterNoCreateRoleBaseline(
+	t *testing.T,
+) {
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
 	dropTestMigratorRole(t, pool)
@@ -2362,11 +2377,17 @@ func TestFinalBaselineMigratesWithNoCreateRole(t *testing.T) {
 	if err := migratorPool.Ping(context.Background()); err != nil {
 		t.Fatalf("ping as NOCREATEROLE migrator: %v", err)
 	}
-	if err := platformpostgres.NewMigrator(
+	err = newCurrentTestMigrator(
+		t,
 		migratorPool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
-		t.Fatalf("Migrate as NOCREATEROLE role: %v", err)
+	).Migrate(context.Background())
+	if !adminBootstrapIsPostgresCode(err, "42501") {
+		t.Fatalf(
+			"admin bootstrap migration as NOCREATEROLE role error = %v, "+
+				"want 42501",
+			err,
+		)
 	}
 
 	var canCreateRole bool
@@ -2380,7 +2401,8 @@ func TestFinalBaselineMigratesWithNoCreateRole(t *testing.T) {
 	if canCreateRole {
 		t.Fatal("test migrator unexpectedly has CREATEROLE")
 	}
-	assertFinalMigrationHistory(t, pool)
+	assertMigrationHistoryTip(t, pool, 41, adminPermissionMigration)
+	assertAdminBootstrapMigrationAbsent(t, pool)
 }
 
 func TestFinalBaselineFailsWhenPreprovisionedRuntimeRoleIsMissing(t *testing.T) {
@@ -2404,7 +2426,8 @@ func TestFinalBaselineFailsWhenPreprovisionedRuntimeRoleIsMissing(t *testing.T) 
 		}
 	})
 
-	err := platformpostgres.NewMigrator(
+	err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).Migrate(context.Background())
@@ -2470,7 +2493,8 @@ func TestFinalBaselineRejectsUnsafeRuntimeRoleAttributes(t *testing.T) {
 				}
 			}()
 
-			err := platformpostgres.NewMigrator(
+			err := newCurrentTestMigrator(
+				t,
 				pool,
 				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 			).Migrate(context.Background())
@@ -2653,7 +2677,8 @@ func TestMigratorFinalBaselineRerunPreservesPopulatedData(t *testing.T) {
 	resetDurableSchemas(t, pool)
 
 	migrationDirectory := filepath.Join("..", "..", "..", "migrations")
-	migrator := platformpostgres.NewMigrator(
+	migrator := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(migrationDirectory),
 	)
@@ -2808,7 +2833,8 @@ func TestAccountSummaryMigrationUsesBoundedLockAndPreservesExistingAccounts(
 		t.Fatalf("hold account read lock: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -3190,7 +3216,8 @@ func TestUserAPIKeyMigrationUsesBoundedLockAndPreservesExistingUsers(
 		t.Fatalf("lock identity users against API-key migration: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -3758,7 +3785,8 @@ func TestBalanceProjectionHashV3MigrationGuardsHistoricalOrderReceipts(
 		t.Fatalf("seed pre-v3 order receipt: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -3884,7 +3912,8 @@ func TestBalanceProjectionHashV3MigrationGuardsCurrencyScaleConflicts(
 		t.Fatalf("seed conflicting currency scales: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -4148,7 +4177,8 @@ func TestBalanceProjectionHashV3MigrationRejectsMalformedCurrencyHistory(
 		t,
 		"20260726000700_phase3_user_api_keys.up.sql",
 	)
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -4383,7 +4413,8 @@ func TestBalanceProjectionHashV3MigrationValidatesOrderHistoryShape(
 		t,
 		"20260726000700_phase3_user_api_keys.up.sql",
 	)
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -4528,7 +4559,8 @@ func TestCurrencyScaleRegistrySerializesConcurrentFirstUse(t *testing.T) {
 	defer cancel()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	).MigrateAndProvision(ctx, 8); err != nil {
@@ -4782,7 +4814,8 @@ func TestBalanceProjectionHashV3MigrationLocksBeforeHistoricalGuard(
 		t.Fatalf("stage uncommitted old order receipt: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -4873,7 +4906,8 @@ func TestBalanceProjectionHashV3MigrationFencesConcurrentOldDuplicateWriter(
 		t.Fatalf("stage uncommitted old duplicate receipt: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -4955,7 +4989,8 @@ func TestBalanceProjectionHashV3MigrationUsesBoundedLockAndRetries(
 		t.Fatalf("lock receipts: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(
+	current := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
 	)
@@ -5059,8 +5094,8 @@ func assertFinalMigrationHistory(t *testing.T, pool *pgxpool.Pool) {
 	assertMigrationHistoryTip(
 		t,
 		pool,
-		41,
-		"20260730000500_phase3_admin_permission_authority.up.sql",
+		42,
+		"20260731000100_phase3_admin_bootstrap_authority.up.sql",
 	)
 }
 
@@ -5781,6 +5816,12 @@ func resetDurableSchemas(t *testing.T, pool *pgxpool.Pool) {
 				 WHERE rolname = 'platformgo_realtime_repair'
 			) THEN
 				CREATE ROLE platformgo_realtime_repair NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles
+				 WHERE rolname = 'platformgo_admin_bootstrap'
+			) THEN
+				CREATE ROLE platformgo_admin_bootstrap NOLOGIN;
 			END IF;
 		END;
 		$$`,

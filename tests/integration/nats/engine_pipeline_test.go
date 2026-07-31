@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -36,10 +35,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 	resetDurableSchemas(t, ctx, pool)
-	if err := platformpostgres.NewMigrator(
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(ctx, 9); err != nil {
+	if err := migrateAndProvisionNATSFixture(ctx, pool, 9); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -289,10 +285,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 		t.Fatalf("close restarted shard 9 processor: %v", err)
 	}
 	resetDurableSchemas(t, ctx, pool)
-	if err := platformpostgres.NewMigrator(
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(ctx, 10); err != nil {
+	if err := migrateAndProvisionNATSFixture(ctx, pool, 10); err != nil {
 		t.Fatalf("Migrate duplicate probe: %v", err)
 	}
 
@@ -449,10 +442,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 		t.Fatalf("close duplicate processor: %v", err)
 	}
 	resetDurableSchemas(t, ctx, pool)
-	if err := platformpostgres.NewMigrator(
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(ctx, 11); err != nil {
+	if err := migrateAndProvisionNATSFixture(ctx, pool, 11); err != nil {
 		t.Fatalf("Migrate poison probe: %v", err)
 	}
 
@@ -534,10 +524,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 		t.Fatalf("poison envelope produced %d durable faults, want 1", poisonFaults)
 	}
 	resetDurableSchemas(t, ctx, pool)
-	if err := platformpostgres.NewMigrator(
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(ctx, 15); err != nil {
+	if err := migrateAndProvisionNATSFixture(ctx, pool, 15); err != nil {
 		t.Fatalf("Migrate subject mismatch probe: %v", err)
 	}
 
@@ -668,10 +655,7 @@ func TestCommandOutboxJetStreamEnginePostgresPipeline(t *testing.T) {
 	for index, poisonKind := range []string{"different", "missing", "malformed"} {
 		resetDurableSchemas(t, ctx, pool)
 		shardID := engine.ShardID(16 + index)
-		if err := platformpostgres.NewMigrator(
-			pool,
-			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-		).MigrateAndProvision(ctx, shardID); err != nil {
+		if err := migrateAndProvisionNATSFixture(ctx, pool, shardID); err != nil {
 			t.Fatalf("Migrate %s ID poison probe: %v", poisonKind, err)
 		}
 		resetEngineShardStream(t, ctx, js, shardID)
@@ -815,10 +799,7 @@ func TestLaterAccountCommandCannotBypassOrderedPublication(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 	resetDurableSchemas(t, ctx, pool)
-	if err := platformpostgres.NewMigrator(
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(ctx, 14); err != nil {
+	if err := migrateAndProvisionNATSFixture(ctx, pool, 14); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -1064,10 +1045,7 @@ func TestEngineProcessorFailsClosedAfterOwnershipSessionLoss(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 	resetDurableSchemas(t, ctx, pool)
-	if err := platformpostgres.NewMigrator(
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(ctx, 29); err != nil {
+	if err := migrateAndProvisionNATSFixture(ctx, pool, 29); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -1201,10 +1179,7 @@ func TestReconciliationCannotWriteAroundActiveProcessor(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 	resetDurableSchemas(t, ctx, pool)
-	if err := platformpostgres.NewMigrator(
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(ctx, 30); err != nil {
+	if err := migrateAndProvisionNATSFixture(ctx, pool, 30); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -1338,10 +1313,7 @@ func TestAPIOutboxCannotPublishNonCommandEngineInput(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 	resetDurableSchemas(t, ctx, pool)
-	if err := platformpostgres.NewMigrator(
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(ctx, 23); err != nil {
+	if err := migrateAndProvisionNATSFixture(ctx, pool, 23); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	connection, err := gonats.Connect(natsURL)
@@ -1487,10 +1459,7 @@ func TestAPIOutboxCannotPublishDomainEvent(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 	resetDurableSchemas(t, ctx, pool)
-	if err := platformpostgres.NewMigrator(
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateNATSFixture(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	connection, err := gonats.Connect(natsURL)
@@ -1739,10 +1708,11 @@ func TestMalformedTransportInputsRemainDurablyHaltedAfterRestart(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			resetDurableSchemas(t, ctx, pool)
 			shardID := engine.ShardID(40 + index)
-			if err := platformpostgres.NewMigrator(
+			if err := migrateAndProvisionNATSFixture(
+				ctx,
 				pool,
-				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-			).MigrateAndProvision(ctx, shardID); err != nil {
+				shardID,
+			); err != nil {
 				t.Fatalf("Migrate: %v", err)
 			}
 			inputID := engine.IDFromSequence(engine.ID{}, uint64(400+index))
@@ -1854,6 +1824,12 @@ func resetDurableSchemas(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 				 WHERE rolname = 'platformgo_realtime_repair'
 			) THEN
 				CREATE ROLE platformgo_realtime_repair NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles
+				 WHERE rolname = 'platformgo_admin_bootstrap'
+			) THEN
+				CREATE ROLE platformgo_admin_bootstrap NOLOGIN;
 			END IF;
 		END;
 		$$`,
