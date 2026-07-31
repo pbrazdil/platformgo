@@ -61,10 +61,7 @@ func TestLoginAndOwnProfileWithCrossAudienceRejection(t *testing.T) {
 	if err := resetCompatibilityDatabase(ctx, adminPool); err != nil {
 		t.Fatal(err)
 	}
-	if err := platformpostgres.NewMigrator(
-		adminPool,
-		migrations.Files,
-	).MigrateAndProvision(ctx, 7); err != nil {
+	if err := migrateAndProvisionCompatibilityFixture(t, ctx, adminPool, migrations.Files, 7); err != nil {
 		t.Fatal(err)
 	}
 

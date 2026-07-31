@@ -45,10 +45,7 @@ func TestTraderListsOwnAccounts(t *testing.T) {
 	if err := resetCompatibilityDatabase(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	if err := platformpostgres.NewMigrator(
-		pool,
-		migrations.Files,
-	).MigrateAndProvision(ctx, 7); err != nil {
+	if err := migrateAndProvisionCompatibilityFixture(t, ctx, pool, migrations.Files, 7); err != nil {
 		t.Fatal(err)
 	}
 	passwordHash, err := application.HashPassword(

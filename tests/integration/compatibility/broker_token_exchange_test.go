@@ -60,10 +60,7 @@ func TestBrokerTokenExchangeOnBehalfOf(t *testing.T) {
 	if err := resetCompatibilityDatabase(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
-	if err := platformpostgres.NewMigrator(
-		admin,
-		migrations.Files,
-	).MigrateAndProvision(ctx, 73); err != nil {
+	if err := migrateAndProvisionCompatibilityFixture(t, ctx, admin, migrations.Files, 73); err != nil {
 		t.Fatal(err)
 	}
 	apiDatabaseURL := provisionRuntimeLogin(

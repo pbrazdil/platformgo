@@ -84,10 +84,7 @@ func TestScopeGate403sWriteRouteButAdmitsProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	const shardID engine.ShardID = 72
-	if err := platformpostgres.NewMigrator(
-		admin,
-		migrations.Files,
-	).MigrateAndProvision(ctx, shardID); err != nil {
+	if err := migrateAndProvisionCompatibilityFixture(t, ctx, admin, migrations.Files, shardID); err != nil {
 		t.Fatal(err)
 	}
 

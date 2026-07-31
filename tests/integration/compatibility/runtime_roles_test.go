@@ -13,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	platformnats "github.com/upcomers-org/platformgo/internal/adapters/nats"
-	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	platformruntime "github.com/upcomers-org/platformgo/internal/runtime"
 	"github.com/upcomers-org/platformgo/internal/testsupport/postgresfixture"
 	"github.com/upcomers-org/platformgo/migrations"
@@ -37,10 +36,7 @@ func TestRuntimeCompositionRejectsPrivilegedAndWrongDatabaseLogins(
 	if err := resetCompatibilityDatabase(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
-	if err := platformpostgres.NewMigrator(
-		admin,
-		migrations.Files,
-	).MigrateAndProvision(ctx, 7); err != nil {
+	if err := migrateAndProvisionCompatibilityFixture(t, ctx, admin, migrations.Files, 7); err != nil {
 		t.Fatal(err)
 	}
 
