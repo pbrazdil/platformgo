@@ -160,7 +160,7 @@ The stable foundation candidate passed policy, formatting, lint, complete
 serial PostgreSQL 19 Beta 2 tests, complete serial race tests, deterministic
 repeat tests, and vulnerability scanning; its migration, determinism, and
 security implementation-boundary reviews closed with no P0–P3 findings.
-The next bootstrap foundation adds one inactive terminal-only path for the
+The terminal bootstrap foundation adds one inactive terminal-only path for the
 first durable administrator. Forward migration 42 requires a safe
 pre-provisioned `NOLOGIN` bootstrap role and an empty RBAC graph, seeds one
 fixed built-in superadmin role and wildcard policy, and atomically commits one
@@ -175,6 +175,10 @@ global migrator lock is now itself bounded when an operator leaves a bootstrap
 transaction open. This does not create admin credentials, sessions, tokens,
 role-management mutations, HTTP composition, or lockout recovery; those remain
 separate reviewed work.
+Its stable candidate passed policy, formatting, lint, the complete serial
+PostgreSQL 19 Beta 2 suite, the complete serial race suite, deterministic
+repeat tests, and vulnerability scanning. Migration and determinism
+implementation-boundary review closed with no outstanding P0–P3 findings.
 The landed broker account point read preserves the accepted
 ten-field current-Go account summary while retaining the pinned source's
 generic `400 unknown account` for both absent and foreign ownership.
