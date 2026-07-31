@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	gonats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -51,7 +50,7 @@ func TestDirectDrainPublishesWithOutboxID(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	pool := isolatedOutboxDatabase(t, ctx, postgresDSN)
+	pool := resetOutboxDatabase(t, ctx, postgresDSN)
 	if err := platformpostgres.NewMigrator(
 		pool,
 		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
@@ -182,115 +181,18 @@ func TestDirectDrainPublishesWithOutboxID(t *testing.T) {
 	}
 }
 
-func isolatedOutboxDatabase(
+func resetOutboxDatabase(
 	t *testing.T,
 	ctx context.Context,
 	dsn string,
 ) *pgxpool.Pool {
 	t.Helper()
 
-	baseConfig, err := pgxpool.ParseConfig(dsn)
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		t.Fatalf("parse PostgreSQL integration URL: %v", err)
+		t.Fatalf("open PostgreSQL integration pool: %v", err)
 	}
-	adminConfig := baseConfig.Copy()
-	adminConfig.ConnConfig.Database = "postgres"
-	adminPool, err := pgxpool.NewWithConfig(ctx, adminConfig)
-	if err != nil {
-		t.Fatalf("open PostgreSQL maintenance pool: %v", err)
-	}
-	t.Cleanup(adminPool.Close)
-
-	var backendPID int64
-	if err := adminPool.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&backendPID); err != nil {
-		t.Fatalf("read PostgreSQL maintenance backend PID: %v", err)
-	}
-	databaseName := fmt.Sprintf("platformgo_test_outbox_%d", backendPID)
-	databaseIdentifier := pgx.Identifier{databaseName}.Sanitize()
-	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+databaseIdentifier); err != nil {
-		t.Fatalf("create isolated PostgreSQL database: %v", err)
-	}
-	if _, err := adminPool.Exec(ctx, `
-		DO $$
-		BEGIN
-			IF NOT EXISTS (
-				SELECT 1
-				  FROM pg_catalog.pg_roles
-				 WHERE rolname = 'platformgo_api'
-			) THEN
-				CREATE ROLE platformgo_api NOLOGIN;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1
-				  FROM pg_catalog.pg_roles
-				 WHERE rolname = 'platformgo_engine'
-			) THEN
-				CREATE ROLE platformgo_engine NOLOGIN;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1
-				  FROM pg_catalog.pg_roles
-				 WHERE rolname = 'platformgo_outbox'
-			) THEN
-				CREATE ROLE platformgo_outbox NOLOGIN;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1
-				  FROM pg_catalog.pg_roles
-				 WHERE rolname = 'platformgo_projector'
-			) THEN
-				CREATE ROLE platformgo_projector NOLOGIN;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1
-				  FROM pg_catalog.pg_roles
-				 WHERE rolname = 'platformgo_realtime'
-			) THEN
-				CREATE ROLE platformgo_realtime NOLOGIN;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1
-				  FROM pg_catalog.pg_roles
-				 WHERE rolname = 'platformgo_realtime_repair'
-			) THEN
-				CREATE ROLE platformgo_realtime_repair NOLOGIN;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1
-				  FROM pg_catalog.pg_roles
-				 WHERE rolname = 'platformgo_admin_bootstrap'
-			) THEN
-				CREATE ROLE platformgo_admin_bootstrap NOLOGIN;
-			END IF;
-		END
-		$$`,
-	); err != nil {
-		t.Fatalf("provision migration runtime roles: %v", err)
-	}
-
-	testConfig := baseConfig.Copy()
-	testConfig.ConnConfig.Database = databaseName
-	pool, err := pgxpool.NewWithConfig(ctx, testConfig)
-	if err != nil {
-		_, _ = adminPool.Exec(
-			context.WithoutCancel(ctx),
-			"DROP DATABASE "+databaseIdentifier+" WITH (FORCE)",
-		)
-		t.Fatalf("open isolated PostgreSQL database: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		cleanupContext, cancel := context.WithTimeout(
-			context.Background(),
-			10*time.Second,
-		)
-		defer cancel()
-		if _, err := adminPool.Exec(
-			cleanupContext,
-			"DROP DATABASE "+databaseIdentifier+" WITH (FORCE)",
-		); err != nil {
-			t.Errorf("drop isolated PostgreSQL database: %v", err)
-		}
-	})
+	t.Cleanup(pool.Close)
+	resetDurableSchemas(t, ctx, pool)
 	return pool
 }
