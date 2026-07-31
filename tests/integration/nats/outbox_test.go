@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -51,10 +50,7 @@ func TestDirectDrainPublishesWithOutboxID(t *testing.T) {
 	defer cancel()
 
 	pool := resetOutboxDatabase(t, ctx, postgresDSN)
-	if err := platformpostgres.NewMigrator(
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(ctx); err != nil {
+	if err := migrateNATSFixture(ctx, pool); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
