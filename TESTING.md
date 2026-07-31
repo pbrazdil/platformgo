@@ -234,21 +234,18 @@ Persist every discovered regression as a deterministic named test case.
 Required before merge:
 
 ```bash
-go test -p 1 ./... -count=1
-go test -race -p 1 ./... -count=1
+go test ./... -count=1
+go test -race ./... -count=1
 go test ./internal/... ./testkit/... -count=20
 ```
 
-The full and race suites serialize packages because the PostgreSQL integration
-packages use one explicitly disposable database and reset the same durable
-schemas. In-package tests remain serial unless their harness is explicitly
-approved for parallel execution. The repeat suite must not rely on test order.
+The repeat suite must not rely on test order.
 
 Longer scheduled suites should include:
 
 ```bash
-go test -p 1 ./... -count=100
-go test -race -p 1 ./... -count=10
+go test ./... -count=100
+go test -race ./... -count=10
 ```
 
 ## 11. Resource cleanup
