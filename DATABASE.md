@@ -1012,12 +1012,15 @@ token, or runtime route.
 boundary. A member login supplies an explicit request ID, SHA-256 idempotency
 key hash, canonical lowercase-UUID admin subject, event UUID, and canonical
 microsecond UTC logical time. The function derives an exact request hash,
-serializes through fixed advisory locks, and commits the sole assignment plus
-the append-only `audit.admin_bootstrap_events` receipt atomically. An identical
-retry returns the same persisted `created` result; replay observability is not
-encoded by changing the idempotent response. Reused keys or identities conflict, every
-later distinct bootstrap fails closed, and replay first verifies that the
-receipt's exact role, policy, parent, and assignment graph still exists.
+serializes through fixed advisory locks, and writes the sole assignment plus
+the append-only `audit.admin_bootstrap_events` receipt atomically within the
+caller's transaction. The returned row is provisional until that transaction
+commits successfully; durable acknowledgment requires a fresh-session
+verification after `COMMIT`. An identical retry returns the same persisted
+`created` result; replay observability is not encoded by changing the
+idempotent response. Reused keys or identities conflict, every later distinct
+bootstrap fails closed, and replay first verifies that the receipt's exact
+role, policy, parent, and assignment graph still exists.
 Row-level update/delete and statement-level truncate triggers make the receipt
 append-only even to the migration owner.
 

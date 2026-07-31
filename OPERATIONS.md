@@ -524,9 +524,13 @@ For the one terminal bootstrap:
    SHA-256 digest is supplied to PostgreSQL, one canonical
    `admin::urn:xb:admin:<lowercase UUID>` subject, one event UUID, and one
    canonical `YYYY-MM-DDTHH:MM:SS.ffffffZ` logical time.
-3. Connect as that login and invoke exactly:
+3. Connect as that login with client-side stop-on-error enabled. Run the
+   bootstrap in an explicit transaction and require a successful `COMMIT`:
 
    ```sql
+   \set ON_ERROR_STOP on
+   BEGIN;
+
    SELECT outcome, admin_subject, role_name, configuration_version,
           event_id, logical_time_text
      FROM identity.bootstrap_first_admin(
@@ -536,31 +540,43 @@ For the one terminal bootstrap:
        :'event_id'::uuid,
        :'logical_time'
      );
+
+   COMMIT;
    ```
 
-4. Verify `created`, one matching assignment, one immutable audit receipt, and
-   `identity.admin_has_permission(subject, 'roles', 'read') = true`. The stored
-   wildcard policy applies to each concrete catalog request; `*` is not itself
-   a valid requested resource or action.
-5. Revoke the login's bootstrap-role membership, disable its login credential,
-   and remove the short-lived login after retaining the actor name in the
-   audit/operations record. The group role remains inert as `NOLOGIN`.
+   The returned `created` row is provisional until PostgreSQL confirms
+   `COMMIT`. Do not acknowledge success or begin credential cleanup from a
+   result observed inside an open transaction.
+4. Close that session. From a fresh, independently authorized database session,
+   verify the exact migration checksum, one matching assignment, one immutable
+   audit receipt, and
+   `identity.admin_has_permission(subject, 'roles', 'read') = true`. Only this
+   post-commit observation establishes durable success. The stored wildcard
+   policy applies to each concrete catalog request; `*` is not itself a valid
+   requested resource or action.
+5. Only after step 4 succeeds, revoke the login's bootstrap-role membership,
+   disable its login credential, and remove the short-lived login after
+   retaining the actor name in the audit/operations record. The group role
+   remains inert as `NOLOGIN`.
 
-A connection loss before the result is an unknown outcome. Do not issue new
-identities or keys. Reconnect as the same actor and repeat the exact request;
-the exact persisted `created` response is returned again. Replay observability
-must not change that idempotent response. SQLSTATE `22000` is an idempotency
-conflict and `55000` is either an already-established or divergent authority
-requiring a halt and catalog/audit investigation. Inventory the exact receipt,
-assignment, fixed role/policy graph, both enabled immutability triggers,
-function definition and ACL, migration checksum, and actor before deciding
-whether to retry. There is
-intentionally no unassign, delete,
-role-edit, or lockout-recovery mutation in this slice. Any such capability and
-production admin route activation require a separately reviewed forward
-change. Rollback after a committed tip 42 is a forward-compatible code artifact
-or an explicitly authorized complete restore; never edit migration 42 or its
-journal row.
+A connection loss before or during `COMMIT`, including after the function
+returned `created`, is an unknown outcome. Do not acknowledge success, remove
+the actor, or issue new identities or keys. Reconnect as the same actor and
+repeat the exact request; the exact persisted `created` response is returned
+again after a committed prior attempt, or the retry creates and commits the
+same authority when the prior transaction did not commit. Replay observability
+must not change that idempotent response. After the retry commits, repeat the
+fresh-session verification in step 4 before credential cleanup. SQLSTATE
+`22000` is an idempotency conflict and `55000` is either an already-established
+or divergent authority requiring a halt and catalog/audit investigation.
+Inventory the exact receipt, assignment, fixed role/policy graph, both enabled
+immutability triggers, function definition and ACL, migration checksum, and
+actor before deciding whether to retry. There is intentionally no unassign,
+delete, role-edit, or lockout-recovery mutation in this slice. Any such
+capability and production admin route activation require a separately reviewed
+forward change. Rollback after a committed tip 42 is a forward-compatible code
+artifact or an explicitly authorized complete restore; never edit migration 42
+or its journal row.
 
 ### Phase 3 command market-sequence binding upgrade
 

@@ -356,6 +356,164 @@ func TestAdminBootstrapUnknownCommitReplaysAfterTerminalRestart(t *testing.T) {
 	}
 }
 
+func TestAdminBootstrapAcknowledgesOnlyAfterCommitAndFreshSessionVerification(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := platformpostgres.NewMigrator(
+		admin,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("migrate admin bootstrap authority: %v", err)
+	}
+
+	const login = "platformgo_admin_bootstrap_commit_test_login"
+	terminal := runtimeRoleLoginPool(
+		t,
+		admin,
+		login,
+		"platformgo_admin_bootstrap",
+	)
+	const (
+		requestID   = "bootstrap-request-commit-boundary"
+		subject     = "admin::urn:xb:admin:00000000-0000-4000-8000-00000000004a"
+		eventID     = "00000000-0000-4000-8000-00000000004a"
+		logicalTime = "2026-07-31T00:00:00.000000Z"
+	)
+	keyHash := sha256.Sum256([]byte("stable-bootstrap-commit-boundary-key"))
+
+	bootstrapTx, err := terminal.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin bootstrap transaction: %v", err)
+	}
+	var provisionalOutcome string
+	if err := bootstrapTx.QueryRow(ctx, `
+		SELECT outcome
+		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5)`,
+		requestID,
+		keyHash[:],
+		subject,
+		eventID,
+		logicalTime,
+	).Scan(&provisionalOutcome); err != nil {
+		_ = bootstrapTx.Rollback(ctx)
+		t.Fatalf("bootstrap inside explicit transaction: %v", err)
+	}
+	if provisionalOutcome != "created" {
+		_ = bootstrapTx.Rollback(ctx)
+		t.Fatalf("provisional outcome = %q, want created", provisionalOutcome)
+	}
+
+	var visibleBeforeCommit int
+	if err := admin.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM identity.rbac_admin_roles
+		 WHERE admin_subject = $1`,
+		subject,
+	).Scan(&visibleBeforeCommit); err != nil {
+		_ = bootstrapTx.Rollback(ctx)
+		t.Fatalf("inspect authority before commit: %v", err)
+	}
+	if visibleBeforeCommit != 0 {
+		_ = bootstrapTx.Rollback(ctx)
+		t.Fatalf(
+			"authority visible before commit = %d, want 0",
+			visibleBeforeCommit,
+		)
+	}
+	if err := bootstrapTx.Commit(ctx); err != nil {
+		t.Fatalf("commit bootstrap transaction: %v", err)
+	}
+	terminal.Close()
+
+	fresh := postgresPool(t)
+	var (
+		assignments       int
+		receipts          int
+		permitted         bool
+		migrationChecksum string
+	)
+	if err := fresh.QueryRow(ctx, `
+		SELECT
+			(
+				SELECT count(*)
+				  FROM identity.rbac_admin_roles
+				 WHERE admin_subject = $1
+			),
+			(
+				SELECT count(*)
+				  FROM audit.admin_bootstrap_events
+				 WHERE request_id = $2
+				   AND admin_subject = $1
+			),
+			identity.admin_has_permission($1, 'roles', 'read'),
+			(
+				SELECT pg_catalog.encode(checksum, 'hex')
+				  FROM engine.schema_migrations
+				 WHERE filename = $3
+			)`,
+		subject,
+		requestID,
+		adminBootstrapMigration,
+	).Scan(
+		&assignments,
+		&receipts,
+		&permitted,
+		&migrationChecksum,
+	); err != nil {
+		t.Fatalf("fresh-session durable bootstrap verification: %v", err)
+	}
+	const expectedMigrationChecksum = "cafa605e33b21577b96b982dd3fc4eca10672177943dd9a646d909545f6230ea"
+	if assignments != 1 ||
+		receipts != 1 ||
+		!permitted ||
+		migrationChecksum != expectedMigrationChecksum {
+		t.Fatalf(
+			"fresh-session authority = assignments %d receipts %d "+
+				"permitted %t checksum %q",
+			assignments,
+			receipts,
+			permitted,
+			migrationChecksum,
+		)
+	}
+
+	loginIdentifier := pgx.Identifier{login}.Sanitize()
+	if _, err := admin.Exec(ctx, fmt.Sprintf(`
+		REVOKE platformgo_admin_bootstrap FROM %s;
+		ALTER ROLE %s NOLOGIN`,
+		loginIdentifier,
+		loginIdentifier,
+	)); err != nil {
+		t.Fatalf("remove terminal bootstrap authority: %v", err)
+	}
+	var canLogin, remainsMember bool
+	if err := fresh.QueryRow(ctx, `
+		SELECT
+			role.rolcanlogin,
+			pg_catalog.pg_has_role(
+				role.rolname,
+				'platformgo_admin_bootstrap',
+				'member'
+			)
+		  FROM pg_catalog.pg_roles AS role
+		 WHERE role.rolname = $1`,
+		login,
+	).Scan(&canLogin, &remainsMember); err != nil {
+		t.Fatalf("verify terminal bootstrap removal: %v", err)
+	}
+	if canLogin || remainsMember {
+		t.Fatalf(
+			"terminal bootstrap login after cleanup = login %t member %t",
+			canLogin,
+			remainsMember,
+		)
+	}
+}
+
 func TestAdminBootstrapAuditReceiptRejectsOwnerTruncate(t *testing.T) {
 	ctx := context.Background()
 	admin := postgresPool(t)
