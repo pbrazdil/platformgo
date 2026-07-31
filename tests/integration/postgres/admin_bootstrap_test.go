@@ -1753,19 +1753,15 @@ func TestAdminBootstrapUnknownCommitReplaysAfterTerminalRestart(t *testing.T) {
 	logicalTime := "2026-07-31T00:00:00.000000Z"
 	keyHash := sha256.Sum256([]byte("stable-bootstrap-restart-key"))
 
-	if _, err := terminal.Exec(ctx, `
-		SELECT outcome, admin_subject, role_name, configuration_version,
-		       event_id, logical_time_text
-		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
+	_ = callAdminBootstrap(
+		t,
+		terminal,
 		requestID,
 		keyHash[:],
 		subject,
 		eventID,
 		logicalTime,
-		runtimeAuthorityACLMigrationChecksum(t),
-	); err != nil {
-		t.Fatalf("commit bootstrap before simulated lost acknowledgment: %v", err)
-	}
+	)
 	terminal.Close()
 
 	restarted := existingAdminBootstrapLoginPool(t, login)
