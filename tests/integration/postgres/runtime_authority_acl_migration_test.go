@@ -1581,7 +1581,7 @@ func TestRuntimeAuthorityACLMigrationLaterLockRollsBackAndRetries(t *testing.T) 
 		t.Fatalf("release later-relation blocker: %v", err)
 	}
 
-	current := platformpostgres.NewMigrator(pool, files)
+	current := newCurrentTestMigrator(t, pool, files)
 	if err := current.Migrate(ctx); err != nil {
 		t.Fatalf("retry runtime authority ACL migration: %v", err)
 	}
