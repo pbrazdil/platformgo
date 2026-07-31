@@ -210,6 +210,43 @@ BEGIN
             ERRCODE = '55000',
             MESSAGE = 'admin permission authority catalog is divergent';
     END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_catalog.pg_proc AS procedure
+          JOIN pg_catalog.pg_language AS language
+            ON language.oid = procedure.prolang
+         WHERE procedure.oid =
+                   'engine.reject_immutable_change()'::pg_catalog.regprocedure
+           AND procedure.proowner =
+                   current_user::pg_catalog.regrole::pg_catalog.oid
+           AND language.lanname = 'plpgsql'
+           AND procedure.provolatile = 'v'
+           AND NOT procedure.prosecdef
+           AND NOT procedure.proisstrict
+           AND NOT procedure.proleakproof
+           AND NOT procedure.proretset
+           AND procedure.prorettype = 'trigger'::pg_catalog.regtype
+           AND procedure.prokind = 'f'
+           AND procedure.proparallel = 'u'
+           AND procedure.pronargs = 0
+           AND pg_catalog.oidvectortypes(procedure.proargtypes) = ''
+           AND COALESCE(
+                   procedure.proconfig,
+                   ARRAY[]::text[]
+               ) = ARRAY[]::text[]
+           AND pg_catalog.sha256(
+                   pg_catalog.convert_to(procedure.prosrc, 'UTF8')
+               ) =
+                   pg_catalog.decode(
+                       '21f8d1c5780fa5134d4c75b1af5011ffa00c01fdfb0c23dd102896b10916e7af',
+                       'hex'
+                   )
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'admin permission authority catalog is divergent';
+    END IF;
 END
 $$;
 

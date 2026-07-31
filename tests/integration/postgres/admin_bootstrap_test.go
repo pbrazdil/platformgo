@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -624,6 +625,64 @@ func TestAdminBootstrapMigrationRejectsDivergentPermissionAuthority(
 	}
 	if constraintPresent {
 		t.Fatal("rejected migration recreated divergent RBAC constraint")
+	}
+
+	resetDurableSchemas(t, admin)
+	if err := previous.Migrate(ctx); err != nil {
+		t.Fatalf("reapply previous tip for immutable guard fixture: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `
+		CREATE OR REPLACE FUNCTION engine.reject_immutable_change()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $function$
+		BEGIN
+			IF TG_OP = 'DELETE' THEN
+				RETURN OLD;
+			ELSIF TG_OP = 'UPDATE' THEN
+				RETURN NEW;
+			END IF;
+			RETURN NULL;
+		END
+		$function$`,
+	); err != nil {
+		t.Fatalf("alter immutable-change guard: %v", err)
+	}
+	err = current.Migrate(ctx)
+	if !adminBootstrapIsPostgresCode(err, "55000") {
+		t.Fatalf("altered immutable guard migration error = %v, want 55000", err)
+	}
+	assertAdminBootstrapMigrationAbsent(t, admin)
+	var alteredGuardBody string
+	if err := admin.QueryRow(ctx, `
+		SELECT procedure.prosrc
+		  FROM pg_catalog.pg_proc AS procedure
+		 WHERE procedure.oid =
+			'engine.reject_immutable_change()'::pg_catalog.regprocedure`,
+	).Scan(&alteredGuardBody); err != nil {
+		t.Fatalf("inspect preserved altered immutable guard: %v", err)
+	}
+	if !strings.Contains(alteredGuardBody, "RETURN NEW") {
+		t.Fatalf(
+			"rejected migration changed forensic immutable guard = %q",
+			alteredGuardBody,
+		)
+	}
+	if _, err := admin.Exec(ctx, `CREATE OR REPLACE FUNCTION engine.reject_immutable_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $function$
+BEGIN
+    RAISE EXCEPTION 'immutable relation %.% cannot be %',
+        TG_TABLE_SCHEMA, TG_TABLE_NAME, lower(TG_OP)
+        USING ERRCODE = '55000';
+END;
+$function$`,
+	); err != nil {
+		t.Fatalf("repair immutable-change guard: %v", err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry migration after immutable guard repair: %v", err)
 	}
 }
 
