@@ -1202,41 +1202,45 @@ func TestAdminBootstrapRejectsUnexpectedCatalogAuthority(
 				login,
 				"platformgo_admin_bootstrap",
 			)
-			bootstrapTx, err := terminal.Begin(ctx)
-			if err != nil {
-				t.Fatalf("begin bootstrap trigger transaction: %v", err)
-			}
 			keyHash := sha256.Sum256(
 				[]byte(fmt.Sprintf("bootstrap-trigger-key-%d", index)),
 			)
-			var outcome string
-			err = bootstrapTx.QueryRow(ctx, `
-				SELECT outcome
-				  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
-				fmt.Sprintf("bootstrap-request-trigger-%d", index),
-				keyHash[:],
-				fmt.Sprintf(
-					"admin::urn:xb:admin:00000000-0000-4000-8000-%012d",
-					80+index,
-				),
-				fmt.Sprintf(
-					"00000000-0000-4000-8000-%012d",
-					80+index,
-				),
-				"2026-07-31T00:00:00.000000Z",
-				adminBootstrapMigrationChecksum(t),
-			).Scan(&outcome)
+			bootstrapCtx, cancelBootstrap := context.WithTimeout(
+				ctx,
+				5*time.Second,
+			)
+			defer cancelBootstrap()
+			got, attempts, err :=
+				queryAdminBootstrapAfterTransientLockContention(
+					bootstrapCtx,
+					terminal,
+					fmt.Sprintf("bootstrap-request-trigger-%d", index),
+					keyHash[:],
+					fmt.Sprintf(
+						"admin::urn:xb:admin:00000000-0000-4000-8000-%012d",
+						80+index,
+					),
+					fmt.Sprintf(
+						"00000000-0000-4000-8000-%012d",
+						80+index,
+					),
+					"2026-07-31T00:00:00.000000Z",
+					adminBootstrapMigrationChecksum(t),
+				)
+			if attempts > 1 {
+				t.Logf(
+					"explicit runtime bootstrap lock-contention retry "+
+						"reached catalog-authority rejection on attempt %d",
+					attempts,
+				)
+			}
 			if !adminBootstrapIsPostgresCode(err, "55000") {
-				_ = bootstrapTx.Rollback(ctx)
 				t.Fatalf(
 					"bootstrap with unexpected trigger error = %v "+
 						"outcome %q, want 55000",
 					err,
-					outcome,
+					got.outcome,
 				)
-			}
-			if err := bootstrapTx.Rollback(ctx); err != nil {
-				t.Fatalf("rollback rejected bootstrap trigger transaction: %v", err)
 			}
 
 			var assignments, receipts, sideEffects int
