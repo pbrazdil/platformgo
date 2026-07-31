@@ -38,13 +38,15 @@ func newCurrentTestMigrator(
 
 func (migrator *currentTestMigrator) Migrate(ctx context.Context) error {
 	migrator.t.Helper()
+	retryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	const (
 		attempts = 250
 		delay    = 20 * time.Millisecond
 	)
 	var lastContention error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		err := migrator.migrator.Migrate(ctx)
+		err := migrator.migrator.Migrate(retryCtx)
 		if !isCurrentMigrationContention(err) {
 			if attempt > 1 {
 				migrator.t.Logf(
@@ -61,7 +63,7 @@ func (migrator *currentTestMigrator) Migrate(ctx context.Context) error {
 		}
 		timer := time.NewTimer(delay)
 		select {
-		case <-ctx.Done():
+		case <-retryCtx.Done():
 			if !timer.Stop() {
 				<-timer.C
 			}
@@ -69,7 +71,7 @@ func (migrator *currentTestMigrator) Migrate(ctx context.Context) error {
 				"explicit current-migration lock-contention retry "+
 					"stopped after %d attempts: %w",
 				attempt,
-				ctx.Err(),
+				retryCtx.Err(),
 			)
 		case <-timer.C:
 		}

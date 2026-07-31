@@ -31,7 +31,7 @@ func TestInitialMigrationCreatesDurableExecutionSchema(t *testing.T) {
 	resetDurableSchemas(t, pool)
 
 	migrations := os.DirFS(filepath.Join("..", "..", "..", "migrations"))
-	migrator := platformpostgres.NewMigrator(pool, migrations)
+	migrator := newCurrentTestMigrator(t, pool, migrations)
 	if err := migrator.Migrate(context.Background()); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
@@ -156,7 +156,8 @@ func TestCommandIdempotencyAuthorityMigrationUpgradesPopulatedBaseline(t *testin
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit populated previous baseline: %v", err)
 	}
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(migrationDirectory),
 	).Migrate(ctx); err != nil {
@@ -216,7 +217,8 @@ func TestPhase3MigrationsUpgradePopulatedPhase2Schema(t *testing.T) {
 		VALUES ('phase2-account', 17)`); err != nil {
 		t.Fatalf("seed populated Phase 2 schema: %v", err)
 	}
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(migrationDirectory),
 	).Migrate(ctx); err != nil {
@@ -1554,7 +1556,8 @@ func TestPhase3UpgradeRejectsAmbiguousCandidateIdentityData(t *testing.T) {
 		CASCADE`); err != nil {
 		t.Fatalf("owner-directed candidate reset: %v", err)
 	}
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(migrationDirectory),
 	).Migrate(ctx); err != nil {
@@ -1657,7 +1660,8 @@ func TestPhase3UpgradeRejectsCandidateTimestampEqualToAuthorityCutover(
 	if _, err := pool.Exec(ctx, "TRUNCATE identity.users CASCADE"); err != nil {
 		t.Fatal(err)
 	}
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(migrationDirectory),
 	).Migrate(ctx); err != nil {
@@ -1813,7 +1817,8 @@ func TestPhase3UpgradeUsesBoundedLockAcquisitionAndRetriesCleanly(
 	if err := lockingTx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := platformpostgres.NewMigrator(
+	if err := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(migrationDirectory),
 	).Migrate(ctx); err != nil {
@@ -2672,7 +2677,8 @@ func TestMigratorFinalBaselineRerunPreservesPopulatedData(t *testing.T) {
 	resetDurableSchemas(t, pool)
 
 	migrationDirectory := filepath.Join("..", "..", "..", "migrations")
-	migrator := platformpostgres.NewMigrator(
+	migrator := newCurrentTestMigrator(
+		t,
 		pool,
 		os.DirFS(migrationDirectory),
 	)
