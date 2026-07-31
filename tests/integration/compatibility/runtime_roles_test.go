@@ -155,6 +155,12 @@ func resetCompatibilityDatabase(
 			) THEN
 				CREATE ROLE platformgo_realtime_repair NOLOGIN;
 			END IF;
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_roles
+				 WHERE rolname = 'platformgo_admin_bootstrap'
+			) THEN
+				CREATE ROLE platformgo_admin_bootstrap NOLOGIN;
+			END IF;
 		END;
 		$$`); err != nil {
 		return fmt.Errorf("provision test runtime roles: %w", err)

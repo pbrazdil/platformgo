@@ -348,6 +348,7 @@ func ensureReplayCleanupRuntimeRoles(
 		"platformgo_projector",
 		"platformgo_realtime",
 		"platformgo_realtime_repair",
+		"platformgo_admin_bootstrap",
 	} {
 		var exists bool
 		if err := pool.QueryRow(
