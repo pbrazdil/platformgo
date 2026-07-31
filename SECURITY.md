@@ -54,6 +54,28 @@ Validate at each boundary. Internal origin does not make a payload valid.
 - All mutations pass one authorization choke point before command creation.
 - Authorization identity and scopes become part of the immutable command/audit record.
 - Database roles prevent API code from writing monetary tables.
+- Runtime-authority cutover rejects every engine mutation grant outside the
+  exact relation and column allowlist, including grant options and non-owner
+  grantors, before ACL cleanup can erase evidence of excess authority.
+- Runtime-authority cutover also exact-validates the complete migration-journal
+  catalog, including its executable default and zero triggers/rules, before ACL
+  cleanup. Its final checksum insert therefore cannot execute a hidden
+  post-scrub privilege or durable-state mutation.
+- The same cutover requires a zero rewrite-rule graph and the frozen default
+  dependencies plus the complete frozen relation/column/constraint/index/
+  user-and-internal-trigger/RLS/policy/inheritance/access-method catalog on all nine runtime-authority
+  relations. It pins `search_path=pg_catalog` before validation so a hostile
+  session cannot shadow trusted built-ins. Ledger persistence also
+  requires exactly one returned ID per expected transaction and entry insert,
+  so a suppressed write rolls back rather than producing an incomplete but
+  acknowledged economic commit.
+- Every database-wide or schema-scoped non-owner default grant is rejected
+  before cutover so a later forward migration cannot silently manufacture
+  table, sequence, function, or type authority for a runtime or unexpected role.
+- The cutover scans the locked target FK and ledger graph before ACL cleanup;
+  engine activation and explicit reconciliation repeat the orphan-entry and
+  per-currency balance checks. A restored exact catalog cannot bless corruption
+  created while an enforcement trigger was temporarily disabled.
 - `platformgo_api` is a trusted authenticated-principal authority for identity
   mutations. Its ability to execute a credential-minting definer function is an
   explicit trust boundary; compromise of that role triggers credential
@@ -86,8 +108,9 @@ Validate at each boundary. Internal origin does not make a payload valid.
   triggers, rules, indexes, and table/column ACLs before writing. Under the
   migration-journal lock it also
   requires exact `engine` namespace authority, zero journal user triggers or
-  rewrite rules, the exact 42-row tip, the caller-supplied migration-42
-  checksum, and the canonical ordered predecessor manifest. It revalidates the
+  rewrite rules, the exact 43-row tip, the caller-supplied migration-43
+  checksum, and the canonical ordered manifest of the 42 predecessor rows. It
+  revalidates the
   complete graph and every receipt field after its writes and before returning;
   unexpected
   immediate or deferred catalog authority raises `55000` and rolls back.
@@ -95,15 +118,22 @@ Validate at each boundary. Internal origin does not make a payload valid.
   that session and verify the checksum, exact total graph cardinality, every
   receipt field, and permission from a fresh independently authorized session
   before removing the operator membership or disabling its credential. The
-  one-shot migration rejects enabled database event triggers; the migrator
+  one-shot migrations reject enabled database event triggers; the migrator
   skips metadata DDL for an existing journal and revalidates its complete
-  manifest under the pending-file transaction lock. The migration exact-fences
-  journal catalog/data and authority namespace ownership. The migration and
-  definer owner require superuser authority only to acquire those
-  protected-catalog fences; the application never receives it.
+  manifest under the pending-file transaction lock. Migrations 42 and 43
+  exact-fence journal catalog/data and authority namespace ownership. The
+  migration and definer owner require temporary superuser authority only to
+  acquire those protected-catalog fences during migration and the terminal
+  bootstrap. The owner is demoted after each independently verified boundary;
+  the application and terminal operator login never receive that authority.
   Before migration the bootstrap role must own nothing and have no
   privilege/default-ACL dependency, and afterward it has only identity schema
   usage plus non-grantable bootstrap-function execution.
+- Migration 43 exact-validates the owner and complete schema ACL matrix for
+  `engine`, `trading`, `market`, and `ledger` while the namespace catalog is
+  fenced. Unexpected non-owner `CREATE`, grant options, grantors, missing
+  grants, or ownership drift fail with `55000` before the ACL cutover and leave
+  the tip-42 incident evidence intact.
 
 ## 6. Input hardening
 

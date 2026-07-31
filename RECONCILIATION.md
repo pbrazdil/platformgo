@@ -26,6 +26,8 @@ Idempotent jobs periodically verify:
 ### Ledger and balances
 
 - every ledger transaction balances by currency;
+- every ledger entry references an existing transaction, and an empty
+  transaction is a mismatch;
 - account balance projection equals ledger fold at its sequence;
 - no duplicated business key/transaction effect;
 - no unexplained negative/invalid balance where policy forbids it.
@@ -109,3 +111,8 @@ Run full reconciliation:
 - reconciliation can resume idempotently;
 - affected accounts/shards enter fail-closed mode;
 - compensating repair produces an auditable result.
+
+The current engine also runs the shard reconciliation gate during every ready
+shard activation while retaining its lifetime ownership fence. Explicit
+reconciliation uses the same checks. Periodic scheduling remains an operations
+responsibility and must not overlap an active shard writer.

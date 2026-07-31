@@ -21,6 +21,7 @@ import (
 	"github.com/upcomers-org/platformgo/internal/application"
 	"github.com/upcomers-org/platformgo/internal/edge"
 	"github.com/upcomers-org/platformgo/internal/engine"
+	"github.com/upcomers-org/platformgo/testkit"
 )
 
 type compatibilityClock struct{ value time.Time }
@@ -61,35 +62,78 @@ func TestPhase3IdentityCatalogAndDurableOrderIntentUsePostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = pool.Exec(ctx, `
-		INSERT INTO trading.accounts (account_id, oms_mode)
-		VALUES ('urn:xb:account:acct-1', 'NETTING');
-		INSERT INTO identity.user_accounts (user_id, account_id)
-		VALUES ('urn:xb:user:trader-1', 'urn:xb:account:acct-1');
-		INSERT INTO trading.instruments (
-			instrument_id, revision, price_scale, quantity_scale,
-			settlement_currency, settlement_currency_scale,
-			initial_margin_rate, maintenance_margin_rate, max_leverage,
-			maker_fee_rate, taker_fee_rate
-		) VALUES (
-			'BTC-PERP', 3, 2, 3, 'USDC', 2,
-			0.1, 0.05, 10, -0.0001, 0.0005
-		);
-		INSERT INTO ledger.balances (
-			account_id, currency, total, used, free, equity, ledger_sequence
-		) VALUES (
-			'urn:xb:account:acct-1', 'USDC',
-			1000.000000000000000000,
-			0.000000000000000000,
-			1000.000000000000000000,
-			1000.000000000000000000,
-			0
-		)`,
+	now := time.Date(2026, time.July, 25, 16, 0, 0, 0, time.UTC)
+	engineStore := platformpostgres.NewEngineStore(pool)
+	state := engine.NewState(7)
+	ids := testkit.NewShardIDSequence(7)
+	logicalClock := testkit.NewManualClock(engine.NewLogicalTime(now))
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		engineStore,
+		state,
+		ids,
+		logicalClock,
+		engine.TradingAction{
+			Kind: engine.TradingActionConfigureInstrument,
+			ConfigureInstrument: &engine.ConfigureInstrument{
+				InstrumentID:            "BTC-PERP",
+				Revision:                3,
+				PriceScale:              2,
+				QuantityScale:           3,
+				SettlementCurrency:      "USDC",
+				SettlementCurrencyScale: 2,
+				InitialMarginRate:       "0.1",
+				MaintenanceMarginRate:   "0.05",
+				MaxLeverage:             "10",
+				MakerFeeRate:            "-0.0001",
+				TakerFeeRate:            "0.0005",
+			},
+		},
+		platformpostgres.ApplyOptions{},
 	)
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		engineStore,
+		state,
+		ids,
+		logicalClock,
+		engine.TradingAction{
+			Kind: engine.TradingActionConfigureAccount,
+			ConfigureAccount: &engine.ConfigureAccount{
+				AccountID: "urn:xb:account:acct-1",
+				OmsMode:   engine.OmsModeNetting,
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		engineStore,
+		state,
+		ids,
+		logicalClock,
+		engine.TradingAction{
+			Kind: engine.TradingActionAdjustBalance,
+			AdjustBalance: &engine.AdjustBalance{
+				AccountID:     "urn:xb:account:acct-1",
+				Currency:      "USDC",
+				CurrencyScale: 2,
+				Operation:     engine.BalanceOperationSet,
+				Amount:        "1000",
+			},
+		},
+		platformpostgres.ApplyOptions{},
+	)
+	nextProcessorSequence := state.NextStreamSequence()
+	_, err = pool.Exec(ctx, `
+		INSERT INTO identity.user_accounts (user_id, account_id)
+		VALUES ('urn:xb:user:trader-1', 'urn:xb:account:acct-1')`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, time.July, 25, 16, 0, 0, 0, time.UTC)
 	authenticator, err := edge.NewHMACAuthenticator(edge.HMACAuthenticatorConfig{
 		ClientTokenSecret: []byte("0123456789abcdef0123456789abcdef"),
 		Clock:             compatibilityClock{value: now},
@@ -251,10 +295,20 @@ func TestPhase3IdentityCatalogAndDurableOrderIntentUsePostgreSQL(t *testing.T) {
 	defer deadline.Stop()
 	for len(messages) < 2 {
 		rows, queryErr := pool.Query(ctx, `
-			SELECT message_id::text, subject, payload
-			  FROM messaging.outbox
-			 WHERE producer_class = 'api'
-			 ORDER BY created_at, message_id`)
+			SELECT outbox.message_id::text, outbox.subject, outbox.payload
+			  FROM messaging.outbox AS outbox
+			 WHERE outbox.producer_class = 'api'
+			   AND NOT EXISTS (
+				   SELECT 1
+				     FROM engine.input_receipts AS receipt
+				    WHERE receipt.input_id = outbox.message_id
+			   )
+			   AND NOT EXISTS (
+				   SELECT 1
+				     FROM engine.duplicate_delivery_receipts AS duplicate
+				    WHERE duplicate.input_id = outbox.message_id
+			   )
+			 ORDER BY outbox.created_at, outbox.message_id`)
 		if queryErr != nil {
 			t.Fatal(queryErr)
 		}
@@ -275,7 +329,7 @@ func TestPhase3IdentityCatalogAndDurableOrderIntentUsePostgreSQL(t *testing.T) {
 				rows.Close()
 				t.Fatal(queryErr)
 			}
-			message.StreamSequence = uint64(len(messages) + 1)
+			message.StreamSequence = nextProcessorSequence + uint64(len(messages))
 			messages = append(messages, message)
 		}
 		rows.Close()

@@ -13,10 +13,10 @@ import (
 	"github.com/upcomers-org/platformgo/internal/engine"
 )
 
-const currentMigrationContentionName = "20260731000100_phase3_admin_bootstrap_authority.up.sql"
+const currentMigrationContentionName = "20260731000200_phase3_runtime_authority_acl.up.sql"
 
 // currentTestMigrator models the documented explicit operator retry when
-// routine PostgreSQL maintenance collides with migration 42's fail-fast
+// routine PostgreSQL maintenance collides with the current migration's fail-fast
 // catalog fence. Partial-migration fixtures use the production migrator
 // directly and intentional contention tests bypass this facade.
 type currentTestMigrator struct {
@@ -106,9 +106,16 @@ func (migrator *currentTestMigrator) VerifyCurrent(ctx context.Context) error {
 }
 
 func isCurrentMigrationContention(err error) bool {
-	return adminBootstrapIsPostgresCode(err, "55P03") &&
-		strings.Contains(
-			err.Error(),
-			"migrate "+currentMigrationContentionName+": execute:",
-		)
+	if !adminBootstrapIsPostgresCode(err, "55P03") {
+		return false
+	}
+	for _, name := range []string{
+		currentMigrationContentionName,
+		adminBootstrapMigration,
+	} {
+		if strings.Contains(err.Error(), "migrate "+name+": execute:") {
+			return true
+		}
+	}
+	return false
 }

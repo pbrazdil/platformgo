@@ -179,6 +179,48 @@ Its stable candidate passed policy, formatting, lint, the complete serial
 PostgreSQL 19 Beta 2 suite, the complete serial race suite, deterministic
 repeat tests, and vulnerability scanning. Migration and determinism
 implementation-boundary review closed with no outstanding P0–P3 findings.
+The active runtime-authority ACL slice adds forward migration 43 over the nine
+remaining EngineStore authority relations. It rejects unexpected pre-cutover
+table or column mutation authority, including any engine grant outside the
+exact relation/column allowlist or carrying a grant option, and divergent
+trigger/function catalogs before changing ACLs. All nine target relations must
+also retain the frozen tip-42 default-expression allowlist, `relhasrules=false`,
+and a zero-row rewrite-rule graph. Their complete executable catalog is frozen:
+relation shape and access method, columns and bound defaults, constraints,
+indexes, every user/internal constraint trigger plus execution hints, RLS flags
+with zero policies, and zero inheritance. Catalog deparsing
+is pinned to `pg_catalog` so a hostile caller search path cannot shadow trusted
+built-ins. The cutover also rejects every database-wide or schema-scoped
+non-owner default privilege that would silently grant authority on a later
+forward-migration object.
+The migration journal's owner,
+shape, `applied_at` default, constraints, index, topology, ACLs, triggers, and
+rewrite rules must exactly match tip 42 before the cutover, so the final
+checksum insert cannot run a hidden post-scrub side effect; benign read-only
+grant chains are scrubbed without row or relation rewrites, and the exact
+API/engine matrix is restored. The `engine`, `trading`, `market`, and `ledger`
+schemas must retain the exact migration owner and frozen schema ACL matrix.
+Any unexpected non-owner `CREATE`, grant option, grantor, missing grant, or
+ownership drift raises `55000` before the cutover and preserves the tip-42
+evidence for investigation. The runtime boundary also requires every
+expected ledger transaction and entry insert to return exactly its one ID; a
+suppressed write rolls back the complete economic transaction instead of
+advancing receipt, checkpoint, or outbox state. The same
+cutover scans the locked target FK graph and ledger groups, rejecting orphan
+entries, empty transactions, or nonzero per-currency sums before any ACL
+change. Engine activation and explicit reconciliation independently count
+orphan entries and keep the shard non-ready if corruption appears after
+cutover. The same
+atomic cutover advances `bootstrap_first_admin` to the exact 43-row journal
+with the requested migration-43 checksum and immutable 42-row prefix manifest.
+Migration 43 is run only by the exact existing authority owner while temporarily
+elevated to superuser; the ordinary migrator and a different privileged owner
+fail closed without a durable delta.
+The same definer owner is re-elevated only for the terminal bootstrap and is
+demoted after fresh-session durable verification.
+Focused hostile-grant, projection-writer, rogue-trigger, exact-role,
+filenode, bootstrap, rollback, and retry proof runs on PostgreSQL 19 Beta 2;
+full candidate validation and exact-SHA review remain pending.
 The landed broker account point read preserves the accepted
 ten-field current-Go account summary while retaining the pinned source's
 generic `400 unknown account` for both absent and foreign ownership.

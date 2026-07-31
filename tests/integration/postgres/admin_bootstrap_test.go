@@ -317,7 +317,7 @@ func TestAdminBootstrapRejectsNullInputs(t *testing.T) {
 				subject,
 				eventID,
 				logicalTime,
-				adminBootstrapMigrationChecksum(t),
+				runtimeAuthorityACLMigrationChecksum(t),
 			}
 			arguments[testCase.index] = nil
 			var outcome string
@@ -952,7 +952,7 @@ func TestAdminBootstrapPostWriteGraphValidationRejectsInjectedAssignment(
 		"admin::urn:xb:admin:00000000-0000-4000-8000-00000000004b",
 		"00000000-0000-4000-8000-00000000004b",
 		"2026-07-31T00:00:00.000000Z",
-		adminBootstrapMigrationChecksum(t),
+		runtimeAuthorityACLMigrationChecksum(t),
 	).Scan(&outcome)
 	if !adminBootstrapIsPostgresCode(err, "55000") {
 		t.Fatalf(
@@ -1225,7 +1225,7 @@ func TestAdminBootstrapRejectsUnexpectedCatalogAuthority(
 						80+index,
 					),
 					"2026-07-31T00:00:00.000000Z",
-					adminBootstrapMigrationChecksum(t),
+					runtimeAuthorityACLMigrationChecksum(t),
 				)
 			if attempts > 1 {
 				t.Logf(
@@ -1762,7 +1762,7 @@ func TestAdminBootstrapUnknownCommitReplaysAfterTerminalRestart(t *testing.T) {
 		subject,
 		eventID,
 		logicalTime,
-		adminBootstrapMigrationChecksum(t),
+		runtimeAuthorityACLMigrationChecksum(t),
 	); err != nil {
 		t.Fatalf("commit bootstrap before simulated lost acknowledgment: %v", err)
 	}
@@ -1830,7 +1830,7 @@ func TestAdminBootstrapAcknowledgesOnlyAfterCommitAndFreshSessionVerification(
 		subject,
 		eventID,
 		logicalTime,
-		adminBootstrapMigrationChecksum(t),
+		runtimeAuthorityACLMigrationChecksum(t),
 	).Scan(&provisionalOutcome); err != nil {
 		_ = bootstrapTx.Rollback(ctx)
 		t.Fatalf("bootstrap inside explicit transaction: %v", err)
@@ -1964,7 +1964,7 @@ func TestAdminBootstrapAcknowledgesOnlyAfterCommitAndFreshSessionVerification(
 			)`,
 		subject,
 		requestID,
-		adminBootstrapMigration,
+		runtimeAuthorityACLMigration,
 		keyHash[:],
 		requestHash[:],
 		eventID,
@@ -1983,7 +1983,7 @@ func TestAdminBootstrapAcknowledgesOnlyAfterCommitAndFreshSessionVerification(
 	if !exactAuthority ||
 		receipts != 1 ||
 		!permitted ||
-		migrationChecksum != adminBootstrapMigrationChecksumHex {
+		migrationChecksum != hex.EncodeToString(runtimeAuthorityACLMigrationChecksum(t)) {
 		t.Fatalf(
 			"fresh-session authority = exact %t receipts %d "+
 				"permitted %t checksum %q",
@@ -1992,6 +1992,13 @@ func TestAdminBootstrapAcknowledgesOnlyAfterCommitAndFreshSessionVerification(
 			permitted,
 			migrationChecksum,
 		)
+	}
+	if err := verifyAdminBootstrapMigrationBeforeTerminalCleanup(
+		ctx,
+		fresh,
+		runtimeAuthorityACLMigrationChecksum(t),
+	); err != nil {
+		t.Fatalf("fresh-session migration verification before cleanup: %v", err)
 	}
 
 	loginIdentifier := pgx.Identifier{login}.Sanitize()
@@ -2025,6 +2032,24 @@ func TestAdminBootstrapAcknowledgesOnlyAfterCommitAndFreshSessionVerification(
 			remainsMember,
 		)
 	}
+}
+
+func verifyAdminBootstrapMigrationBeforeTerminalCleanup(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	expectedChecksum []byte,
+) error {
+	var checksum string
+	if err := pool.QueryRow(ctx, `
+		SELECT pg_catalog.encode(checksum, 'hex')
+		  FROM engine.schema_migrations
+		 WHERE filename = $1`, runtimeAuthorityACLMigration).Scan(&checksum); err != nil {
+		return fmt.Errorf("read runtime-authority migration checksum: %w", err)
+	}
+	if checksum != hex.EncodeToString(expectedChecksum) {
+		return fmt.Errorf("runtime-authority migration checksum = %q", checksum)
+	}
+	return nil
 }
 
 func TestAdminBootstrapAuditReceiptRejectsOwnerTruncate(t *testing.T) {
@@ -4124,7 +4149,7 @@ func TestAdminBootstrapTransactionCannotBlockMigratorIndefinitely(t *testing.T) 
 		"admin::urn:xb:admin:00000000-0000-4000-8000-000000000049",
 		"00000000-0000-4000-8000-000000000049",
 		"2026-07-31T00:00:00.000000Z",
-		adminBootstrapMigrationChecksum(t),
+		runtimeAuthorityACLMigrationChecksum(t),
 	).Scan(&outcome); err != nil {
 		_ = bootstrapTx.Rollback(ctx)
 		t.Fatalf("bootstrap inside open transaction: %v", err)
@@ -4144,7 +4169,7 @@ func TestAdminBootstrapTransactionCannotBlockMigratorIndefinitely(t *testing.T) 
 		_ = bootstrapTx.Rollback(ctx)
 		t.Fatalf("blocked migrator error = %v, want SQLSTATE 55P03", err)
 	}
-	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
+	assertMigrationHistoryTip(t, admin, 43, runtimeAuthorityACLMigration)
 	if err := bootstrapTx.Rollback(ctx); err != nil {
 		t.Fatalf("release open bootstrap transaction: %v", err)
 	}
@@ -4329,7 +4354,7 @@ func TestAdminBootstrapConcurrentDistinctRequestsCreateOneAdmin(t *testing.T) {
 		err      error
 	}
 	results := make(chan result, 2)
-	migrationChecksum := adminBootstrapMigrationChecksum(t)
+	migrationChecksum := runtimeAuthorityACLMigrationChecksum(t)
 	var ready sync.WaitGroup
 	ready.Add(2)
 	invoke := func(
@@ -4437,7 +4462,7 @@ func TestAdminBootstrapMigrationMakesPreviousArtifactSchemaAhead(t *testing.T) {
 	) {
 		t.Fatalf("previous artifact VerifyCurrent error = %v", err)
 	}
-	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
+	assertMigrationHistoryTip(t, admin, 43, runtimeAuthorityACLMigration)
 }
 
 func callAdminBootstrap(
@@ -4458,7 +4483,7 @@ func callAdminBootstrap(
 		subject,
 		eventID,
 		logicalTime,
-		adminBootstrapMigrationChecksum(t),
+		runtimeAuthorityACLMigrationChecksum(t),
 	)
 	if attempts > 1 {
 		t.Logf(
@@ -4635,7 +4660,7 @@ func assertAdminBootstrapSQLStateContext(
 	logicalTime string,
 ) {
 	t.Helper()
-	checksum := adminBootstrapMigrationChecksum(t)
+	checksum := runtimeAuthorityACLMigrationChecksum(t)
 	var (
 		attempts int
 		err      error
