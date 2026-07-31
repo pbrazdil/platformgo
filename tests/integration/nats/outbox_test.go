@@ -210,6 +210,63 @@ func isolatedOutboxDatabase(
 	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+databaseIdentifier); err != nil {
 		t.Fatalf("create isolated PostgreSQL database: %v", err)
 	}
+	if _, err := adminPool.Exec(ctx, `
+		DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1
+				  FROM pg_catalog.pg_roles
+				 WHERE rolname = 'platformgo_api'
+			) THEN
+				CREATE ROLE platformgo_api NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1
+				  FROM pg_catalog.pg_roles
+				 WHERE rolname = 'platformgo_engine'
+			) THEN
+				CREATE ROLE platformgo_engine NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1
+				  FROM pg_catalog.pg_roles
+				 WHERE rolname = 'platformgo_outbox'
+			) THEN
+				CREATE ROLE platformgo_outbox NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1
+				  FROM pg_catalog.pg_roles
+				 WHERE rolname = 'platformgo_projector'
+			) THEN
+				CREATE ROLE platformgo_projector NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1
+				  FROM pg_catalog.pg_roles
+				 WHERE rolname = 'platformgo_realtime'
+			) THEN
+				CREATE ROLE platformgo_realtime NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1
+				  FROM pg_catalog.pg_roles
+				 WHERE rolname = 'platformgo_realtime_repair'
+			) THEN
+				CREATE ROLE platformgo_realtime_repair NOLOGIN;
+			END IF;
+			IF NOT EXISTS (
+				SELECT 1
+				  FROM pg_catalog.pg_roles
+				 WHERE rolname = 'platformgo_admin_bootstrap'
+			) THEN
+				CREATE ROLE platformgo_admin_bootstrap NOLOGIN;
+			END IF;
+		END
+		$$`,
+	); err != nil {
+		t.Fatalf("provision migration runtime roles: %v", err)
+	}
 
 	testConfig := baseConfig.Copy()
 	testConfig.ConnConfig.Database = databaseName
