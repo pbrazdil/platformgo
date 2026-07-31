@@ -239,6 +239,15 @@ go test -race ./... -count=1
 go test ./internal/... ./testkit/... -count=20
 ```
 
+Hosted CI runs the complete PostgreSQL suites serially and sets an explicit
+30-minute Go package timeout. This preserves every test and assertion while
+allowing slower shared runners to complete the same package set:
+
+```bash
+go test -p 1 ./... -count=1 -timeout=30m
+go test -race -p 1 ./... -count=1 -timeout=30m
+```
+
 The repeat suite must not rely on test order.
 
 Longer scheduled suites should include:
