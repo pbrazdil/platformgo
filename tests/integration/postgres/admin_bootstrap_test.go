@@ -22,7 +22,7 @@ import (
 
 const (
 	adminBootstrapMigration            = "20260731000100_phase3_admin_bootstrap_authority.up.sql"
-	adminBootstrapMigrationChecksumHex = "a7818c6d3b60167b7d2dcea3d926cc473f85204e1bdbb44238fd26c3a8b3ffb7"
+	adminBootstrapMigrationChecksumHex = "8f544dcdd68e02d038f16fd4c4e741ad7a7ffc09910747ecb8063269f51d0870"
 	adminBootstrapRoleID               = "00000000-0000-4000-8000-000000000001"
 	adminBootstrapRoleName             = "platformgo-superadmin"
 )
@@ -1381,6 +1381,339 @@ func TestAdminBootstrapRejectsUnsafeTemporaryMemberAuthority(t *testing.T) {
 			if result.outcome != "created" {
 				t.Fatalf("repaired temporary member outcome = %q", result.outcome)
 			}
+		})
+	}
+}
+
+func TestAdminBootstrapRejectsAmbiguousIndirectCallerIdentity(t *testing.T) {
+	tests := []struct {
+		name          string
+		directLogin   string
+		indirectLogin func(t *testing.T, admin *pgxpool.Pool, direct string) string
+	}{
+		{
+			name:        "case folded login",
+			directLogin: "platformgo_admin_bootstrap_case_delegate",
+			indirectLogin: func(
+				_ *testing.T,
+				_ *pgxpool.Pool,
+				direct string,
+			) string {
+				return strings.ToUpper(direct)
+			},
+		},
+		{
+			name:        "numeric login parsed as role OID",
+			directLogin: "platformgo_admin_bootstrap_numeric_delegate",
+			indirectLogin: func(
+				t *testing.T,
+				admin *pgxpool.Pool,
+				direct string,
+			) string {
+				t.Helper()
+				var login string
+				if err := admin.QueryRow(context.Background(), `
+					SELECT oid::text
+					  FROM pg_catalog.pg_roles
+					 WHERE rolname = $1`,
+					direct,
+				).Scan(&login); err != nil {
+					t.Fatalf("read direct bootstrap member OID: %v", err)
+				}
+				return login
+			},
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+			if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
+				t.Fatalf("migrate admin bootstrap authority: %v", err)
+			}
+
+			directID := pgx.Identifier{test.directLogin}.Sanitize()
+			extraLogin := fmt.Sprintf(
+				"platformgo_admin_bootstrap_ambiguous_extra_%d",
+				index,
+			)
+			extraID := pgx.Identifier{extraLogin}.Sanitize()
+			if _, err := admin.Exec(ctx, fmt.Sprintf(`
+				CREATE ROLE %[1]s LOGIN PASSWORD 'platformgo-test-password'
+					NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+				GRANT platformgo_admin_bootstrap TO %[1]s;
+				CREATE ROLE %[2]s NOLOGIN
+					NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION`,
+				directID,
+				extraID,
+			)); err != nil {
+				t.Fatalf("create direct bootstrap member: %v", err)
+			}
+			indirectLogin := test.indirectLogin(t, admin, test.directLogin)
+			indirectID := pgx.Identifier{indirectLogin}.Sanitize()
+			if _, err := admin.Exec(ctx, fmt.Sprintf(`
+				CREATE ROLE %[1]s LOGIN PASSWORD 'platformgo-test-password'
+					NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+				GRANT %[2]s TO %[1]s;
+				GRANT %[3]s TO %[1]s`,
+				indirectID,
+				directID,
+				extraID,
+			)); err != nil {
+				t.Fatalf("create ambiguous indirect bootstrap caller: %v", err)
+			}
+			t.Cleanup(func() {
+				for _, role := range []string{
+					indirectID,
+					directID,
+					extraID,
+				} {
+					_, _ = admin.Exec(
+						context.Background(),
+						"DROP OWNED BY "+role,
+					)
+					_, _ = admin.Exec(
+						context.Background(),
+						"DROP ROLE IF EXISTS "+role,
+					)
+				}
+			})
+
+			terminal := existingAdminBootstrapLoginPool(t, indirectLogin)
+			keyHash := sha256.Sum256(
+				[]byte(fmt.Sprintf("bootstrap-ambiguous-caller-key-%d", index)),
+			)
+			assertAdminBootstrapSQLState(
+				t,
+				terminal,
+				"55000",
+				fmt.Sprintf("bootstrap-request-ambiguous-caller-%d", index),
+				keyHash[:],
+				fmt.Sprintf(
+					"admin::urn:xb:admin:00000000-0000-4000-8000-%012d",
+					110+index,
+				),
+				fmt.Sprintf(
+					"00000000-0000-4000-8000-%012d",
+					110+index,
+				),
+				"2026-07-31T00:00:00.000000Z",
+			)
+			assertAdminBootstrapAuthorityCounts(t, admin, 0, 0)
+		})
+	}
+}
+
+func TestAdminBootstrapPreservesExactQuotedCallerIdentity(t *testing.T) {
+	tests := []struct {
+		name  string
+		login string
+	}{
+		{
+			name:  "mixed case login",
+			login: "PlatformGo_Admin_Bootstrap_Exact_Caller",
+		},
+		{
+			name:  "numeric login",
+			login: "4000000000",
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+			if err := migrateAdminBootstrapCurrent(t, ctx, admin); err != nil {
+				t.Fatalf("migrate admin bootstrap authority: %v", err)
+			}
+
+			terminal := runtimeRoleLoginPool(
+				t,
+				admin,
+				test.login,
+				"platformgo_admin_bootstrap",
+			)
+			requestID := fmt.Sprintf(
+				"bootstrap-request-exact-caller-%d",
+				index,
+			)
+			subject := fmt.Sprintf(
+				"admin::urn:xb:admin:00000000-0000-4000-8000-%012d",
+				120+index,
+			)
+			eventID := fmt.Sprintf(
+				"00000000-0000-4000-8000-%012d",
+				120+index,
+			)
+			logicalTime := "2026-07-31T00:00:00.000000Z"
+			keyHash := sha256.Sum256(
+				[]byte(fmt.Sprintf("bootstrap-exact-caller-key-%d", index)),
+			)
+			created := callAdminBootstrap(
+				t,
+				terminal,
+				requestID,
+				keyHash[:],
+				subject,
+				eventID,
+				logicalTime,
+			)
+			replayed := callAdminBootstrap(
+				t,
+				terminal,
+				requestID,
+				keyHash[:],
+				subject,
+				eventID,
+				logicalTime,
+			)
+			if replayed != created || created.outcome != "created" {
+				t.Fatalf(
+					"exact caller created/replayed = %#v/%#v",
+					created,
+					replayed,
+				)
+			}
+
+			wantRequestHash := sha256.Sum256([]byte(adminBootstrapPreimage(
+				test.login,
+				requestID,
+				subject,
+				eventID,
+				logicalTime,
+			)))
+			var actorLogin, requestHash string
+			if err := admin.QueryRow(ctx, `
+				SELECT actor_login, pg_catalog.encode(request_hash, 'hex')
+				  FROM audit.admin_bootstrap_events
+				 WHERE event_id = $1`,
+				eventID,
+			).Scan(&actorLogin, &requestHash); err != nil {
+				t.Fatalf("read exact caller receipt: %v", err)
+			}
+			if actorLogin != test.login ||
+				requestHash != hex.EncodeToString(wantRequestHash[:]) {
+				t.Fatalf(
+					"exact caller receipt actor/hash = %q/%q, want %q/%x",
+					actorLogin,
+					requestHash,
+					test.login,
+					wantRequestHash,
+				)
+			}
+		})
+	}
+}
+
+func TestAdminBootstrapSupportsExactMixedCaseMigrationOwner(t *testing.T) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+
+	const ownerLogin = "PlatformGo_Admin_Bootstrap_Mixed_Owner"
+	owner := adminBootstrapSuperuserLoginPool(t, admin, ownerLogin)
+	if err := migrateAdminBootstrapCurrent(t, ctx, owner); err != nil {
+		t.Fatalf("migrate as exact mixed-case owner: %v", err)
+	}
+
+	terminal := runtimeRoleLoginPool(
+		t,
+		admin,
+		"platformgo_admin_bootstrap_mixed_owner_terminal",
+		"platformgo_admin_bootstrap",
+	)
+	keyHash := sha256.Sum256([]byte("bootstrap-mixed-owner-key"))
+	result := callAdminBootstrap(
+		t,
+		terminal,
+		"bootstrap-request-mixed-owner",
+		keyHash[:],
+		"admin::urn:xb:admin:00000000-0000-4000-8000-000000000070",
+		"00000000-0000-4000-8000-000000000070",
+		"2026-07-31T00:00:00.000000Z",
+	)
+	if result.outcome != "created" {
+		t.Fatalf("mixed-case owner bootstrap outcome = %q, want created", result.outcome)
+	}
+}
+
+func TestAdminBootstrapMigrationRejectsAmbiguousOwnerAlias(t *testing.T) {
+	tests := []struct {
+		name       string
+		aliasLogin func(t *testing.T, admin *pgxpool.Pool, owner string) string
+	}{
+		{
+			name: "case folded owner",
+			aliasLogin: func(
+				_ *testing.T,
+				_ *pgxpool.Pool,
+				owner string,
+			) string {
+				return strings.ToUpper(owner)
+			},
+		},
+		{
+			name: "numeric owner parsed as role OID",
+			aliasLogin: func(
+				t *testing.T,
+				admin *pgxpool.Pool,
+				owner string,
+			) string {
+				t.Helper()
+				var login string
+				if err := admin.QueryRow(context.Background(), `
+					SELECT oid::text
+					  FROM pg_catalog.pg_roles
+					 WHERE rolname = $1`,
+					owner,
+				).Scan(&login); err != nil {
+					t.Fatalf("read predecessor owner OID: %v", err)
+				}
+				return login
+			},
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+
+			lowerOwnerLogin := fmt.Sprintf(
+				"platformgo_admin_bootstrap_alias_owner_%d",
+				index,
+			)
+			lowerOwner := adminBootstrapSuperuserLoginPool(
+				t,
+				admin,
+				lowerOwnerLogin,
+			)
+			if err := platformpostgres.NewMigrator(
+				lowerOwner,
+				migrationFilesThrough(t, adminPermissionMigration),
+			).Migrate(ctx); err != nil {
+				t.Fatalf("apply previous migration tip as exact owner: %v", err)
+			}
+
+			aliasOwner := adminBootstrapSuperuserLoginPool(
+				t,
+				admin,
+				test.aliasLogin(t, admin, lowerOwnerLogin),
+			)
+			err := platformpostgres.NewMigrator(
+				aliasOwner,
+				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			).Migrate(ctx)
+			if !adminBootstrapIsPostgresCode(err, "55000") {
+				t.Fatalf("ambiguous owner alias migration error = %v, want 55000", err)
+			}
+			assertAdminBootstrapMigrationAbsent(t, admin)
+			assertMigrationHistoryTip(t, admin, 41, adminPermissionMigration)
 		})
 	}
 }
@@ -4461,6 +4794,32 @@ func existingAdminBootstrapLoginPool(
 	}
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+func adminBootstrapSuperuserLoginPool(
+	t *testing.T,
+	admin *pgxpool.Pool,
+	login string,
+) *pgxpool.Pool {
+	t.Helper()
+	loginID := pgx.Identifier{login}.Sanitize()
+	if _, err := admin.Exec(context.Background(), fmt.Sprintf(`
+		CREATE ROLE %s LOGIN SUPERUSER PASSWORD 'platformgo-test-password'`,
+		loginID,
+	)); err != nil {
+		t.Fatalf("create admin bootstrap migration owner: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(
+			context.Background(),
+			"DROP OWNED BY "+loginID+" CASCADE",
+		)
+		_, _ = admin.Exec(
+			context.Background(),
+			"DROP ROLE IF EXISTS "+loginID,
+		)
+	})
+	return existingAdminBootstrapLoginPool(t, login)
 }
 
 func awaitAdminBootstrapRelationLockWait(

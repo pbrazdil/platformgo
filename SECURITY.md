@@ -77,10 +77,14 @@ Validate at each boundary. Internal origin does not make a payload valid.
   caller's transaction, and fails replay closed if the durable authority graph
   diverges. Under protected system-catalog, authority-tuple, RBAC, and audit
   locks, it verifies the exact bootstrap-role membership and ACL dependencies,
-  every temporary member's lack of other membership/dependency, trusted
-  function bodies/allowlists, exact schema owners, full relation catalogs,
-  standalone topology, internal and user triggers, rules, indexes, and
-  table/column ACLs before writing. Under the migration-journal lock it also
+  resolving the case-sensitive `session_user` catalog row directly to its OID
+  instead of parsing actor-controlled login text as `regrole`. Migration and
+  runtime definer-owner checks resolve exact case-sensitive `current_user`
+  catalog OIDs by the same rule. It verifies every temporary member's lack of
+  other membership/dependency, trusted function bodies/allowlists, exact schema
+  owners, full relation catalogs, standalone topology, internal and user
+  triggers, rules, indexes, and table/column ACLs before writing. Under the
+  migration-journal lock it also
   requires exact `engine` namespace authority, zero journal user triggers or
   rewrite rules, the exact 42-row tip, the caller-supplied migration-42
   checksum, and the canonical ordered predecessor manifest. It revalidates the

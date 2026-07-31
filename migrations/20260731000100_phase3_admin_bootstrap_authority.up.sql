@@ -205,7 +205,18 @@ $$;
 DO $$
 DECLARE
     locked_row_count bigint;
+    migration_owner_oid pg_catalog.oid;
 BEGIN
+    SELECT role.oid
+      INTO migration_owner_oid
+      FROM pg_catalog.pg_authid AS role
+     WHERE role.rolname::text OPERATOR(pg_catalog.=) current_user;
+    IF migration_owner_oid IS NULL THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'admin bootstrap migration owner is divergent';
+    END IF;
+
     PERFORM 1
       FROM pg_catalog.pg_namespace AS namespace
      WHERE namespace.oid IN (
@@ -219,10 +230,9 @@ BEGIN
     IF locked_row_count <> 3
         OR EXISTS (
             SELECT 1
-              FROM pg_catalog.pg_namespace AS namespace
+             FROM pg_catalog.pg_namespace AS namespace
              WHERE namespace.nspname IN ('engine', 'identity', 'audit')
-               AND namespace.nspowner <>
-                       current_user::pg_catalog.regrole::pg_catalog.oid
+               AND namespace.nspowner <> migration_owner_oid
         )
         OR EXISTS (
             SELECT 1
@@ -289,10 +299,21 @@ DO $$
 DECLARE
     relation_oid constant pg_catalog.oid :=
         'engine.schema_migrations'::pg_catalog.regclass;
+    migration_owner_oid pg_catalog.oid;
     actual_columns text[];
     actual_constraints text[];
     actual_indexes text[];
 BEGIN
+    SELECT role.oid
+      INTO migration_owner_oid
+      FROM pg_catalog.pg_authid AS role
+     WHERE role.rolname::text OPERATOR(pg_catalog.=) current_user;
+    IF migration_owner_oid IS NULL THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'admin bootstrap migration owner is divergent';
+    END IF;
+
     SELECT pg_catalog.array_agg(
                pg_catalog.format(
                    '%s:%s:%s:%s',
@@ -348,10 +369,9 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1
-          FROM pg_catalog.pg_class AS relation
+         FROM pg_catalog.pg_class AS relation
          WHERE relation.oid = relation_oid
-           AND relation.relowner =
-                   current_user::pg_catalog.regrole::pg_catalog.oid
+           AND relation.relowner = migration_owner_oid
            AND relation.relkind = 'r'
            AND relation.relpersistence = 'p'
            AND NOT relation.relrowsecurity
@@ -410,8 +430,7 @@ BEGIN
              WHERE attribute.attrelid = relation_oid
                AND attribute.attnum > 0
                AND NOT attribute.attisdropped
-               AND privilege.grantee <>
-                       current_user::pg_catalog.regrole::pg_catalog.oid
+               AND privilege.grantee <> migration_owner_oid
         )
     THEN
         RAISE EXCEPTION USING
@@ -441,6 +460,7 @@ $$;
 
 DO $$
 DECLARE
+    migration_owner_oid pg_catalog.oid;
     relation_name text;
     relation_oid pg_catalog.oid;
     relation_owner pg_catalog.oid;
@@ -457,6 +477,16 @@ DECLARE
     actual_indexes text[];
     expected_internal_trigger_count bigint;
 BEGIN
+    SELECT role.oid
+      INTO migration_owner_oid
+      FROM pg_catalog.pg_authid AS role
+     WHERE role.rolname::text OPERATOR(pg_catalog.=) current_user;
+    IF migration_owner_oid IS NULL THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'admin bootstrap migration owner is divergent';
+    END IF;
+
     FOREACH relation_name IN ARRAY ARRAY[
         'identity.rbac_roles',
         'identity.rbac_role_parents',
@@ -617,7 +647,7 @@ BEGIN
             expected_internal_trigger_count := 2;
         END CASE;
 
-        IF relation_owner <> current_user::pg_catalog.regrole::pg_catalog.oid
+        IF relation_owner <> migration_owner_oid
             OR relation_kind <> 'r'
             OR relation_persistence <> 'p'
             OR relation_row_security
@@ -710,7 +740,7 @@ BEGIN
          WHERE procedure.oid =
                    'identity.admin_has_permission(text,text,text)'::pg_catalog.regprocedure
            AND procedure.proowner =
-                   current_user::pg_catalog.regrole::pg_catalog.oid
+                   migration_owner_oid
            AND language.lanname = 'sql'
            AND procedure.provolatile = 's'
            AND procedure.prosecdef
@@ -746,7 +776,7 @@ BEGIN
          WHERE procedure.oid =
                    'engine.reject_immutable_change()'::pg_catalog.regprocedure
            AND procedure.proowner =
-                   current_user::pg_catalog.regrole::pg_catalog.oid
+                   migration_owner_oid
            AND language.lanname = 'plpgsql'
            AND procedure.provolatile = 'v'
            AND NOT procedure.prosecdef
@@ -1013,6 +1043,8 @@ DECLARE
     committed_event audit.admin_bootstrap_events%ROWTYPE;
     committed_event_found boolean;
     caller text := session_user;
+    caller_oid pg_catalog.oid;
+    owner_oid pg_catalog.oid;
     role_count bigint;
     parent_count bigint;
     assignment_count bigint;
@@ -1110,6 +1142,19 @@ BEGIN
     EXECUTE 'LOCK TABLE pg_catalog.pg_inherits IN SHARE MODE NOWAIT';
     EXECUTE 'LOCK TABLE pg_catalog.pg_namespace IN SHARE MODE NOWAIT';
     EXECUTE 'LOCK TABLE pg_catalog.pg_class IN SHARE MODE NOWAIT';
+    SELECT role.oid
+      INTO caller_oid
+      FROM pg_catalog.pg_authid AS role
+     WHERE role.rolname::text OPERATOR(pg_catalog.=) caller;
+    SELECT role.oid
+      INTO owner_oid
+      FROM pg_catalog.pg_authid AS role
+     WHERE role.rolname::text OPERATOR(pg_catalog.=) current_user;
+    IF caller_oid IS NULL OR owner_oid IS NULL THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'admin bootstrap role identity is divergent';
+    END IF;
     PERFORM 1
       FROM pg_catalog.pg_proc AS procedure
      WHERE procedure.oid IN (
@@ -1141,10 +1186,9 @@ BEGIN
     IF locked_function_count <> 3
         OR EXISTS (
             SELECT 1
-              FROM pg_catalog.pg_namespace AS namespace
+             FROM pg_catalog.pg_namespace AS namespace
              WHERE namespace.nspname IN ('engine', 'identity', 'audit')
-               AND namespace.nspowner <>
-                       current_user::pg_catalog.regrole::pg_catalog.oid
+               AND namespace.nspowner <> owner_oid
         )
         OR EXISTS (
             SELECT 1
@@ -1444,8 +1488,7 @@ BEGIN
             expected_internal_trigger_count := 0;
         END CASE;
 
-        IF relation_owner <>
-                current_user::pg_catalog.regrole::pg_catalog.oid
+        IF relation_owner <> owner_oid
             OR relation_kind <> 'r'
             OR relation_persistence <> 'p'
             OR relation_row_security
@@ -1597,7 +1640,7 @@ BEGIN
               FROM pg_catalog.pg_auth_members AS membership
              WHERE membership.roleid =
                        'platformgo_admin_bootstrap'::pg_catalog.regrole
-               AND membership.member = caller::pg_catalog.regrole
+               AND membership.member = caller_oid
                AND NOT membership.admin_option
                AND membership.inherit_option
                AND membership.set_option
@@ -1738,8 +1781,8 @@ BEGIN
                 ON language.oid = procedure.prolang
              WHERE procedure.oid =
                        'identity.admin_has_permission(text,text,text)'::pg_catalog.regprocedure
-               AND procedure.proowner =
-                       current_user::pg_catalog.regrole::pg_catalog.oid
+           AND procedure.proowner =
+                   owner_oid
                AND language.lanname = 'sql'
                AND procedure.provolatile = 's'
                AND procedure.prosecdef
@@ -1769,8 +1812,8 @@ BEGIN
                 ON language.oid = procedure.prolang
              WHERE procedure.oid =
                        'engine.reject_immutable_change()'::pg_catalog.regprocedure
-               AND procedure.proowner =
-                       current_user::pg_catalog.regrole::pg_catalog.oid
+           AND procedure.proowner =
+                   owner_oid
                AND language.lanname = 'plpgsql'
                AND procedure.provolatile = 'v'
                AND NOT procedure.prosecdef

@@ -515,11 +515,13 @@ commit; a suppressed, rewritten, duplicated, or altered journal effect rolls
 back the migration SQL. Migration 42 additionally fences the role, membership,
 event-trigger, class, attribute, inheritance, namespace, function,
 shared-dependency, and default-ACL catalogs; row-locks reused authority tuples;
-requires the migration owner to own `engine`, `identity`, and `audit` with no
-nonowner `CREATE`; and revalidates all six normal runtime roles. Before taking
-the first catalog fence, it takes transaction-retained object locks in fixed
-order on the existing `audit` and `identity` schemas and reused immutable-guard
-and permission functions. Each pre-fence object-lock acquisition has a
+resolves the exact case-sensitive `current_user` catalog row to its OID without
+parsing dynamic owner text as `regrole`; requires that owner to own `engine`,
+`identity`, and `audit` with no nonowner `CREATE`; and revalidates all six
+normal runtime roles. Before taking the first catalog fence, it takes
+transaction-retained object locks in fixed order on the existing `audit` and
+`identity` schemas and reused immutable-guard and permission functions. Each
+pre-fence object-lock acquisition has a
 one-second lock timeout. These waits hold no protected catalog lock and prevent
 a multi-object DDL statement from forming an object-lock-to-catalog inverse
 cycle. A missing or wrong-kind object yields `55000` immediately because every
@@ -565,11 +567,17 @@ For the one terminal bootstrap:
    application, give it a strong out-of-band credential, and grant it only
    membership in `platformgo_admin_bootstrap`. It must have no other parent
    membership, object ownership, ACL/default-ACL dependency, or direct grant;
-   the function enforces this under the protected catalogs.
+   the function enforces this under the protected catalogs by resolving the
+   exact case-sensitive `session_user` catalog row to its OID. It never parses
+   the operator login as `regrole` text, so case-colliding and numeric indirect
+   logins cannot substitute another role.
 2. Generate and durably record one request ID, one random idempotency key whose
    SHA-256 digest is supplied to PostgreSQL, one canonical
    `admin::urn:xb:admin:<lowercase UUID>` subject, one event UUID, and one
    canonical `YYYY-MM-DDTHH:MM:SS.ffffffZ` logical time. Record the reviewed
+   operator login with the exact `session_user` spelling; that spelling is
+   bound into the request hash and immutable receipt and must be reused for
+   replay or unknown-commit reconciliation. Record the reviewed
    SHA-256 checksum of migration 42 from the exact deployed artifact as
    `migration_checksum_sha256_hex`; the function uses it as a pre-write
    deployment precondition.

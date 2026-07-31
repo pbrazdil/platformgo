@@ -1064,14 +1064,19 @@ bootstrap fails closed, and replay first verifies that the receipt's exact
 role, policy, parent, and assignment graph and every receipt field, including
 the occurrence time and canonical detail, still exist. Before returning
 `created`, the function holds the same protected-catalog, authority-tuple,
-RBAC, and audit fences. It verifies the exact inert bootstrap role, the
-expected current-caller membership, every other temporary member as an
-unprivileged login with the same non-grantable membership options, the only
-two role dependencies and their exact ACL bits/grantors, zero other membership
-or shared dependency for every temporary member, both trusted function bodies
-and allowlists, exact `engine`/`identity`/`audit` schema ownership, and every
-journal/RBAC/audit relation field listed above, including zero journal user
-triggers and rewrite rules. The first-write path then revalidates the complete
+RBAC, and audit fences. It verifies the exact inert bootstrap role and resolves
+the exact case-sensitive `session_user` row from `pg_authid` to its OID under
+the catalog fence rather than parsing the login as `regrole` text. This rejects
+numeric or case-colliding indirect callers. Migration and runtime owner checks
+likewise resolve the exact case-sensitive `current_user` catalog row to its OID;
+they never parse a dynamic owner name as `regrole`. It verifies every other
+temporary member as an unprivileged login with the same non-grantable
+membership options, the only two role dependencies and their exact ACL
+bits/grantors, zero other membership or shared dependency for every temporary
+member, both trusted function bodies and allowlists, exact
+`engine`/`identity`/`audit` schema ownership, and every journal/RBAC/audit
+relation field listed above, including zero journal user triggers and rewrite
+rules. The first-write path then revalidates the complete
 one-role, zero-parent, one-assignment, one-policy, and one-receipt graph;
 unexpected topology, constraints, defaults, indexes, rules, ACLs, or
 immediate/deferred trigger authority raises `55000` before any write and rolls
