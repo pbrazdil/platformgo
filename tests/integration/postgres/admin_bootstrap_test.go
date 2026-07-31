@@ -86,7 +86,7 @@ func TestAdminBootstrapCreatesAndReplaysOneAuditedAuthority(t *testing.T) {
 		eventID,
 		logicalTime,
 	)
-	if replayed != createdWithOutcome(created, "replayed") {
+	if replayed != created {
 		t.Fatalf("replayed result = %#v, want %#v", replayed, created)
 	}
 
@@ -343,10 +343,16 @@ func TestAdminBootstrapUnknownCommitReplaysAfterTerminalRestart(t *testing.T) {
 		eventID,
 		logicalTime,
 	)
-	if replayed.outcome != "replayed" ||
-		replayed.adminSubject != subject ||
-		replayed.eventID != eventID {
-		t.Fatalf("restart replay result = %#v", replayed)
+	want := adminBootstrapResult{
+		outcome:              "created",
+		adminSubject:         subject,
+		roleName:             adminBootstrapRoleName,
+		configurationVersion: 1,
+		eventID:              eventID,
+		logicalTimeText:      logicalTime,
+	}
+	if replayed != want {
+		t.Fatalf("restart replay result = %#v, want %#v", replayed, want)
 	}
 }
 
@@ -1415,14 +1421,6 @@ func existingAdminBootstrapLoginPool(
 	}
 	t.Cleanup(pool.Close)
 	return pool
-}
-
-func createdWithOutcome(
-	result adminBootstrapResult,
-	outcome string,
-) adminBootstrapResult {
-	result.outcome = outcome
-	return result
 }
 
 func adminBootstrapIsPostgresCode(err error, code string) bool {
