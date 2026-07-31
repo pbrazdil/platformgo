@@ -1004,14 +1004,35 @@ direction. The role must have no ACL or ownership dependency on any database
 object or default privilege. The migration also validates the exact four-table
 RBAC catalog and authorization-function owner, signature, security metadata,
 configuration, and body before reusing them, and refuses a nonempty RBAC graph.
-It then seeds exactly one fixed built-in `platformgo-superadmin` role with one
-`*/*/allow` policy; it does not seed an administrator, credential, session,
-token, or runtime route.
+This one migration must run as a superuser. It rejects every enabled database
+event trigger before its first DDL. Before validation it takes bounded `SHARE`
+locks on the role, membership, event-trigger, class, attribute, inheritance,
+namespace, function, shared-dependency, and default-ACL catalogs; row-locks
+every reused authority tuple; requires the migration owner to own
+`engine`/`identity`/`audit` with no nonowner `CREATE`; and revalidates all six
+ordinary runtime roles inside that fence. It then takes
+`SHARE ROW EXCLUSIVE` locks on the exact migration journal and all four RBAC
+relations in fixed order. The migrator reloads and compares the complete
+applied manifest after acquiring the journal lock. The journal and relation
+catalogs include exact owner/kind/persistence/RLS, standalone
+nonpartitioned/noninherited topology, columns/defaults, constraints, indexes,
+internal and user triggers, rules, table/column ACLs, and graph state.
+All fences are retained through the checksum journal commit, so concurrent
+role, function, ACL, journal, or RBAC DDL cannot enter between validation and
+seeding. It then seeds exactly one fixed built-in
+`platformgo-superadmin` role with one `*/*/allow` policy; it does not seed an
+administrator, credential, session, token, or runtime route.
 
-`identity.bootstrap_first_admin(text,bytea,text,uuid,text)` is the sole mutation
-boundary. A member login supplies an explicit request ID, SHA-256 idempotency
-key hash, canonical lowercase-UUID admin subject, event UUID, and canonical
-microsecond UTC logical time. The function derives an exact request hash,
+`identity.bootstrap_first_admin(text,bytea,text,uuid,text,bytea)` is the sole
+mutation boundary. A member login supplies an explicit request ID, SHA-256
+idempotency key hash, canonical lowercase-UUID admin subject, event UUID,
+canonical microsecond UTC logical time, and the expected 32-byte checksum of
+migration 42. The checksum is a deployment precondition and is not part of the
+business idempotency hash. Under the journal lock, the function requires the
+exact 42-row tip, the requested migration-42 checksum, and the canonical
+ordered checksum of all 41 predecessor rows before any authority write. It
+rejects a null, malformed, or noncanonical input with SQLSTATE `22023`, before
+any authority write. It then derives an exact request hash,
 serializes through fixed advisory locks, and writes the sole assignment plus
 the append-only `audit.admin_bootstrap_events` receipt atomically within the
 caller's transaction. The returned row is provisional until that transaction
@@ -1020,17 +1041,36 @@ verification after `COMMIT`. An identical retry returns the same persisted
 `created` result; replay observability is not encoded by changing the
 idempotent response. Reused keys or identities conflict, every later distinct
 bootstrap fails closed, and replay first verifies that the receipt's exact
-role, policy, parent, and assignment graph still exists.
+role, policy, parent, and assignment graph and every receipt field, including
+the occurrence time and canonical detail, still exist. Before returning
+`created`, the function holds the same protected-catalog, authority-tuple,
+RBAC, and audit fences. It verifies the exact inert bootstrap role, the
+expected current-caller membership, every other temporary member as an
+unprivileged login with the same non-grantable membership options, the only
+two role dependencies and their exact ACL bits/grantors, zero other membership
+or shared dependency for every temporary member, both trusted function bodies
+and allowlists, exact `engine`/`identity`/`audit` schema ownership, and every
+journal/RBAC/audit relation field listed above, including zero journal user
+triggers and rewrite rules. The first-write path then revalidates the complete
+one-role, zero-parent, one-assignment, one-policy, and one-receipt graph;
+unexpected topology, constraints, defaults, indexes, rules, ACLs, or
+immediate/deferred trigger authority raises `55000` before any write and rolls
+back the caller's transaction.
 Row-level update/delete and statement-level truncate triggers make the receipt
 append-only even to the migration owner.
 
 The function is `SECURITY DEFINER` with `search_path=pg_catalog`.
+Its migration-owner superuser authority exists only to acquire the protected
+catalog and catalog-tuple fences above; exact function metadata/body and
+least-privilege schema/function ACLs are part of the fail-closed boundary.
 `platformgo_admin_bootstrap` receives only non-grantable schema usage and
 function execute; it has no raw RBAC or audit table privilege. The migration
 removes `PUBLIC`, default-derived, named, column, grant-option, and dependent
 same-object grants from all five authority relations and both permission
 functions. Existing identity, API-key, and audit relations are neither
 rewritten nor changed. A tip-41 binary must reject tip 42 as schema-ahead.
+The migrator requires exactly one inserted checksum row and reloads the full
+expected post-insert manifest before committing each migration.
 Operational invocation and unknown-commit recovery are defined in
 `OPERATIONS.md`.
 

@@ -499,19 +499,44 @@ pre-provision `platformgo_admin_bootstrap` as `NOLOGIN`, `NOSUPERUSER`,
 `NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, and `NOBYPASSRLS`, with no role
 membership, object ownership, direct or grantable ACL, or default-privilege
 dependency. A missing or unsafe role returns `42501`; a divergent tip-41 RBAC
-catalog or nonempty graph returns `55000`. The migrator bounds acquisition of
-its global advisory lock at five seconds before executing a migration, and
-migration 42 separately bounds relation-lock acquisition at five seconds and
-each migration statement at fifteen seconds. Either failure must leave
-migration 42 unjournaled and all tip-41 state unchanged before a repaired
-retry; these are per-acquisition and per-statement bounds, not a fifteen-second
-end-to-end transaction deadline.
+catalog or nonempty graph returns `55000`. Migration 42 is an exceptional
+one-shot superuser migration so it can fence protected catalogs; do not grant
+that authority to the application or ordinary steady-state migrator. Inventory
+database event triggers before the window and disable every enabled one;
+migration 42 refuses to run while any remains enabled. On an existing database
+the migrator detects the journal read-only and skips preliminary no-op metadata
+DDL that could fire an event trigger. It bounds acquisition of its global
+advisory lock at five seconds before executing a migration. Every pending-file
+transaction then locks the journal and reloads the complete filename/checksum
+manifest before executing SQL; drift from the first read is a checksum mismatch
+and rolls back. After executing SQL, the migrator requires exactly one inserted
+checksum row and reloads the complete expected post-insert manifest before
+commit; a suppressed, rewritten, duplicated, or altered journal effect rolls
+back the migration SQL. Migration 42 additionally fences the role, membership,
+event-trigger, class, attribute, inheritance, namespace, function,
+shared-dependency, and default-ACL catalogs; row-locks reused authority tuples;
+requires the migration owner to own `engine`, `identity`, and `audit` with no
+nonowner `CREATE`; and revalidates all six normal runtime roles. It
+exact-validates `engine.schema_migrations`, then locks all four RBAC relations
+in fixed order. Validation covers standalone nonpartitioned topology, full
+relation shape, indexes, internal and user trigger behavior, rules, and
+table/column/schema/function ACLs. It retains every fence through the checksum
+insert and commit and separately bounds lock acquisition at five seconds and
+each migration statement at fifteen seconds. Concurrent role, function, ACL,
+journal, topology, or RBAC DDL/data changes committed while the migration waits
+are therefore inspected and rejected. Either failure must leave migration 42
+unjournaled and all tip-41 state unchanged before a repaired retry; these are
+per-acquisition and per-statement bounds, not a fifteen-second end-to-end
+transaction deadline.
 
 After migration, verify the exact checksum and tip, the sole built-in
 `platformgo-superadmin` role, its sole `*/*/allow` policy, zero assignments and
 zero bootstrap events, unchanged preexisting identity/API-key/audit digests
-and relation files, the enabled row and statement-level immutability triggers,
-the exact trusted RBAC/function catalog, and the documented ACL allowlist.
+and relation files, the enabled exact internal FK and audit immutability
+triggers, zero rewrite rules, the exact trusted journal/RBAC/function catalog,
+standalone zero-inheritance topology, exact `engine`/`identity`/`audit` owners,
+and the documented table, column, schema, and function ACL allowlists. Restore
+only reviewed event triggers after this verification and before unrelated DDL.
 Do not activate an HTTP route, issue an admin token, or invent a
 password/session record.
 
@@ -519,11 +544,16 @@ For the one terminal bootstrap:
 
 1. Create a short-lived, individually attributable login outside the
    application, give it a strong out-of-band credential, and grant it only
-   membership in `platformgo_admin_bootstrap`.
+   membership in `platformgo_admin_bootstrap`. It must have no other parent
+   membership, object ownership, ACL/default-ACL dependency, or direct grant;
+   the function enforces this under the protected catalogs.
 2. Generate and durably record one request ID, one random idempotency key whose
    SHA-256 digest is supplied to PostgreSQL, one canonical
    `admin::urn:xb:admin:<lowercase UUID>` subject, one event UUID, and one
-   canonical `YYYY-MM-DDTHH:MM:SS.ffffffZ` logical time.
+   canonical `YYYY-MM-DDTHH:MM:SS.ffffffZ` logical time. Record the reviewed
+   SHA-256 checksum of migration 42 from the exact deployed artifact as
+   `migration_checksum_sha256_hex`; the function uses it as a pre-write
+   deployment precondition.
 3. Connect as that login with client-side stop-on-error enabled. Run the
    bootstrap in an explicit transaction and require a successful `COMMIT`:
 
@@ -538,18 +568,27 @@ For the one terminal bootstrap:
        pg_catalog.decode(:'idempotency_key_sha256_hex', 'hex'),
        :'admin_subject',
        :'event_id'::uuid,
-       :'logical_time'
+       :'logical_time',
+       pg_catalog.decode(:'migration_checksum_sha256_hex', 'hex')
      );
 
    COMMIT;
    ```
 
-   The returned `created` row is provisional until PostgreSQL confirms
-   `COMMIT`. Do not acknowledge success or begin credential cleanup from a
-   result observed inside an open transaction.
+   Before writing, the function locks and exact-validates the `engine` namespace
+   plus the 42-row migration journal, including zero user triggers/rules, the
+   supplied migration-42 checksum, and the canonical ordered manifest through
+   migration 41. The returned `created` row is
+   provisional until PostgreSQL confirms `COMMIT`. Do not acknowledge success
+   or begin credential cleanup from a result observed inside an open
+   transaction.
 4. Close that session. From a fresh, independently authorized database session,
-   verify the exact migration checksum, one matching assignment, one immutable
-   audit receipt, and
+   verify the exact migration checksum and the complete graph cardinality:
+   exactly one fixed built-in role, zero parents, exactly one intended
+   assignment, exactly one fixed `*/*/allow` policy, and exactly one immutable
+   receipt. Verify every receipt identity, request/key/request hash, event,
+   logical/occurrence time, role/version/outcome, and canonical detail field,
+   plus
    `identity.admin_has_permission(subject, 'roles', 'read') = true`. Only this
    post-commit observation establishes durable success. The stored wildcard
    policy applies to each concrete catalog request; `*` is not itself a valid
@@ -567,8 +606,9 @@ again after a committed prior attempt, or the retry creates and commits the
 same authority when the prior transaction did not commit. Replay observability
 must not change that idempotent response. After the retry commits, repeat the
 fresh-session verification in step 4 before credential cleanup. SQLSTATE
-`22000` is an idempotency conflict and `55000` is either an already-established
-or divergent authority requiring a halt and catalog/audit investigation.
+`22023` is a null, malformed, or noncanonical request; `22000` is an
+idempotency conflict; and `55000` is either an already-established or divergent
+authority requiring a halt and catalog/audit investigation.
 Inventory the exact receipt, assignment, fixed role/policy graph, both enabled
 immutability triggers, function definition and ACL, migration checksum, and
 actor before deciding whether to retry. There is intentionally no unassign,

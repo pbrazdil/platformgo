@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -19,9 +21,10 @@ import (
 )
 
 const (
-	adminBootstrapMigration = "20260731000100_phase3_admin_bootstrap_authority.up.sql"
-	adminBootstrapRoleID    = "00000000-0000-4000-8000-000000000001"
-	adminBootstrapRoleName  = "platformgo-superadmin"
+	adminBootstrapMigration            = "20260731000100_phase3_admin_bootstrap_authority.up.sql"
+	adminBootstrapMigrationChecksumHex = "298d77c39400f2907337cdd6681ca209f0bcbf431bd41fee0dfce80eb3f03e3b"
+	adminBootstrapRoleID               = "00000000-0000-4000-8000-000000000001"
+	adminBootstrapRoleName             = "platformgo-superadmin"
 )
 
 type adminBootstrapResult struct {
@@ -178,7 +181,7 @@ func TestAdminBootstrapCreatesAndReplaysOneAuditedAuthority(t *testing.T) {
 					dependency.classid =
 						'pg_catalog.pg_proc'::pg_catalog.regclass
 					AND dependency.objid =
-						'identity.bootstrap_first_admin(text,bytea,text,uuid,text)'::pg_catalog.regprocedure
+						'identity.bootstrap_first_admin(text,bytea,text,uuid,text,bytea)'::pg_catalog.regprocedure
 					AND dependency.deptype = 'a'
 				)
 			)
@@ -208,6 +211,26 @@ func TestAdminBootstrapCreatesAndReplaysOneAuditedAuthority(t *testing.T) {
 		"00000000-0000-4000-8000-000000000043",
 		logicalTime,
 	)
+	assertAdminBootstrapSQLState(
+		t,
+		terminal,
+		"22000",
+		requestID,
+		keyHash[:],
+		"admin::urn:xb:admin:00000000-0000-4000-8000-000000000043",
+		eventID,
+		logicalTime,
+	)
+	assertAdminBootstrapSQLState(
+		t,
+		terminal,
+		"22000",
+		requestID,
+		keyHash[:],
+		subject,
+		eventID,
+		"2026-07-31T00:00:00.000001Z",
+	)
 	otherKey := sha256.Sum256([]byte("different-bootstrap-key"))
 	assertAdminBootstrapSQLState(
 		t,
@@ -234,6 +257,335 @@ func TestAdminBootstrapCreatesAndReplaysOneAuditedAuthority(t *testing.T) {
 		UPDATE audit.admin_bootstrap_events
 		   SET outcome = 'success'`); !adminBootstrapIsPostgresCode(err, "42501") {
 		t.Fatalf("terminal direct audit DML error = %v", err)
+	}
+}
+
+func TestAdminBootstrapRejectsNullInputs(t *testing.T) {
+	tests := []struct {
+		name  string
+		index int
+	}{
+		{name: "request id", index: 0},
+		{name: "idempotency key hash", index: 1},
+		{name: "admin subject", index: 2},
+		{name: "event id", index: 3},
+		{name: "logical time", index: 4},
+		{name: "migration checksum", index: 5},
+	}
+	for testIndex, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := context.Background()
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+			if err := platformpostgres.NewMigrator(
+				admin,
+				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			).Migrate(ctx); err != nil {
+				t.Fatalf("migrate admin bootstrap authority: %v", err)
+			}
+
+			terminal := runtimeRoleLoginPool(
+				t,
+				admin,
+				fmt.Sprintf(
+					"platformgo_admin_bootstrap_null_test_login_%d",
+					testIndex,
+				),
+				"platformgo_admin_bootstrap",
+			)
+			requestID := fmt.Sprintf(
+				"bootstrap-request-null-%d",
+				testIndex,
+			)
+			subject := fmt.Sprintf(
+				"admin::urn:xb:admin:00000000-0000-4000-8000-%012d",
+				130+testIndex,
+			)
+			eventID := fmt.Sprintf(
+				"00000000-0000-4000-8000-%012d",
+				130+testIndex,
+			)
+			logicalTime := "2026-07-31T00:00:00.000000Z"
+			keyHash := sha256.Sum256(
+				[]byte(fmt.Sprintf("bootstrap-null-key-%d", testIndex)),
+			)
+			arguments := []any{
+				requestID,
+				keyHash[:],
+				subject,
+				eventID,
+				logicalTime,
+				adminBootstrapMigrationChecksum(t),
+			}
+			arguments[testCase.index] = nil
+			var outcome string
+			err := terminal.QueryRow(ctx, `
+				SELECT outcome
+				  FROM identity.bootstrap_first_admin(
+					$1::text,
+					$2::bytea,
+					$3::text,
+					$4::uuid,
+					$5::text,
+					$6::bytea
+				  )`,
+				arguments...,
+			).Scan(&outcome)
+			if !adminBootstrapIsPostgresCode(err, "22023") {
+				t.Fatalf(
+					"null %s bootstrap error = %v outcome %q, want 22023",
+					testCase.name,
+					err,
+					outcome,
+				)
+			}
+			assertAdminBootstrapAuthorityCounts(t, admin, 0, 0)
+
+			got := callAdminBootstrap(
+				t,
+				terminal,
+				requestID,
+				keyHash[:],
+				subject,
+				eventID,
+				logicalTime,
+			)
+			if got.outcome != "created" {
+				t.Fatalf("bootstrap after null-input retry = %#v", got)
+			}
+		})
+	}
+}
+
+func TestAdminBootstrapRejectsDivergentRuntimeJournal(t *testing.T) {
+	ctx := context.Background()
+	for index, testCase := range []struct {
+		name   string
+		mutate string
+		repair string
+	}{
+		{
+			name: "missing migration tip",
+			mutate: `
+				DELETE FROM engine.schema_migrations
+				 WHERE filename = $1`,
+			repair: `
+				INSERT INTO engine.schema_migrations (filename, checksum)
+				VALUES ($1, $2)`,
+		},
+		{
+			name: "wrong migration checksum",
+			mutate: `
+				UPDATE engine.schema_migrations
+				   SET checksum = pg_catalog.decode(
+				       repeat('00', 32),
+				       'hex'
+				   )
+				 WHERE filename = $1`,
+			repair: `
+				UPDATE engine.schema_migrations
+				   SET checksum = $2
+				 WHERE filename = $1`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+			if err := platformpostgres.NewMigrator(
+				admin,
+				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			).Migrate(ctx); err != nil {
+				t.Fatalf("migrate admin bootstrap authority: %v", err)
+			}
+
+			login := fmt.Sprintf(
+				"platformgo_admin_bootstrap_journal_test_login_%d",
+				index,
+			)
+			terminal := runtimeRoleLoginPool(
+				t,
+				admin,
+				login,
+				"platformgo_admin_bootstrap",
+			)
+			if _, err := admin.Exec(
+				ctx,
+				testCase.mutate,
+				adminBootstrapMigration,
+			); err != nil {
+				t.Fatalf("diverge runtime journal: %v", err)
+			}
+
+			requestID := fmt.Sprintf("bootstrap-request-journal-%d", index)
+			subject := fmt.Sprintf(
+				"admin::urn:xb:admin:00000000-0000-4000-8000-%012d",
+				110+index,
+			)
+			eventID := fmt.Sprintf(
+				"00000000-0000-4000-8000-%012d",
+				110+index,
+			)
+			keyHash := sha256.Sum256(
+				[]byte(fmt.Sprintf("bootstrap-journal-key-%d", index)),
+			)
+			assertAdminBootstrapSQLState(
+				t,
+				terminal,
+				"55000",
+				requestID,
+				keyHash[:],
+				subject,
+				eventID,
+				"2026-07-31T00:00:00.000000Z",
+			)
+
+			var assignments, receipts int
+			if err := admin.QueryRow(ctx, `
+				SELECT
+					(SELECT count(*) FROM identity.rbac_admin_roles),
+					(SELECT count(*) FROM audit.admin_bootstrap_events)`,
+			).Scan(&assignments, &receipts); err != nil {
+				t.Fatalf("inspect rejected divergent journal: %v", err)
+			}
+			if assignments != 0 || receipts != 0 {
+				t.Fatalf(
+					"divergent journal state = assignments %d receipts %d",
+					assignments,
+					receipts,
+				)
+			}
+
+			if _, err := admin.Exec(
+				ctx,
+				testCase.repair,
+				adminBootstrapMigration,
+				adminBootstrapMigrationChecksum(t),
+			); err != nil {
+				t.Fatalf("repair runtime journal: %v", err)
+			}
+			got := callAdminBootstrap(
+				t,
+				terminal,
+				requestID,
+				keyHash[:],
+				subject,
+				eventID,
+				"2026-07-31T00:00:00.000000Z",
+			)
+			if got.outcome != "created" {
+				t.Fatalf("bootstrap after journal repair = %#v", got)
+			}
+		})
+	}
+}
+
+func TestAdminBootstrapRejectsUnsafeEngineNamespaceAuthority(t *testing.T) {
+	for index, testCase := range []struct {
+		name      string
+		install   string
+		repair    string
+		dropRoles string
+	}{
+		{
+			name: "external engine schema owner",
+			install: `
+				CREATE ROLE platformgo_admin_bootstrap_engine_owner NOLOGIN;
+				ALTER SCHEMA engine
+					OWNER TO platformgo_admin_bootstrap_engine_owner`,
+			repair: `
+				ALTER SCHEMA engine OWNER TO CURRENT_USER`,
+			dropRoles: `
+				DROP ROLE IF EXISTS platformgo_admin_bootstrap_engine_owner`,
+		},
+		{
+			name: "nonowner engine create privilege",
+			install: `
+				GRANT CREATE ON SCHEMA engine
+					TO platformgo_admin_bootstrap`,
+			repair: `
+				REVOKE CREATE ON SCHEMA engine
+					FROM platformgo_admin_bootstrap`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := context.Background()
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+			if err := platformpostgres.NewMigrator(
+				admin,
+				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			).Migrate(ctx); err != nil {
+				t.Fatalf("migrate admin bootstrap authority: %v", err)
+			}
+			if _, err := admin.Exec(ctx, testCase.install); err != nil {
+				t.Fatalf("install unsafe engine namespace authority: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = admin.Exec(context.Background(), testCase.repair)
+				if testCase.dropRoles != "" {
+					_, _ = admin.Exec(
+						context.Background(),
+						testCase.dropRoles,
+					)
+				}
+			})
+
+			login := fmt.Sprintf(
+				"platformgo_admin_bootstrap_engine_schema_login_%d",
+				index,
+			)
+			terminal := runtimeRoleLoginPool(
+				t,
+				admin,
+				login,
+				"platformgo_admin_bootstrap",
+			)
+			requestID := fmt.Sprintf(
+				"bootstrap-request-engine-schema-%d",
+				index,
+			)
+			subject := fmt.Sprintf(
+				"admin::urn:xb:admin:00000000-0000-4000-8000-%012d",
+				120+index,
+			)
+			eventID := fmt.Sprintf(
+				"00000000-0000-4000-8000-%012d",
+				120+index,
+			)
+			keyHash := sha256.Sum256(
+				[]byte(fmt.Sprintf("bootstrap-engine-schema-key-%d", index)),
+			)
+			assertAdminBootstrapSQLState(
+				t,
+				terminal,
+				"55000",
+				requestID,
+				keyHash[:],
+				subject,
+				eventID,
+				"2026-07-31T00:00:00.000000Z",
+			)
+			assertAdminBootstrapAuthorityCounts(t, admin, 0, 0)
+
+			if _, err := admin.Exec(ctx, testCase.repair); err != nil {
+				t.Fatalf("repair engine namespace authority: %v", err)
+			}
+			got := callAdminBootstrap(
+				t,
+				terminal,
+				requestID,
+				keyHash[:],
+				subject,
+				eventID,
+				"2026-07-31T00:00:00.000000Z",
+			)
+			if got.outcome != "created" {
+				t.Fatalf("bootstrap after engine namespace repair = %#v", got)
+			}
+		})
 	}
 }
 
@@ -294,6 +646,565 @@ func TestAdminBootstrapReplayFailsClosedWhenCommittedAuthorityDiverges(
 	)
 }
 
+func TestAdminBootstrapReplayRejectsCorruptedReceiptFields(t *testing.T) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := platformpostgres.NewMigrator(
+		admin,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("migrate admin bootstrap authority: %v", err)
+	}
+
+	terminal := runtimeRoleLoginPool(
+		t,
+		admin,
+		"platformgo_admin_bootstrap_receipt_corruption_login",
+		"platformgo_admin_bootstrap",
+	)
+	const (
+		subject     = "admin::urn:xb:admin:00000000-0000-4000-8000-000000000045"
+		requestID   = "bootstrap-request-receipt-corruption"
+		eventID     = "00000000-0000-4000-8000-000000000045"
+		logicalTime = "2026-07-31T00:00:00.000000Z"
+	)
+	keyHash := sha256.Sum256([]byte("stable-bootstrap-receipt-corruption-key"))
+	callAdminBootstrap(
+		t,
+		terminal,
+		requestID,
+		keyHash[:],
+		subject,
+		eventID,
+		logicalTime,
+	)
+
+	if _, err := admin.Exec(ctx, `
+		ALTER TABLE audit.admin_bootstrap_events
+			DISABLE TRIGGER admin_bootstrap_events_are_immutable;
+		UPDATE audit.admin_bootstrap_events
+		   SET occurred_at = occurred_at + interval '1 microsecond',
+		       detail = '{"corrupted":true}'::jsonb;
+		ALTER TABLE audit.admin_bootstrap_events
+			ENABLE TRIGGER admin_bootstrap_events_are_immutable`); err != nil {
+		t.Fatalf("corrupt bootstrap receipt and restore guard: %v", err)
+	}
+	assertAdminBootstrapSQLState(
+		t,
+		terminal,
+		"55000",
+		requestID,
+		keyHash[:],
+		subject,
+		eventID,
+		logicalTime,
+	)
+}
+
+func TestAdminBootstrapPostWriteGraphValidationRejectsInjectedAssignment(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := platformpostgres.NewMigrator(
+		admin,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("migrate admin bootstrap authority: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `
+		CREATE FUNCTION public.inject_admin_assignment()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		SET search_path = pg_catalog
+		AS $$
+		BEGIN
+			IF NEW.admin_subject <>
+				'admin::urn:xb:admin:00000000-0000-4000-8000-0000000000ff'
+			THEN
+				INSERT INTO identity.rbac_admin_roles (
+					admin_subject,
+					role_id
+				) VALUES (
+					'admin::urn:xb:admin:00000000-0000-4000-8000-0000000000ff',
+					NEW.role_id
+				);
+			END IF;
+			RETURN NEW;
+		END
+		$$;
+		CREATE TRIGGER inject_admin_assignment
+		BEFORE INSERT ON identity.rbac_admin_roles
+		FOR EACH ROW
+		EXECUTE FUNCTION public.inject_admin_assignment()`); err != nil {
+		t.Fatalf("install injected admin assignment trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS inject_admin_assignment
+				ON identity.rbac_admin_roles;
+			DROP FUNCTION IF EXISTS public.inject_admin_assignment()`)
+	})
+
+	terminal := runtimeRoleLoginPool(
+		t,
+		admin,
+		"platformgo_admin_bootstrap_post_write_test_login",
+		"platformgo_admin_bootstrap",
+	)
+	keyHash := sha256.Sum256([]byte("stable-bootstrap-post-write-key"))
+	var outcome string
+	err := terminal.QueryRow(ctx, `
+		SELECT outcome
+		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
+		"bootstrap-request-post-write",
+		keyHash[:],
+		"admin::urn:xb:admin:00000000-0000-4000-8000-00000000004b",
+		"00000000-0000-4000-8000-00000000004b",
+		"2026-07-31T00:00:00.000000Z",
+		adminBootstrapMigrationChecksum(t),
+	).Scan(&outcome)
+	if !adminBootstrapIsPostgresCode(err, "55000") {
+		t.Fatalf(
+			"bootstrap with injected assignment error = %v outcome %q, want 55000",
+			err,
+			outcome,
+		)
+	}
+
+	var assignments, receipts int
+	if err := admin.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM identity.rbac_admin_roles),
+			(SELECT count(*) FROM audit.admin_bootstrap_events)`,
+	).Scan(&assignments, &receipts); err != nil {
+		t.Fatalf("inspect rejected injected assignment: %v", err)
+	}
+	if assignments != 0 || receipts != 0 {
+		t.Fatalf(
+			"rejected injected assignment state = assignments %d receipts %d",
+			assignments,
+			receipts,
+		)
+	}
+}
+
+func TestAdminBootstrapRejectsUnexpectedCatalogAuthority(
+	t *testing.T,
+) {
+	tests := []struct {
+		name       string
+		installSQL string
+	}{
+		{
+			name: "immediate out-of-graph effect",
+			installSQL: `
+				CREATE FUNCTION public.inject_admin_bootstrap_side_effect()
+				RETURNS trigger
+				LANGUAGE plpgsql
+				SET search_path = pg_catalog
+				AS $$
+				BEGIN
+					INSERT INTO public.admin_bootstrap_side_effect (subject)
+					VALUES (NEW.admin_subject);
+					RETURN NEW;
+				END
+				$$;
+				CREATE TRIGGER inject_admin_bootstrap_side_effect
+				BEFORE INSERT ON identity.rbac_admin_roles
+				FOR EACH ROW
+				EXECUTE FUNCTION public.inject_admin_bootstrap_side_effect()`,
+		},
+		{
+			name: "deferred assignment",
+			installSQL: `
+				CREATE FUNCTION public.inject_deferred_admin_assignment()
+				RETURNS trigger
+				LANGUAGE plpgsql
+				SET search_path = pg_catalog
+				AS $$
+				BEGIN
+					IF NEW.admin_subject <>
+						'admin::urn:xb:admin:00000000-0000-4000-8000-0000000000ff'
+					THEN
+						INSERT INTO identity.rbac_admin_roles (
+							admin_subject,
+							role_id
+						) VALUES (
+							'admin::urn:xb:admin:00000000-0000-4000-8000-0000000000ff',
+							NEW.role_id
+						);
+					END IF;
+					RETURN NULL;
+				END
+				$$;
+				CREATE CONSTRAINT TRIGGER inject_deferred_admin_assignment
+				AFTER INSERT ON identity.rbac_admin_roles
+				DEFERRABLE INITIALLY DEFERRED
+				FOR EACH ROW
+				EXECUTE FUNCTION public.inject_deferred_admin_assignment()`,
+		},
+		{
+			name: "rewrite rule out-of-graph effect",
+			installSQL: `
+				CREATE RULE inject_admin_bootstrap_rule_effect
+				AS ON INSERT TO identity.rbac_admin_roles
+				DO ALSO
+					INSERT INTO public.admin_bootstrap_side_effect (subject)
+					VALUES (NEW.admin_subject)`,
+		},
+		{
+			name: "migration journal rewrite rule",
+			installSQL: `
+				CREATE RULE suppress_future_journal
+				AS ON INSERT TO engine.schema_migrations
+				DO INSTEAD NOTHING`,
+		},
+		{
+			name: "migration journal user trigger",
+			installSQL: `
+				CREATE FUNCTION public.pass_migration_journal_insert()
+				RETURNS trigger
+				LANGUAGE plpgsql
+				SET search_path = pg_catalog
+				AS $$
+				BEGIN
+					RETURN NEW;
+				END
+				$$;
+				CREATE TRIGGER pass_migration_journal_insert
+				BEFORE INSERT ON engine.schema_migrations
+				FOR EACH ROW
+				EXECUTE FUNCTION public.pass_migration_journal_insert()`,
+		},
+		{
+			name: "immutable trigger false predicate",
+			installSQL: `
+				DROP TRIGGER admin_bootstrap_events_are_immutable
+					ON audit.admin_bootstrap_events;
+				CREATE TRIGGER admin_bootstrap_events_are_immutable
+				BEFORE UPDATE OR DELETE ON audit.admin_bootstrap_events
+				FOR EACH ROW
+				WHEN (false)
+				EXECUTE FUNCTION engine.reject_immutable_change()`,
+		},
+		{
+			name: "immutable trigger narrowed update columns",
+			installSQL: `
+				DROP TRIGGER admin_bootstrap_events_are_immutable
+					ON audit.admin_bootstrap_events;
+				CREATE TRIGGER admin_bootstrap_events_are_immutable
+				BEFORE UPDATE OF detail OR DELETE
+					ON audit.admin_bootstrap_events
+				FOR EACH ROW
+				EXECUTE FUNCTION engine.reject_immutable_change()`,
+		},
+		{
+			name: "side-effecting check constraint",
+			installSQL: `
+				CREATE FUNCTION public.capture_admin_bootstrap_check(text)
+				RETURNS boolean
+				LANGUAGE plpgsql
+				VOLATILE
+				SET search_path = pg_catalog
+				AS $$
+				BEGIN
+					INSERT INTO public.admin_bootstrap_side_effect (subject)
+					VALUES ($1);
+					RETURN true;
+				END
+				$$;
+				ALTER TABLE identity.rbac_admin_roles
+					ADD CONSTRAINT injected_check_side_effect
+					CHECK (
+						public.capture_admin_bootstrap_check(admin_subject)
+					)`,
+		},
+		{
+			name: "raw relation privilege",
+			installSQL: `
+				GRANT INSERT ON identity.rbac_admin_roles TO PUBLIC`,
+		},
+		{
+			name: "bootstrap schema create privilege",
+			installSQL: `
+				GRANT CREATE ON SCHEMA identity
+					TO platformgo_admin_bootstrap`,
+		},
+		{
+			name: "permission function public execute",
+			installSQL: `
+				GRANT EXECUTE ON FUNCTION
+					identity.admin_has_permission(text,text,text)
+					TO PUBLIC`,
+		},
+		{
+			name: "disabled internal foreign key triggers",
+			installSQL: `
+				ALTER TABLE identity.rbac_admin_roles DISABLE TRIGGER ALL`,
+		},
+		{
+			name: "inherited assignment child",
+			installSQL: `
+				CREATE TABLE public.inherited_admin_assignments ()
+					INHERITS (identity.rbac_admin_roles)`,
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+			if err := platformpostgres.NewMigrator(
+				admin,
+				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			).Migrate(ctx); err != nil {
+				t.Fatalf("migrate admin bootstrap authority: %v", err)
+			}
+			if _, err := admin.Exec(ctx, `
+				DROP TABLE IF EXISTS public.admin_bootstrap_side_effect;
+				CREATE TABLE public.admin_bootstrap_side_effect (
+					subject text PRIMARY KEY
+				)`); err != nil {
+				t.Fatalf("prepare bootstrap side-effect table: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = admin.Exec(
+					context.Background(),
+					"DROP TABLE IF EXISTS public.admin_bootstrap_side_effect",
+				)
+			})
+			if _, err := admin.Exec(ctx, test.installSQL); err != nil {
+				t.Fatalf("install unexpected bootstrap trigger: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = admin.Exec(context.Background(), `
+					REVOKE CREATE ON SCHEMA identity
+						FROM platformgo_admin_bootstrap;
+					REVOKE ALL PRIVILEGES
+						ON TABLE identity.rbac_admin_roles FROM PUBLIC;
+					REVOKE ALL PRIVILEGES
+						ON FUNCTION
+							identity.admin_has_permission(text,text,text)
+						FROM PUBLIC;
+					ALTER TABLE identity.rbac_admin_roles ENABLE TRIGGER ALL;
+					DROP TABLE IF EXISTS
+						public.inherited_admin_assignments;
+					DROP RULE IF EXISTS inject_admin_bootstrap_rule_effect
+						ON identity.rbac_admin_roles;
+					DROP RULE IF EXISTS suppress_future_journal
+						ON engine.schema_migrations;
+					DROP FUNCTION IF EXISTS
+						public.pass_migration_journal_insert() CASCADE;
+					DROP FUNCTION IF EXISTS
+						public.capture_admin_bootstrap_check(text) CASCADE;
+					DROP FUNCTION IF EXISTS
+						public.inject_admin_bootstrap_side_effect() CASCADE;
+					DROP FUNCTION IF EXISTS
+						public.inject_deferred_admin_assignment() CASCADE`)
+			})
+
+			login := fmt.Sprintf(
+				"platformgo_admin_bootstrap_trigger_test_login_%d",
+				index,
+			)
+			terminal := runtimeRoleLoginPool(
+				t,
+				admin,
+				login,
+				"platformgo_admin_bootstrap",
+			)
+			bootstrapTx, err := terminal.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin bootstrap trigger transaction: %v", err)
+			}
+			keyHash := sha256.Sum256(
+				[]byte(fmt.Sprintf("bootstrap-trigger-key-%d", index)),
+			)
+			var outcome string
+			err = bootstrapTx.QueryRow(ctx, `
+				SELECT outcome
+				  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
+				fmt.Sprintf("bootstrap-request-trigger-%d", index),
+				keyHash[:],
+				fmt.Sprintf(
+					"admin::urn:xb:admin:00000000-0000-4000-8000-%012d",
+					80+index,
+				),
+				fmt.Sprintf(
+					"00000000-0000-4000-8000-%012d",
+					80+index,
+				),
+				"2026-07-31T00:00:00.000000Z",
+				adminBootstrapMigrationChecksum(t),
+			).Scan(&outcome)
+			if !adminBootstrapIsPostgresCode(err, "55000") {
+				_ = bootstrapTx.Rollback(ctx)
+				t.Fatalf(
+					"bootstrap with unexpected trigger error = %v "+
+						"outcome %q, want 55000",
+					err,
+					outcome,
+				)
+			}
+			if err := bootstrapTx.Rollback(ctx); err != nil {
+				t.Fatalf("rollback rejected bootstrap trigger transaction: %v", err)
+			}
+
+			var assignments, receipts, sideEffects int
+			if err := admin.QueryRow(ctx, `
+				SELECT
+					(SELECT count(*) FROM identity.rbac_admin_roles),
+					(SELECT count(*) FROM audit.admin_bootstrap_events),
+					(SELECT count(*)
+					   FROM public.admin_bootstrap_side_effect)`,
+			).Scan(&assignments, &receipts, &sideEffects); err != nil {
+				t.Fatalf("inspect rejected unexpected trigger state: %v", err)
+			}
+			if assignments != 0 || receipts != 0 || sideEffects != 0 {
+				t.Fatalf(
+					"rejected trigger state = assignments %d receipts %d "+
+						"side effects %d",
+					assignments,
+					receipts,
+					sideEffects,
+				)
+			}
+		})
+	}
+}
+
+func TestAdminBootstrapRejectsUnsafeTemporaryMemberAuthority(t *testing.T) {
+	tests := []struct {
+		name      string
+		setupSQL  func(login string) string
+		repairSQL func(login string) string
+	}{
+		{
+			name: "second parent membership",
+			setupSQL: func(login string) string {
+				return `CREATE ROLE platformgo_admin_bootstrap_extra_parent
+						NOLOGIN;
+					GRANT platformgo_admin_bootstrap_extra_parent TO ` +
+					pgx.Identifier{login}.Sanitize()
+			},
+			repairSQL: func(login string) string {
+				return `REVOKE platformgo_admin_bootstrap_extra_parent FROM ` +
+					pgx.Identifier{login}.Sanitize() +
+					`;
+					DROP ROLE platformgo_admin_bootstrap_extra_parent`
+			},
+		},
+		{
+			name: "owned object dependency",
+			setupSQL: func(login string) string {
+				return `CREATE TABLE public.bootstrap_member_owned_object (
+						id integer
+					);
+					ALTER TABLE public.bootstrap_member_owned_object OWNER TO ` +
+					pgx.Identifier{login}.Sanitize()
+			},
+			repairSQL: func(string) string {
+				return `DROP TABLE public.bootstrap_member_owned_object`
+			},
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+			if err := platformpostgres.NewMigrator(
+				admin,
+				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			).Migrate(ctx); err != nil {
+				t.Fatalf("migrate admin bootstrap authority: %v", err)
+			}
+			login := fmt.Sprintf(
+				"platformgo_admin_bootstrap_member_safety_%d",
+				index,
+			)
+			terminal := runtimeRoleLoginPool(
+				t,
+				admin,
+				login,
+				"platformgo_admin_bootstrap",
+			)
+			if _, err := admin.Exec(ctx, test.setupSQL(login)); err != nil {
+				t.Fatalf("install unsafe temporary member authority: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = admin.Exec(
+					context.Background(),
+					test.repairSQL(login),
+				)
+			})
+
+			keyHash := sha256.Sum256(
+				[]byte(fmt.Sprintf("bootstrap-member-safety-key-%d", index)),
+			)
+			assertAdminBootstrapSQLState(
+				t,
+				terminal,
+				"55000",
+				fmt.Sprintf("bootstrap-request-member-safety-%d", index),
+				keyHash[:],
+				fmt.Sprintf(
+					"admin::urn:xb:admin:00000000-0000-4000-8000-%012d",
+					100+index,
+				),
+				fmt.Sprintf(
+					"00000000-0000-4000-8000-%012d",
+					100+index,
+				),
+				"2026-07-31T00:00:00.000000Z",
+			)
+			var assignments, receipts int
+			if err := admin.QueryRow(ctx, `
+				SELECT
+					(SELECT count(*) FROM identity.rbac_admin_roles),
+					(SELECT count(*) FROM audit.admin_bootstrap_events)`,
+			).Scan(&assignments, &receipts); err != nil {
+				t.Fatalf("inspect rejected unsafe temporary member: %v", err)
+			}
+			if assignments != 0 || receipts != 0 {
+				t.Fatalf(
+					"unsafe member rejection state = assignments %d receipts %d",
+					assignments,
+					receipts,
+				)
+			}
+			if _, err := admin.Exec(ctx, test.repairSQL(login)); err != nil {
+				t.Fatalf("repair temporary member authority: %v", err)
+			}
+			result := callAdminBootstrap(
+				t,
+				terminal,
+				fmt.Sprintf("bootstrap-request-member-safety-%d", index),
+				keyHash[:],
+				fmt.Sprintf(
+					"admin::urn:xb:admin:00000000-0000-4000-8000-%012d",
+					100+index,
+				),
+				fmt.Sprintf(
+					"00000000-0000-4000-8000-%012d",
+					100+index,
+				),
+				"2026-07-31T00:00:00.000000Z",
+			)
+			if result.outcome != "created" {
+				t.Fatalf("repaired temporary member outcome = %q", result.outcome)
+			}
+		})
+	}
+}
+
 func TestAdminBootstrapUnknownCommitReplaysAfterTerminalRestart(t *testing.T) {
 	ctx := context.Background()
 	admin := postgresPool(t)
@@ -322,12 +1233,13 @@ func TestAdminBootstrapUnknownCommitReplaysAfterTerminalRestart(t *testing.T) {
 	if _, err := terminal.Exec(ctx, `
 		SELECT outcome, admin_subject, role_name, configuration_version,
 		       event_id, logical_time_text
-		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5)`,
+		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
 		requestID,
 		keyHash[:],
 		subject,
 		eventID,
 		logicalTime,
+		adminBootstrapMigrationChecksum(t),
 	); err != nil {
 		t.Fatalf("commit bootstrap before simulated lost acknowledgment: %v", err)
 	}
@@ -392,12 +1304,13 @@ func TestAdminBootstrapAcknowledgesOnlyAfterCommitAndFreshSessionVerification(
 	var provisionalOutcome string
 	if err := bootstrapTx.QueryRow(ctx, `
 		SELECT outcome
-		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5)`,
+		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
 		requestID,
 		keyHash[:],
 		subject,
 		eventID,
 		logicalTime,
+		adminBootstrapMigrationChecksum(t),
 	).Scan(&provisionalOutcome); err != nil {
 		_ = bootstrapTx.Rollback(ctx)
 		t.Fatalf("bootstrap inside explicit transaction: %v", err)
@@ -430,8 +1343,15 @@ func TestAdminBootstrapAcknowledgesOnlyAfterCommitAndFreshSessionVerification(
 	terminal.Close()
 
 	fresh := postgresPool(t)
+	requestHash := sha256.Sum256([]byte(adminBootstrapPreimage(
+		login,
+		requestID,
+		subject,
+		eventID,
+		logicalTime,
+	)))
 	var (
-		assignments       int
+		exactAuthority    bool
 		receipts          int
 		permitted         bool
 		migrationChecksum string
@@ -439,9 +1359,76 @@ func TestAdminBootstrapAcknowledgesOnlyAfterCommitAndFreshSessionVerification(
 	if err := fresh.QueryRow(ctx, `
 		SELECT
 			(
-				SELECT count(*)
-				  FROM identity.rbac_admin_roles
-				 WHERE admin_subject = $1
+				(SELECT count(*) FROM identity.rbac_roles) = 1
+				AND (
+					SELECT count(*)
+					  FROM identity.rbac_roles
+					 WHERE role_id = $9
+					   AND name = $10
+					   AND builtin
+				) = 1
+				AND (
+					SELECT count(*) FROM identity.rbac_role_parents
+				) = 0
+				AND (
+					SELECT count(*) FROM identity.rbac_admin_roles
+				) = 1
+				AND (
+					SELECT count(*)
+					  FROM identity.rbac_admin_roles
+					 WHERE admin_subject = $1
+					   AND role_id = $9
+				) = 1
+				AND (
+					SELECT count(*) FROM identity.rbac_policies
+				) = 1
+				AND (
+					SELECT count(*)
+					  FROM identity.rbac_policies
+					 WHERE role_id = $9
+					   AND resource = '*'
+					   AND action = '*'
+					   AND effect = 'allow'
+				) = 1
+				AND (
+					SELECT count(*)
+					  FROM audit.admin_bootstrap_events
+				) = 1
+				AND (
+					SELECT count(*)
+					  FROM audit.admin_bootstrap_events AS event
+					 WHERE event.event_id = $6::uuid
+					   AND event.admin_sequence = 1
+					   AND event.actor_login = $8
+					   AND event.request_id = $2
+					   AND event.idempotency_key_hash = $4
+					   AND event.request_hash = $5
+					   AND event.admin_subject = $1
+					   AND event.logical_time_text = $7
+					   AND event.occurred_at = $7::timestamptz
+					   AND event.role_id = $9
+					   AND event.role_name = $10
+					   AND event.configuration_version = 1
+					   AND event.outcome = 'success'
+					   AND event.detail = pg_catalog.jsonb_build_object(
+						   'after',
+						   pg_catalog.jsonb_build_object(
+							   'adminSubject', $1::text,
+							   'roleName', $10::text,
+							   'configurationVersion', 1
+						   ),
+						   'before',
+						   NULL,
+						   'operationVersion',
+						   'platformgo.admin-bootstrap.request.v1',
+						   'policy',
+						   pg_catalog.jsonb_build_object(
+							   'resource', '*',
+							   'action', '*',
+							   'effect', 'allow'
+						   )
+					   )
+				) = 1
 			),
 			(
 				SELECT count(*)
@@ -458,23 +1445,29 @@ func TestAdminBootstrapAcknowledgesOnlyAfterCommitAndFreshSessionVerification(
 		subject,
 		requestID,
 		adminBootstrapMigration,
+		keyHash[:],
+		requestHash[:],
+		eventID,
+		logicalTime,
+		login,
+		adminBootstrapRoleID,
+		adminBootstrapRoleName,
 	).Scan(
-		&assignments,
+		&exactAuthority,
 		&receipts,
 		&permitted,
 		&migrationChecksum,
 	); err != nil {
 		t.Fatalf("fresh-session durable bootstrap verification: %v", err)
 	}
-	const expectedMigrationChecksum = "cafa605e33b21577b96b982dd3fc4eca10672177943dd9a646d909545f6230ea"
-	if assignments != 1 ||
+	if !exactAuthority ||
 		receipts != 1 ||
 		!permitted ||
-		migrationChecksum != expectedMigrationChecksum {
+		migrationChecksum != adminBootstrapMigrationChecksumHex {
 		t.Fatalf(
-			"fresh-session authority = assignments %d receipts %d "+
+			"fresh-session authority = exact %t receipts %d "+
 				"permitted %t checksum %q",
-			assignments,
+			exactAuthority,
 			receipts,
 			permitted,
 			migrationChecksum,
@@ -705,6 +1698,487 @@ func TestAdminBootstrapMigrationRejectsNonemptyGraphAndRetries(
 	}
 	if err := current.Migrate(ctx); err != nil {
 		t.Fatalf("retry bootstrap migration after graph repair: %v", err)
+	}
+	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
+}
+
+func TestAdminBootstrapMigrationRejectsEnabledEventTriggers(t *testing.T) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminPermissionMigration),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("apply previous migration tip: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `
+		CREATE TABLE public.admin_bootstrap_ddl_side_effect (
+			tag text NOT NULL
+		);
+		CREATE FUNCTION public.observe_admin_bootstrap_ddl()
+		RETURNS event_trigger
+		LANGUAGE plpgsql
+		SET search_path = pg_catalog
+		AS $$
+		BEGIN
+			INSERT INTO public.admin_bootstrap_ddl_side_effect (tag)
+			VALUES (TG_TAG);
+		END
+		$$;
+		CREATE EVENT TRIGGER observe_admin_bootstrap_ddl
+		ON ddl_command_start
+		WHEN TAG IN ('CREATE SCHEMA', 'CREATE TABLE')
+		EXECUTE FUNCTION public.observe_admin_bootstrap_ddl()`); err != nil {
+		t.Fatalf("install enabled event trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), `
+			DROP EVENT TRIGGER IF EXISTS observe_admin_bootstrap_ddl;
+			DROP FUNCTION IF EXISTS public.observe_admin_bootstrap_ddl();
+			DROP TABLE IF EXISTS public.admin_bootstrap_ddl_side_effect`)
+	})
+
+	current := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminBootstrapMigration),
+	)
+	if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(err, "55000") {
+		t.Fatalf("enabled event-trigger migration error = %v, want 55000", err)
+	}
+	assertAdminBootstrapMigrationAbsent(t, admin)
+	var sideEffects int
+	if err := admin.QueryRow(ctx, `
+		SELECT count(*)
+		  FROM public.admin_bootstrap_ddl_side_effect`,
+	).Scan(&sideEffects); err != nil {
+		t.Fatalf("inspect pre-fence event-trigger effects: %v", err)
+	}
+	if sideEffects != 0 {
+		t.Fatalf(
+			"pre-fence event-trigger effects = %d, want 0",
+			sideEffects,
+		)
+	}
+	if _, err := admin.Exec(ctx, `
+		DROP EVENT TRIGGER observe_admin_bootstrap_ddl;
+		DROP FUNCTION public.observe_admin_bootstrap_ddl()`); err != nil {
+		t.Fatalf("remove enabled event-trigger fixture: %v", err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry migration after event-trigger repair: %v", err)
+	}
+	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
+}
+
+func TestAdminBootstrapMigrationFencesExactJournalCatalog(t *testing.T) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminPermissionMigration),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("apply previous migration tip: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `
+		CREATE RULE suppress_admin_bootstrap_journal
+		AS ON INSERT TO engine.schema_migrations
+		WHERE NEW.filename =
+			'20260731000100_phase3_admin_bootstrap_authority.up.sql'
+		DO INSTEAD NOTHING`); err != nil {
+		t.Fatalf("install hostile migration journal rule: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), `
+			DROP RULE IF EXISTS suppress_admin_bootstrap_journal
+				ON engine.schema_migrations`)
+	})
+
+	current := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminBootstrapMigration),
+	)
+	if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(err, "55000") {
+		t.Fatalf("divergent journal migration error = %v, want 55000", err)
+	}
+	assertAdminBootstrapMigrationAbsent(t, admin)
+	if _, err := admin.Exec(ctx, `
+		DROP RULE suppress_admin_bootstrap_journal
+			ON engine.schema_migrations`); err != nil {
+		t.Fatalf("repair migration journal catalog: %v", err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry migration after journal repair: %v", err)
+	}
+	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
+}
+
+func TestAdminBootstrapMigratorRejectsSuppressedJournalInsert(t *testing.T) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	files := migrationFilesThrough(t, adminBootstrapMigration)
+	if err := platformpostgres.NewMigrator(admin, files).Migrate(ctx); err != nil {
+		t.Fatalf("migrate admin bootstrap authority: %v", err)
+	}
+
+	const testMigration = "99999999999999_test_journal_insert_guard.up.sql"
+	files[testMigration] = &fstest.MapFile{
+		Data: []byte(
+			"CREATE TABLE public.admin_bootstrap_journal_guard_sentinel (" +
+				"singleton boolean PRIMARY KEY);",
+		),
+	}
+	if _, err := admin.Exec(ctx, `
+		CREATE RULE suppress_test_journal_insert
+		AS ON INSERT TO engine.schema_migrations
+		WHERE NEW.filename =
+			'99999999999999_test_journal_insert_guard.up.sql'
+		DO INSTEAD NOTHING`,
+	); err != nil {
+		t.Fatalf("install suppressed journal insert: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), `
+			DROP RULE IF EXISTS suppress_test_journal_insert
+				ON engine.schema_migrations;
+			DROP TABLE IF EXISTS
+				public.admin_bootstrap_journal_guard_sentinel`)
+	})
+
+	current := platformpostgres.NewMigrator(admin, files)
+	if err := current.Migrate(ctx); err == nil {
+		t.Fatal("migration with suppressed journal insert unexpectedly succeeded")
+	}
+	var journaled, sentinelPresent bool
+	if err := admin.QueryRow(ctx, `
+		SELECT
+			EXISTS (
+				SELECT 1
+				  FROM engine.schema_migrations
+				 WHERE filename = $1
+			),
+			pg_catalog.to_regclass(
+				'public.admin_bootstrap_journal_guard_sentinel'
+			) IS NOT NULL`,
+		testMigration,
+	).Scan(&journaled, &sentinelPresent); err != nil {
+		t.Fatalf("inspect rejected journal insert: %v", err)
+	}
+	if journaled || sentinelPresent {
+		t.Fatalf(
+			"suppressed journal insert state = journaled %t sentinel %t",
+			journaled,
+			sentinelPresent,
+		)
+	}
+
+	if _, err := admin.Exec(ctx, `
+		DROP RULE suppress_test_journal_insert
+			ON engine.schema_migrations`); err != nil {
+		t.Fatalf("repair suppressed journal insert: %v", err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry migration after journal-rule repair: %v", err)
+	}
+	if err := admin.QueryRow(ctx, `
+		SELECT
+			EXISTS (
+				SELECT 1
+				  FROM engine.schema_migrations
+				 WHERE filename = $1
+			),
+			pg_catalog.to_regclass(
+				'public.admin_bootstrap_journal_guard_sentinel'
+			) IS NOT NULL`,
+		testMigration,
+	).Scan(&journaled, &sentinelPresent); err != nil {
+		t.Fatalf("inspect retried journal insert: %v", err)
+	}
+	if !journaled || !sentinelPresent {
+		t.Fatalf(
+			"retried journal insert state = journaled %t sentinel %t",
+			journaled,
+			sentinelPresent,
+		)
+	}
+}
+
+func TestAdminBootstrapMigrationRevalidatesLockedJournalRows(t *testing.T) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminPermissionMigration),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("apply previous migration tip: %v", err)
+	}
+	var exactChecksum []byte
+	if err := admin.QueryRow(ctx, `
+		SELECT checksum
+		  FROM engine.schema_migrations
+		 WHERE filename = $1`,
+		adminPermissionMigration,
+	).Scan(&exactChecksum); err != nil {
+		t.Fatalf("read exact previous-tip checksum: %v", err)
+	}
+
+	hostileTx, err := admin.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin concurrent journal corruption: %v", err)
+	}
+	if _, err := hostileTx.Exec(ctx, `
+		UPDATE engine.schema_migrations
+		   SET checksum = pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+		 WHERE filename = $1`,
+		adminPermissionMigration,
+	); err != nil {
+		_ = hostileTx.Rollback(ctx)
+		t.Fatalf("stage concurrent journal corruption: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminBootstrapMigration),
+	)
+	migrationResult := make(chan error, 1)
+	go func() {
+		migrationResult <- current.Migrate(ctx)
+	}()
+	awaitAdminBootstrapRelationLockWait(
+		t,
+		admin,
+		migrationResult,
+		"engine.schema_migrations",
+		"ShareRowExclusiveLock",
+	)
+	if err := hostileTx.Commit(ctx); err != nil {
+		t.Fatalf("commit concurrent journal corruption: %v", err)
+	}
+	migrationErr := <-migrationResult
+	if !errors.Is(migrationErr, platformpostgres.ErrMigrationChecksumMismatch) {
+		t.Fatalf(
+			"migration after journal corruption error = %v, want checksum mismatch",
+			migrationErr,
+		)
+	}
+	assertAdminBootstrapMigrationAbsent(t, admin)
+	var (
+		corruptedChecksum []byte
+		roleCount         int
+		policyCount       int
+		auditExists       bool
+		functionExists    bool
+	)
+	if err := admin.QueryRow(ctx, `
+		SELECT
+			(
+				SELECT checksum
+				  FROM engine.schema_migrations
+				 WHERE filename = $1
+			),
+			(SELECT count(*) FROM identity.rbac_roles),
+			(SELECT count(*) FROM identity.rbac_policies),
+			pg_catalog.to_regclass(
+				'audit.admin_bootstrap_events'
+			) IS NOT NULL,
+			pg_catalog.to_regprocedure(
+				'identity.bootstrap_first_admin(text,bytea,text,uuid,text,bytea)'
+			) IS NOT NULL`,
+		adminPermissionMigration,
+	).Scan(
+		&corruptedChecksum,
+		&roleCount,
+		&policyCount,
+		&auditExists,
+		&functionExists,
+	); err != nil {
+		t.Fatalf("inspect rejected journal corruption: %v", err)
+	}
+	if string(corruptedChecksum) == string(exactChecksum) ||
+		roleCount != 0 ||
+		policyCount != 0 ||
+		auditExists ||
+		functionExists {
+		t.Fatalf(
+			"journal corruption rollback = checksum %x roles %d policies %d "+
+				"audit %t function %t",
+			corruptedChecksum,
+			roleCount,
+			policyCount,
+			auditExists,
+			functionExists,
+		)
+	}
+
+	if _, err := admin.Exec(ctx, `
+		UPDATE engine.schema_migrations
+		   SET checksum = $2
+		 WHERE filename = $1`,
+		adminPermissionMigration,
+		exactChecksum,
+	); err != nil {
+		t.Fatalf("repair previous-tip checksum: %v", err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry migration after journal repair: %v", err)
+	}
+	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
+}
+
+func TestAdminBootstrapMigrationRejectsDisabledInternalTriggers(t *testing.T) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminPermissionMigration),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("apply previous migration tip: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `
+		ALTER TABLE identity.rbac_admin_roles DISABLE TRIGGER ALL`); err != nil {
+		t.Fatalf("disable RBAC internal triggers: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), `
+			ALTER TABLE identity.rbac_admin_roles ENABLE TRIGGER ALL`)
+	})
+
+	current := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminBootstrapMigration),
+	)
+	if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(err, "55000") {
+		t.Fatalf("disabled internal-trigger migration error = %v, want 55000", err)
+	}
+	assertAdminBootstrapMigrationAbsent(t, admin)
+	if _, err := admin.Exec(ctx, `
+		ALTER TABLE identity.rbac_admin_roles ENABLE TRIGGER ALL`); err != nil {
+		t.Fatalf("repair RBAC internal triggers: %v", err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry migration after internal-trigger repair: %v", err)
+	}
+	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
+}
+
+func TestAdminBootstrapMigrationRejectsExternalAuthoritySchemaOwners(
+	t *testing.T,
+) {
+	for _, schemaName := range []string{"engine", "identity", "audit"} {
+		t.Run(schemaName, func(t *testing.T) {
+			ctx := context.Background()
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+			if err := platformpostgres.NewMigrator(
+				admin,
+				migrationFilesThrough(t, adminPermissionMigration),
+			).Migrate(ctx); err != nil {
+				t.Fatalf("apply previous migration tip: %v", err)
+			}
+			const hostileOwner = "platformgo_admin_bootstrap_schema_owner"
+			_, _ = admin.Exec(ctx, "DROP ROLE IF EXISTS "+hostileOwner)
+			if _, err := admin.Exec(ctx, `
+				CREATE ROLE platformgo_admin_bootstrap_schema_owner NOLOGIN;
+				ALTER SCHEMA `+pgx.Identifier{schemaName}.Sanitize()+`
+					OWNER TO platformgo_admin_bootstrap_schema_owner`); err != nil {
+				t.Fatalf("install external schema owner: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = admin.Exec(context.Background(), `
+					ALTER SCHEMA `+pgx.Identifier{schemaName}.Sanitize()+`
+						OWNER TO CURRENT_USER;
+					DROP ROLE IF EXISTS `+hostileOwner)
+			})
+
+			current := platformpostgres.NewMigrator(
+				admin,
+				migrationFilesThrough(t, adminBootstrapMigration),
+			)
+			if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(
+				err,
+				"55000",
+			) {
+				t.Fatalf(
+					"external %s schema owner migration error = %v, want 55000",
+					schemaName,
+					err,
+				)
+			}
+			assertAdminBootstrapMigrationAbsent(t, admin)
+			var owner string
+			if err := admin.QueryRow(ctx, `
+				SELECT namespace.nspowner::pg_catalog.regrole::text
+				  FROM pg_catalog.pg_namespace AS namespace
+				 WHERE namespace.nspname = $1`,
+				schemaName,
+			).Scan(&owner); err != nil {
+				t.Fatalf("inspect preserved schema owner: %v", err)
+			}
+			if owner != hostileOwner {
+				t.Fatalf("preserved schema owner = %q, want %q", owner, hostileOwner)
+			}
+			if _, err := admin.Exec(
+				ctx,
+				"ALTER SCHEMA "+pgx.Identifier{schemaName}.Sanitize()+
+					" OWNER TO CURRENT_USER",
+			); err != nil {
+				t.Fatalf("repair schema owner: %v", err)
+			}
+			if err := current.Migrate(ctx); err != nil {
+				t.Fatalf("retry migration after schema-owner repair: %v", err)
+			}
+			assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
+		})
+	}
+}
+
+func TestAdminBootstrapMigrationRejectsInheritedAuthorityRelations(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminPermissionMigration),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("apply previous migration tip: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `
+		CREATE TABLE public.inherited_admin_assignments ()
+			INHERITS (identity.rbac_admin_roles)`); err != nil {
+		t.Fatalf("install inherited authority relation: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), `
+			DROP TABLE IF EXISTS public.inherited_admin_assignments`)
+	})
+
+	current := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminBootstrapMigration),
+	)
+	if err := current.Migrate(ctx); !adminBootstrapIsPostgresCode(err, "55000") {
+		t.Fatalf("inherited authority migration error = %v, want 55000", err)
+	}
+	assertAdminBootstrapMigrationAbsent(t, admin)
+	if _, err := admin.Exec(ctx, `
+		DROP TABLE public.inherited_admin_assignments`); err != nil {
+		t.Fatalf("remove inherited authority relation: %v", err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry migration after inheritance repair: %v", err)
 	}
 	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
 }
@@ -1051,6 +2525,490 @@ func TestAdminBootstrapMigrationLockTimeoutRollsBackAndRetries(t *testing.T) {
 	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
 }
 
+func TestAdminBootstrapMigrationRevalidatesCatalogAfterWaitingForDDL(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminPermissionMigration),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("apply previous migration tip: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `
+		CREATE FUNCTION public.concurrent_admin_assignment()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		SET search_path = pg_catalog
+		AS $$
+		BEGIN
+			IF NEW.admin_subject <>
+				'admin::urn:xb:admin:00000000-0000-4000-8000-0000000000ff'
+			THEN
+				INSERT INTO identity.rbac_admin_roles (
+					admin_subject,
+					role_id
+				) VALUES (
+					'admin::urn:xb:admin:00000000-0000-4000-8000-0000000000ff',
+					NEW.role_id
+				);
+			END IF;
+			RETURN NEW;
+		END
+		$$`); err != nil {
+		t.Fatalf("create concurrent bootstrap trigger function: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS concurrent_admin_assignment
+				ON identity.rbac_admin_roles;
+			DROP FUNCTION IF EXISTS public.concurrent_admin_assignment()`)
+	})
+
+	ddlTx, err := admin.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin concurrent bootstrap DDL: %v", err)
+	}
+	if _, err := ddlTx.Exec(ctx, `
+		CREATE TRIGGER concurrent_admin_assignment
+		BEFORE INSERT ON identity.rbac_admin_roles
+		FOR EACH ROW
+		EXECUTE FUNCTION public.concurrent_admin_assignment()`,
+	); err != nil {
+		_ = ddlTx.Rollback(ctx)
+		t.Fatalf("create concurrent bootstrap trigger: %v", err)
+	}
+
+	current := platformpostgres.NewMigrator(
+		admin,
+		migrationFilesThrough(t, adminBootstrapMigration),
+	)
+	migrationResult := make(chan error, 1)
+	go func() {
+		migrationResult <- current.Migrate(ctx)
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var waiting bool
+		if err := admin.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				  FROM pg_catalog.pg_locks
+				 WHERE relation =
+					'identity.rbac_admin_roles'::pg_catalog.regclass
+				   AND mode = 'ShareRowExclusiveLock'
+				   AND NOT granted
+			)`,
+		).Scan(&waiting); err != nil {
+			_ = ddlTx.Rollback(ctx)
+			t.Fatalf("inspect waiting bootstrap migration lock: %v", err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = ddlTx.Rollback(ctx)
+			t.Fatal("bootstrap migration did not wait behind concurrent DDL")
+		}
+		select {
+		case migrationErr := <-migrationResult:
+			_ = ddlTx.Rollback(ctx)
+			t.Fatalf(
+				"bootstrap migration completed before concurrent DDL: %v",
+				migrationErr,
+			)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	if err := ddlTx.Commit(ctx); err != nil {
+		t.Fatalf("commit concurrent bootstrap catalog change: %v", err)
+	}
+
+	migrationErr := <-migrationResult
+	if !adminBootstrapIsPostgresCode(migrationErr, "55000") {
+		t.Fatalf(
+			"bootstrap migration after concurrent DDL error = %v, want 55000",
+			migrationErr,
+		)
+	}
+	assertAdminBootstrapMigrationAbsent(t, admin)
+
+	if _, err := admin.Exec(ctx, `
+		DROP TRIGGER concurrent_admin_assignment
+			ON identity.rbac_admin_roles;
+		DROP FUNCTION public.concurrent_admin_assignment()`); err != nil {
+		t.Fatalf("repair concurrent bootstrap catalog change: %v", err)
+	}
+	if err := current.Migrate(ctx); err != nil {
+		t.Fatalf("retry bootstrap migration after catalog repair: %v", err)
+	}
+	assertMigrationHistoryTip(t, admin, 42, adminBootstrapMigration)
+}
+
+func TestAdminBootstrapMigrationFencesConcurrentTrustedFunctionReplacement(
+	t *testing.T,
+) {
+	tests := []struct {
+		name          string
+		catalog       string
+		replacement   string
+		inspectBody   string
+		hostileMarker string
+	}{
+		{
+			name:    "permission function",
+			catalog: "pg_catalog.pg_proc",
+			replacement: `
+				CREATE OR REPLACE FUNCTION identity.admin_has_permission(
+					requested_subject text,
+					requested_resource text,
+					requested_action text
+				)
+				RETURNS boolean
+				LANGUAGE sql
+				STABLE
+				SECURITY DEFINER
+				SET search_path = pg_catalog
+				AS 'SELECT true'`,
+			inspectBody: `
+				SELECT procedure.prosrc
+				  FROM pg_catalog.pg_proc AS procedure
+				 WHERE procedure.oid =
+					'identity.admin_has_permission(text,text,text)'::pg_catalog.regprocedure`,
+			hostileMarker: "SELECT true",
+		},
+		{
+			name:    "immutable guard",
+			catalog: "pg_catalog.pg_proc",
+			replacement: `
+				CREATE OR REPLACE FUNCTION engine.reject_immutable_change()
+				RETURNS trigger
+				LANGUAGE plpgsql
+				AS $function$
+				BEGIN
+					IF TG_OP = 'DELETE' THEN
+						RETURN OLD;
+					END IF;
+					RETURN NEW;
+				END
+				$function$`,
+			inspectBody: `
+				SELECT procedure.prosrc
+				  FROM pg_catalog.pg_proc AS procedure
+				 WHERE procedure.oid =
+					'engine.reject_immutable_change()'::pg_catalog.regprocedure`,
+			hostileMarker: "RETURN NEW",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+			if err := platformpostgres.NewMigrator(
+				admin,
+				migrationFilesThrough(t, adminPermissionMigration),
+			).Migrate(ctx); err != nil {
+				t.Fatalf("apply previous migration tip: %v", err)
+			}
+			hostileTx, err := admin.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin concurrent function replacement: %v", err)
+			}
+			if _, err := hostileTx.Exec(ctx, test.replacement); err != nil {
+				_ = hostileTx.Rollback(ctx)
+				t.Fatalf("replace trusted function concurrently: %v", err)
+			}
+
+			current := platformpostgres.NewMigrator(
+				admin,
+				migrationFilesThrough(t, adminBootstrapMigration),
+			)
+			migrationResult := make(chan error, 1)
+			go func() {
+				migrationResult <- current.Migrate(ctx)
+			}()
+			awaitAdminBootstrapMigrationCatalogWait(
+				t,
+				admin,
+				migrationResult,
+				test.catalog,
+			)
+			if err := hostileTx.Commit(ctx); err != nil {
+				t.Fatalf("commit concurrent function replacement: %v", err)
+			}
+
+			migrationErr := <-migrationResult
+			if !adminBootstrapIsPostgresCode(migrationErr, "55000") {
+				t.Fatalf(
+					"migration after concurrent function replacement "+
+						"error = %v, want 55000",
+					migrationErr,
+				)
+			}
+			assertAdminBootstrapMigrationAbsent(t, admin)
+			var body string
+			if err := admin.QueryRow(ctx, test.inspectBody).Scan(&body); err != nil {
+				t.Fatalf("inspect preserved hostile function: %v", err)
+			}
+			if !strings.Contains(body, test.hostileMarker) {
+				t.Fatalf("hostile function body was not preserved: %q", body)
+			}
+		})
+	}
+}
+
+func TestAdminBootstrapMigrationFencesConcurrentRoleAuthorityChange(
+	t *testing.T,
+) {
+	for _, roleName := range []string{
+		"platformgo_admin_bootstrap",
+		"platformgo_api",
+	} {
+		t.Run(roleName+"_attribute", func(t *testing.T) {
+			ctx := context.Background()
+			admin := postgresPool(t)
+			requireBrokerFundingPostgres19Beta2(t, admin)
+			resetDurableSchemas(t, admin)
+			if err := platformpostgres.NewMigrator(
+				admin,
+				migrationFilesThrough(t, adminPermissionMigration),
+			).Migrate(ctx); err != nil {
+				t.Fatalf("apply previous migration tip: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = admin.Exec(
+					context.Background(),
+					"ALTER ROLE "+roleName+" NOCREATEROLE NOLOGIN",
+				)
+			})
+
+			hostileTx, err := admin.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin concurrent role attribute change: %v", err)
+			}
+			if _, err := hostileTx.Exec(
+				ctx,
+				"ALTER ROLE "+roleName+" CREATEROLE",
+			); err != nil {
+				_ = hostileTx.Rollback(ctx)
+				t.Fatalf("stage concurrent role attribute change: %v", err)
+			}
+			current := platformpostgres.NewMigrator(
+				admin,
+				migrationFilesThrough(t, adminBootstrapMigration),
+			)
+			migrationResult := make(chan error, 1)
+			go func() {
+				migrationResult <- current.Migrate(ctx)
+			}()
+			awaitAdminBootstrapMigrationCatalogWait(
+				t,
+				admin,
+				migrationResult,
+				"pg_catalog.pg_authid",
+			)
+			if err := hostileTx.Commit(ctx); err != nil {
+				t.Fatalf("commit concurrent role attribute change: %v", err)
+			}
+			migrationErr := <-migrationResult
+			if !adminBootstrapIsPostgresCode(migrationErr, "42501") {
+				t.Fatalf(
+					"migration after concurrent role attribute change "+
+						"error = %v, want 42501",
+					migrationErr,
+				)
+			}
+			assertAdminBootstrapMigrationAbsent(t, admin)
+			var canCreateRole bool
+			if err := admin.QueryRow(ctx, `
+			SELECT rolcreaterole
+			  FROM pg_catalog.pg_roles
+			 WHERE rolname = $1`,
+				roleName,
+			).Scan(&canCreateRole); err != nil {
+				t.Fatalf("inspect preserved hostile role attribute: %v", err)
+			}
+			if !canCreateRole {
+				t.Fatal("concurrent hostile role attribute was not preserved")
+			}
+		})
+	}
+
+	t.Run("membership", func(t *testing.T) {
+		ctx := context.Background()
+		admin := postgresPool(t)
+		requireBrokerFundingPostgres19Beta2(t, admin)
+		resetDurableSchemas(t, admin)
+		if err := platformpostgres.NewMigrator(
+			admin,
+			migrationFilesThrough(t, adminPermissionMigration),
+		).Migrate(ctx); err != nil {
+			t.Fatalf("apply previous migration tip: %v", err)
+		}
+		const parentRole = "platformgo_admin_bootstrap_concurrent_parent"
+		_, _ = admin.Exec(ctx, "DROP ROLE IF EXISTS "+parentRole)
+		if _, err := admin.Exec(
+			ctx,
+			"CREATE ROLE "+parentRole+" NOLOGIN",
+		); err != nil {
+			t.Fatalf("create concurrent parent role: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = admin.Exec(
+				context.Background(),
+				"REVOKE "+parentRole+" FROM platformgo_admin_bootstrap",
+			)
+			_, _ = admin.Exec(
+				context.Background(),
+				"DROP ROLE IF EXISTS "+parentRole,
+			)
+		})
+
+		hostileTx, err := admin.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin concurrent role membership change: %v", err)
+		}
+		if _, err := hostileTx.Exec(ctx, `
+			GRANT platformgo_admin_bootstrap_concurrent_parent
+			   TO platformgo_admin_bootstrap;
+			`,
+		); err != nil {
+			_ = hostileTx.Rollback(ctx)
+			t.Fatalf("stage concurrent role membership change: %v", err)
+		}
+		current := platformpostgres.NewMigrator(
+			admin,
+			migrationFilesThrough(t, adminBootstrapMigration),
+		)
+		migrationResult := make(chan error, 1)
+		go func() {
+			migrationResult <- current.Migrate(ctx)
+		}()
+		awaitAdminBootstrapMigrationCatalogWait(
+			t,
+			admin,
+			migrationResult,
+			"pg_catalog.pg_auth_members",
+		)
+		if err := hostileTx.Commit(ctx); err != nil {
+			t.Fatalf("commit concurrent role membership change: %v", err)
+		}
+		migrationErr := <-migrationResult
+		if !adminBootstrapIsPostgresCode(migrationErr, "42501") {
+			t.Fatalf(
+				"migration after concurrent role membership change "+
+					"error = %v, want 42501",
+				migrationErr,
+			)
+		}
+		assertAdminBootstrapMigrationAbsent(t, admin)
+		var membershipPresent bool
+		if err := admin.QueryRow(ctx, `
+			SELECT pg_catalog.pg_has_role(
+				'platformgo_admin_bootstrap',
+				'platformgo_admin_bootstrap_concurrent_parent',
+				'member'
+			)`,
+		).Scan(&membershipPresent); err != nil {
+			t.Fatalf("inspect preserved hostile role membership: %v", err)
+		}
+		if !membershipPresent {
+			t.Fatal("concurrent hostile role membership was not preserved")
+		}
+	})
+}
+
+func TestAdminBootstrapFencesConcurrentAuthorityACLUpgrade(t *testing.T) {
+	ctx := context.Background()
+	admin := postgresPool(t)
+	requireBrokerFundingPostgres19Beta2(t, admin)
+	resetDurableSchemas(t, admin)
+	if err := platformpostgres.NewMigrator(
+		admin,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("migrate admin bootstrap authority: %v", err)
+	}
+	terminal := runtimeRoleLoginPool(
+		t,
+		admin,
+		"platformgo_admin_bootstrap_acl_race_login",
+		"platformgo_admin_bootstrap",
+	)
+	t.Cleanup(func() {
+		_, _ = admin.Exec(
+			context.Background(),
+			`REVOKE CREATE ON SCHEMA identity
+			   FROM platformgo_admin_bootstrap`,
+		)
+	})
+
+	hostileTx, err := admin.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin concurrent bootstrap ACL upgrade: %v", err)
+	}
+	if _, err := hostileTx.Exec(ctx, `
+		GRANT CREATE ON SCHEMA identity
+			TO platformgo_admin_bootstrap`); err != nil {
+		_ = hostileTx.Rollback(ctx)
+		t.Fatalf("stage concurrent bootstrap ACL upgrade: %v", err)
+	}
+
+	bootstrapResult := make(chan error, 1)
+	go func() {
+		keyHash := sha256.Sum256([]byte("bootstrap-acl-race-key"))
+		var outcome string
+		bootstrapResult <- terminal.QueryRow(ctx, `
+			SELECT outcome
+			  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
+			"bootstrap-request-acl-race",
+			keyHash[:],
+			"admin::urn:xb:admin:00000000-0000-4000-8000-00000000008a",
+			"00000000-0000-4000-8000-00000000008a",
+			"2026-07-31T00:00:00.000000Z",
+			adminBootstrapMigrationChecksum(t),
+		).Scan(&outcome)
+	}()
+	awaitAdminBootstrapMigrationCatalogWait(
+		t,
+		admin,
+		bootstrapResult,
+		"pg_catalog.pg_namespace",
+	)
+	if err := hostileTx.Commit(ctx); err != nil {
+		t.Fatalf("commit concurrent bootstrap ACL upgrade: %v", err)
+	}
+	if err := <-bootstrapResult; !adminBootstrapIsPostgresCode(err, "55000") {
+		t.Fatalf(
+			"bootstrap after concurrent ACL upgrade error = %v, want 55000",
+			err,
+		)
+	}
+
+	var assignments, receipts int
+	if err := admin.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM identity.rbac_admin_roles),
+			(SELECT count(*) FROM audit.admin_bootstrap_events)`,
+	).Scan(&assignments, &receipts); err != nil {
+		t.Fatalf("inspect rejected concurrent ACL upgrade: %v", err)
+	}
+	if assignments != 0 || receipts != 0 {
+		t.Fatalf(
+			"concurrent ACL rejection state = assignments %d receipts %d",
+			assignments,
+			receipts,
+		)
+	}
+}
+
 func TestAdminBootstrapTransactionCannotBlockMigratorIndefinitely(t *testing.T) {
 	ctx := context.Background()
 	admin := postgresPool(t)
@@ -1076,12 +3034,13 @@ func TestAdminBootstrapTransactionCannotBlockMigratorIndefinitely(t *testing.T) 
 	var outcome string
 	if err := bootstrapTx.QueryRow(ctx, `
 		SELECT outcome
-		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5)`,
+		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
 		"bootstrap-request-migrator-lock",
 		keyHash[:],
 		"admin::urn:xb:admin:00000000-0000-4000-8000-000000000049",
 		"00000000-0000-4000-8000-000000000049",
 		"2026-07-31T00:00:00.000000Z",
+		adminBootstrapMigrationChecksum(t),
 	).Scan(&outcome); err != nil {
 		_ = bootstrapTx.Rollback(ctx)
 		t.Fatalf("bootstrap inside open transaction: %v", err)
@@ -1245,7 +3204,7 @@ func TestAdminBootstrapMigrationScrubsHostileGrantChains(t *testing.T) {
 	assertAdminBootstrapFunctionACL(
 		t,
 		admin,
-		"identity.bootstrap_first_admin(text,bytea,text,uuid,text)",
+		"identity.bootstrap_first_admin(text,bytea,text,uuid,text,bytea)",
 		"platformgo_admin_bootstrap",
 	)
 }
@@ -1296,12 +3255,13 @@ func TestAdminBootstrapConcurrentDistinctRequestsCreateOneAdmin(t *testing.T) {
 		err := pool.QueryRow(ctx, `
 			SELECT outcome, admin_subject, role_name,
 			       configuration_version, event_id::text, logical_time_text
-			  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5)`,
+			  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
 			requestID,
 			keyHash[:],
 			subject,
 			eventID,
 			"2026-07-31T00:00:00.000000Z",
+			adminBootstrapMigrationChecksum(t),
 		).Scan(
 			&got.outcome,
 			&got.adminSubject,
@@ -1396,12 +3356,13 @@ func callAdminBootstrap(
 	if err := pool.QueryRow(context.Background(), `
 		SELECT outcome, admin_subject, role_name,
 		       configuration_version, event_id::text, logical_time_text
-		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5)`,
+		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
 		requestID,
 		keyHash,
 		subject,
 		eventID,
 		logicalTime,
+		adminBootstrapMigrationChecksum(t),
 	).Scan(
 		&got.outcome,
 		&got.adminSubject,
@@ -1413,6 +3374,42 @@ func callAdminBootstrap(
 		t.Fatalf("bootstrap first admin: %v", err)
 	}
 	return got
+}
+
+func adminBootstrapMigrationChecksum(t *testing.T) []byte {
+	t.Helper()
+	checksum, err := hex.DecodeString(adminBootstrapMigrationChecksumHex)
+	if err != nil {
+		t.Fatalf("decode admin bootstrap migration checksum: %v", err)
+	}
+	return checksum
+}
+
+func assertAdminBootstrapAuthorityCounts(
+	t *testing.T,
+	admin *pgxpool.Pool,
+	wantAssignments int,
+	wantReceipts int,
+) {
+	t.Helper()
+	var assignments, receipts int
+	if err := admin.QueryRow(context.Background(), `
+		SELECT
+			(SELECT count(*) FROM identity.rbac_admin_roles),
+			(SELECT count(*) FROM audit.admin_bootstrap_events)`,
+	).Scan(&assignments, &receipts); err != nil {
+		t.Fatalf("inspect admin bootstrap authority counts: %v", err)
+	}
+	if assignments != wantAssignments || receipts != wantReceipts {
+		t.Fatalf(
+			"admin bootstrap authority counts = assignments %d receipts %d, "+
+				"want %d/%d",
+			assignments,
+			receipts,
+			wantAssignments,
+			wantReceipts,
+		)
+	}
 }
 
 func assertAdminBootstrapSQLState(
@@ -1430,12 +3427,13 @@ func assertAdminBootstrapSQLState(
 	err := pool.QueryRow(context.Background(), `
 		SELECT outcome, admin_subject, role_name,
 		       configuration_version, event_id::text, logical_time_text
-		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5)`,
+		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
 		requestID,
 		keyHash,
 		subject,
 		eventID,
 		logicalTime,
+		adminBootstrapMigrationChecksum(t),
 	).Scan(
 		&ignored.outcome,
 		&ignored.adminSubject,
@@ -1509,7 +3507,7 @@ func assertAdminBootstrapMigrationAbsent(
 				'audit.admin_bootstrap_events'
 			) IS NOT NULL,
 			pg_catalog.to_regprocedure(
-				'identity.bootstrap_first_admin(text,bytea,text,uuid,text)'
+				'identity.bootstrap_first_admin(text,bytea,text,uuid,text,bytea)'
 			) IS NOT NULL`,
 		adminBootstrapMigration,
 	).Scan(&journaled, &auditTablePresent, &functionPresent); err != nil {
@@ -1579,6 +3577,95 @@ func existingAdminBootstrapLoginPool(
 	}
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+func awaitAdminBootstrapMigrationCatalogWait(
+	t *testing.T,
+	admin *pgxpool.Pool,
+	migrationResult <-chan error,
+	catalog string,
+) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var waiting bool
+		if err := admin.QueryRow(context.Background(), `
+			SELECT EXISTS (
+				SELECT 1
+				  FROM pg_catalog.pg_locks
+				 WHERE NOT granted
+				   AND (
+						locktype = 'advisory'
+						OR locktype = 'transactionid'
+						OR
+						(
+							relation = pg_catalog.to_regclass($1)
+							AND mode = 'ShareLock'
+						)
+				   )
+			)`,
+			catalog,
+		).Scan(&waiting); err != nil {
+			t.Fatalf("inspect waiting bootstrap catalog fence: %v", err)
+		}
+		if waiting {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("bootstrap migration did not wait at a catalog fence")
+		}
+		select {
+		case migrationErr := <-migrationResult:
+			t.Fatalf(
+				"bootstrap migration completed before concurrent catalog "+
+					"change committed: %v",
+				migrationErr,
+			)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func awaitAdminBootstrapRelationLockWait(
+	t *testing.T,
+	admin *pgxpool.Pool,
+	result <-chan error,
+	relation string,
+	mode string,
+) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var waiting bool
+		if err := admin.QueryRow(context.Background(), `
+			SELECT EXISTS (
+				SELECT 1
+				  FROM pg_catalog.pg_locks
+				 WHERE relation = pg_catalog.to_regclass($1)
+				   AND mode = $2
+				   AND NOT granted
+			)`,
+			relation,
+			mode,
+		).Scan(&waiting); err != nil {
+			t.Fatalf("inspect waiting bootstrap relation fence: %v", err)
+		}
+		if waiting {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("bootstrap migration did not wait at a relation fence")
+		}
+		select {
+		case resultErr := <-result:
+			t.Fatalf(
+				"bootstrap operation completed before concurrent relation "+
+					"change committed: %v",
+				resultErr,
+			)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 func adminBootstrapIsPostgresCode(err error, code string) bool {
