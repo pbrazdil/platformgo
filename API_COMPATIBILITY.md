@@ -157,8 +157,11 @@ This does not yet freeze or activate an external admin contract. The imported
 OpenAPI entry remains source-route inventory because the source does not
 currently determine additional query, body, method, trailing-slash, `Allow`
 header, or JSON object-member-order behavior. The production runtime injects
-none of the admin catalog dependencies until the separately reviewed
-first-admin/bootstrap boundary exists.
+none of the admin catalog dependencies. The separate terminal-only
+first-administrator bootstrap authority creates no credential, session, token
+issuer, HTTP handler, or route composition, so admin login and
+`/admin/v1/permissions` remain inactive until a later reviewed activation
+slice.
 
 ## 5. gRPC compatibility
 

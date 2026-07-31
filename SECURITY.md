@@ -70,6 +70,15 @@ Validate at each boundary. Internal origin does not make a payload valid.
   owner's default-privilege template.
 - NATS permissions prevent cross-role subject publication/subscription.
 - Privileged risk settings, kill switch and account operations require explicit permissions and audit.
+- First-administrator authority is created only through the terminal bootstrap
+  function by a short-lived named login that is a member of the inert
+  `NOLOGIN` bootstrap role. The function stores only the idempotency-key hash,
+  commits the sole assignment and immutable audit receipt atomically, and
+  fails replay closed if the durable authority graph diverges. Remove the
+  operator membership and disable its credential immediately after verified
+  success; before migration the bootstrap role must own nothing and have no
+  privilege/default-ACL dependency, and afterward it has only identity schema
+  usage plus non-grantable bootstrap-function execution.
 
 ## 6. Input hardening
 

@@ -175,14 +175,53 @@ func (migrator *Migrator) Migrate(ctx context.Context) error {
 		return fmt.Errorf("migrate: %w", versionErr)
 	}
 
-	if _, lockErr := connection.Exec(
+	var previousLockTimeout string
+	if lockTimeoutErr := connection.QueryRow(
+		ctx,
+		"SELECT current_setting('lock_timeout')",
+	).Scan(&previousLockTimeout); lockTimeoutErr != nil {
+		return fmt.Errorf(
+			"migrate: read advisory lock timeout: %w",
+			lockTimeoutErr,
+		)
+	}
+	if _, lockTimeoutErr := connection.Exec(
+		ctx,
+		"SELECT set_config('lock_timeout', $1, false)",
+		migrationLockTimeout,
+	); lockTimeoutErr != nil {
+		return fmt.Errorf(
+			"migrate: configure advisory lock timeout: %w",
+			lockTimeoutErr,
+		)
+	}
+	_, lockErr := connection.Exec(
 		ctx,
 		"SELECT pg_advisory_lock($1)",
 		migrationAdvisoryLockKey,
-	); lockErr != nil {
+	)
+	_, restoreLockTimeoutErr := connection.Exec(
+		context.WithoutCancel(ctx),
+		"SELECT set_config('lock_timeout', $1, false)",
+		previousLockTimeout,
+	)
+	if lockErr != nil {
+		if restoreLockTimeoutErr != nil {
+			return fmt.Errorf(
+				"migrate: acquire advisory lock: %w; restore lock timeout: %w",
+				lockErr,
+				restoreLockTimeoutErr,
+			)
+		}
 		return fmt.Errorf("migrate: acquire advisory lock: %w", lockErr)
 	}
 	defer releaseMigrationLock(context.WithoutCancel(ctx), connection)
+	if restoreLockTimeoutErr != nil {
+		return fmt.Errorf(
+			"migrate: restore advisory lock timeout: %w",
+			restoreLockTimeoutErr,
+		)
+	}
 
 	if _, metadataErr := connection.Exec(ctx, `
 		CREATE SCHEMA IF NOT EXISTS engine;

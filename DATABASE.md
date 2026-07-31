@@ -994,6 +994,42 @@ does not compose this authority yet: production activation requires a separate
 reviewed bootstrap and role-administration design with an auditable first
 administrator, recovery, and lockout procedure.
 
+### Phase 3 terminal first-administrator bootstrap authority
+
+Migration `20260731000100_phase3_admin_bootstrap_authority.up.sql` advances the
+immutable journal from tip 41 to tip 42. Before changing any RBAC row, it
+requires a pre-provisioned `platformgo_admin_bootstrap` role that is `NOLOGIN`,
+has no elevated role attributes, and has no role membership in either
+direction. The role must have no ACL or ownership dependency on any database
+object or default privilege. The migration also validates the exact four-table
+RBAC catalog and authorization-function owner, signature, security metadata,
+configuration, and body before reusing them, and refuses a nonempty RBAC graph.
+It then seeds exactly one fixed built-in `platformgo-superadmin` role with one
+`*/*/allow` policy; it does not seed an administrator, credential, session,
+token, or runtime route.
+
+`identity.bootstrap_first_admin(text,bytea,text,uuid,text)` is the sole mutation
+boundary. A member login supplies an explicit request ID, SHA-256 idempotency
+key hash, canonical lowercase-UUID admin subject, event UUID, and canonical
+microsecond UTC logical time. The function derives an exact request hash,
+serializes through fixed advisory locks, and commits the sole assignment plus
+the append-only `audit.admin_bootstrap_events` receipt atomically. An identical
+retry returns the persisted result. Reused keys or identities conflict, every
+later distinct bootstrap fails closed, and replay first verifies that the
+receipt's exact role, policy, parent, and assignment graph still exists.
+Row-level update/delete and statement-level truncate triggers make the receipt
+append-only even to the migration owner.
+
+The function is `SECURITY DEFINER` with `search_path=pg_catalog`.
+`platformgo_admin_bootstrap` receives only non-grantable schema usage and
+function execute; it has no raw RBAC or audit table privilege. The migration
+removes `PUBLIC`, default-derived, named, column, grant-option, and dependent
+same-object grants from all five authority relations and both permission
+functions. Existing identity, API-key, and audit relations are neither
+rewritten nor changed. A tip-41 binary must reject tip 42 as schema-ahead.
+Operational invocation and unknown-commit recovery are defined in
+`OPERATIONS.md`.
+
 ## 11. Retention and partitioning
 
 High-volume append-only tables may be time partitioned:

@@ -153,13 +153,28 @@ HMAC bearer with a distinct, separately configured key and durable PostgreSQL
 deny-by-default role assignments, cycle-safe inheritance, wildcard policy,
 deny override, and one hardened least-privilege authorization function; token
 role claims are never authority. This is intentionally not a production route
-activation: no role or administrator is seeded, the runtime does not inject
-the admin dependencies, and the frozen contract remains source inventory until
-a separately audited first-admin/bootstrap path exists.
+activation: migration 41 seeds no role or administrator, the runtime does not
+inject the admin dependencies, and the frozen contract remains source
+inventory.
 The stable foundation candidate passed policy, formatting, lint, complete
 serial PostgreSQL 19 Beta 2 tests, complete serial race tests, deterministic
 repeat tests, and vulnerability scanning; its migration, determinism, and
 security implementation-boundary reviews closed with no P0–P3 findings.
+The next bootstrap foundation adds one inactive terminal-only path for the
+first durable administrator. Forward migration 42 requires a safe
+pre-provisioned `NOLOGIN` bootstrap role and an empty RBAC graph, seeds one
+fixed built-in superadmin role and wildcard policy, and atomically commits one
+canonical admin assignment with an immutable request-hashed audit receipt.
+Exact retry, restart after an unknown commit, concurrent distinct requests,
+durable-graph divergence, unsafe provisioning, nonempty cutover state, hostile
+ACL chains, lock-timeout rollback/retry, and populated tip-41 upgrade
+preservation are covered on PostgreSQL 19 Beta 2. Unsafe provisioning includes
+membership in either direction, residual object/default privileges, and object
+ownership; divergent tip-41 RBAC/function catalogs fail before reuse. The
+global migrator lock is now itself bounded when an operator leaves a bootstrap
+transaction open. This does not create admin credentials, sessions, tokens,
+role-management mutations, HTTP composition, or lockout recovery; those remain
+separate reviewed work.
 The landed broker account point read preserves the accepted
 ten-field current-Go account summary while retaining the pinned source's
 generic `400 unknown account` for both absent and foreign ownership.

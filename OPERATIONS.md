@@ -490,6 +490,76 @@ cutover. A 40-file binary must reject this database as schema-ahead; rollback
 is a forward code artifact that still embeds migration 41, or an explicitly
 authorized complete pre-migration restore before any later durable fact.
 
+### Phase 3 terminal first-administrator bootstrap
+
+Migration `20260731000100_phase3_admin_bootstrap_authority.up.sql` is a
+forward-only cutover from exact tip 41 to tip 42. Before migration, keep the
+admin runtime uncomposed, verify the four RBAC relations are empty, and
+pre-provision `platformgo_admin_bootstrap` as `NOLOGIN`, `NOSUPERUSER`,
+`NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, and `NOBYPASSRLS`, with no role
+membership, object ownership, direct or grantable ACL, or default-privilege
+dependency. A missing or unsafe role returns `42501`; a divergent tip-41 RBAC
+catalog or nonempty graph returns `55000`. The migrator bounds acquisition of
+its global advisory lock at five seconds before executing a migration, and
+migration 42 separately bounds relation-lock acquisition at five seconds and
+each migration statement at fifteen seconds. Either failure must leave
+migration 42 unjournaled and all tip-41 state unchanged before a repaired
+retry; these are per-acquisition and per-statement bounds, not a fifteen-second
+end-to-end transaction deadline.
+
+After migration, verify the exact checksum and tip, the sole built-in
+`platformgo-superadmin` role, its sole `*/*/allow` policy, zero assignments and
+zero bootstrap events, unchanged preexisting identity/API-key/audit digests
+and relation files, the enabled row and statement-level immutability triggers,
+the exact trusted RBAC/function catalog, and the documented ACL allowlist.
+Do not activate an HTTP route, issue an admin token, or invent a
+password/session record.
+
+For the one terminal bootstrap:
+
+1. Create a short-lived, individually attributable login outside the
+   application, give it a strong out-of-band credential, and grant it only
+   membership in `platformgo_admin_bootstrap`.
+2. Generate and durably record one request ID, one random idempotency key whose
+   SHA-256 digest is supplied to PostgreSQL, one canonical
+   `admin::urn:xb:admin:<lowercase UUID>` subject, one event UUID, and one
+   canonical `YYYY-MM-DDTHH:MM:SS.ffffffZ` logical time.
+3. Connect as that login and invoke exactly:
+
+   ```sql
+   SELECT outcome, admin_subject, role_name, configuration_version,
+          event_id, logical_time_text
+     FROM identity.bootstrap_first_admin(
+       :'request_id',
+       pg_catalog.decode(:'idempotency_key_sha256_hex', 'hex'),
+       :'admin_subject',
+       :'event_id'::uuid,
+       :'logical_time'
+     );
+   ```
+
+4. Verify `created`, one matching assignment, one immutable audit receipt, and
+   `identity.admin_has_permission(subject, 'roles', 'read') = true`. The stored
+   wildcard policy applies to each concrete catalog request; `*` is not itself
+   a valid requested resource or action.
+5. Revoke the login's bootstrap-role membership, disable its login credential,
+   and remove the short-lived login after retaining the actor name in the
+   audit/operations record. The group role remains inert as `NOLOGIN`.
+
+A connection loss before the result is an unknown outcome. Do not issue new
+identities or keys. Reconnect as the same actor and repeat the exact request;
+`replayed` is success. SQLSTATE `22000` is an idempotency conflict and `55000`
+is either an already-established or divergent authority requiring a halt and
+catalog/audit investigation. Inventory the exact receipt, assignment, fixed
+role/policy graph, both enabled immutability triggers, function definition and
+ACL, migration checksum, and actor before deciding whether to retry. There is
+intentionally no unassign, delete,
+role-edit, or lockout-recovery mutation in this slice. Any such capability and
+production admin route activation require a separately reviewed forward
+change. Rollback after a committed tip 42 is a forward-compatible code artifact
+or an explicitly authorized complete restore; never edit migration 42 or its
+journal row.
+
 ### Phase 3 command market-sequence binding upgrade
 
 Migration
