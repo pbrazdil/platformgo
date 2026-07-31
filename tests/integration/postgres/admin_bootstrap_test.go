@@ -1709,10 +1709,19 @@ func TestAdminBootstrapMigrationRejectsAmbiguousOwnerAlias(t *testing.T) {
 				admin,
 				test.aliasLogin(t, admin, lowerOwnerLogin),
 			)
-			err := platformpostgres.NewMigrator(
-				aliasOwner,
-				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-			).Migrate(ctx)
+			migrationCtx, cancelMigration := context.WithTimeout(
+				ctx,
+				10*time.Second,
+			)
+			defer cancelMigration()
+			err := migrateAdminBootstrapAfterTransientLockContention(
+				t,
+				migrationCtx,
+				platformpostgres.NewMigrator(
+					aliasOwner,
+					os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+				),
+			)
 			if !adminBootstrapIsPostgresCode(err, "55000") {
 				t.Fatalf("ambiguous owner alias migration error = %v, want 55000", err)
 			}
