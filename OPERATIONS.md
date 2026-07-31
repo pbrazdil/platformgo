@@ -548,11 +548,13 @@ For the one terminal bootstrap:
 
 A connection loss before the result is an unknown outcome. Do not issue new
 identities or keys. Reconnect as the same actor and repeat the exact request;
-`replayed` is success. SQLSTATE `22000` is an idempotency conflict and `55000`
-is either an already-established or divergent authority requiring a halt and
-catalog/audit investigation. Inventory the exact receipt, assignment, fixed
-role/policy graph, both enabled immutability triggers, function definition and
-ACL, migration checksum, and actor before deciding whether to retry. There is
+the exact persisted `created` response is returned again. Replay observability
+must not change that idempotent response. SQLSTATE `22000` is an idempotency
+conflict and `55000` is either an already-established or divergent authority
+requiring a halt and catalog/audit investigation. Inventory the exact receipt,
+assignment, fixed role/policy graph, both enabled immutability triggers,
+function definition and ACL, migration checksum, and actor before deciding
+whether to retry. There is
 intentionally no unassign, delete,
 role-edit, or lockout-recovery mutation in this slice. Any such capability and
 production admin route activation require a separately reviewed forward

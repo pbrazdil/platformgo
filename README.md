@@ -9,7 +9,7 @@ major-upgrade, backup-restore, recovery, and reconciliation rehearsal.
 
 ## Current status
 
-Last updated: 2026-07-30
+Last updated: 2026-07-31
 
 Current delivery stage: **Phase 3 — compatibility edges, in progress**.
 

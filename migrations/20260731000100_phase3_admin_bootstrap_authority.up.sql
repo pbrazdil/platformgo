@@ -570,7 +570,7 @@ BEGIN
                 OPERATOR(pg_catalog.=) requested_logical_time_text
         THEN
             RETURN QUERY SELECT
-                'replayed'::text,
+                'created'::text,
                 committed_event.admin_subject,
                 committed_event.role_name,
                 committed_event.configuration_version,
