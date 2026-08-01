@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"strings"
@@ -14,6 +15,49 @@ import (
 )
 
 const currentMigrationContentionName = "20260731000200_phase3_runtime_authority_acl.up.sql"
+
+func TestCurrentTestMigratorPreservesContentionWhenContextExpires(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := newCurrentTestMigrator(
+		t,
+		pool,
+		migrationFilesThrough(t, runtimeAuthorityACLPreviousMigration),
+	).MigrateAndProvision(ctx, 7); err != nil {
+		t.Fatalf("apply current-main schema: %v", err)
+	}
+
+	blockerPool := postgresPool(t)
+	blocker, err := blockerPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin catalog blocker: %v", err)
+	}
+	t.Cleanup(func() { _ = blocker.Rollback(context.Background()) })
+	if _, err := blocker.Exec(
+		ctx,
+		"LOCK TABLE pg_catalog.pg_attribute IN ACCESS EXCLUSIVE MODE",
+	); err != nil {
+		t.Fatalf("lock pg_attribute: %v", err)
+	}
+
+	retryCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	err = newCurrentTestMigrator(
+		t,
+		pool,
+		migrationFilesThrough(t, currentMigrationContentionName),
+	).Migrate(retryCtx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("retry error = %v, want context deadline", err)
+	}
+	if !adminBootstrapIsPostgresCode(err, "55P03") {
+		t.Fatalf("retry error = %v, want preserved SQLSTATE 55P03", err)
+	}
+	if !strings.Contains(err.Error(), "pg_catalog.pg_attribute") {
+		t.Fatalf("retry error = %v, want preserved pg_attribute cause", err)
+	}
+}
 
 // currentTestMigrator models the documented explicit operator retry when
 // routine PostgreSQL maintenance collides with the current migration's fail-fast
@@ -41,13 +85,24 @@ func (migrator *currentTestMigrator) Migrate(ctx context.Context) error {
 	retryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	const (
-		attempts = 250
+		attempts = 500
 		delay    = 20 * time.Millisecond
 	)
 	var lastContention error
 	for attempt := 1; attempt <= attempts; attempt++ {
 		err := migrator.migrator.Migrate(retryCtx)
 		if !isCurrentMigrationContention(err) {
+			if lastContention != nil &&
+				retryCtx.Err() != nil &&
+				errors.Is(err, retryCtx.Err()) {
+				return fmt.Errorf(
+					"explicit current-migration lock-contention retry "+
+						"stopped after %d attempts: %w; last contention: %w",
+					attempt,
+					retryCtx.Err(),
+					lastContention,
+				)
+			}
 			if attempt > 1 {
 				migrator.t.Logf(
 					"explicit current-migration lock-contention retry "+
@@ -69,9 +124,10 @@ func (migrator *currentTestMigrator) Migrate(ctx context.Context) error {
 			}
 			return fmt.Errorf(
 				"explicit current-migration lock-contention retry "+
-					"stopped after %d attempts: %w",
+					"stopped after %d attempts: %w; last contention: %w",
 				attempt,
 				retryCtx.Err(),
+				lastContention,
 			)
 		case <-timer.C:
 		}
