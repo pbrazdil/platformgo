@@ -85,19 +85,6 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO trading.instruments (
-			instrument_id, revision, price_scale, quantity_scale,
-			settlement_currency, settlement_currency_scale,
-			initial_margin_rate, maintenance_margin_rate, max_leverage,
-			maker_fee_rate, taker_fee_rate
-		) VALUES (
-			'BTC-PERP', 3, 2, 3, 'USDC', 2,
-			0.1, 0.05, 10, -0.0001, 0.0005
-		)`,
-	); err != nil {
-		t.Fatal(err)
-	}
 	natsConnection, err := nats.Connect(natsURL)
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +96,7 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 	}
 	_ = js.DeleteStream(ctx, "ENGINE_INPUTS_7")
 	natsConnection.Close()
-	admitRuntimeAccountConfiguration(t, ctx, pool)
+	admitRuntimeConfiguration(t, ctx, pool)
 	streamLimits := platformnats.StreamLimits{
 		Replicas: 1, MaxMessages: 1_000_000, MaxBytes: 2 << 30,
 		MaxMessageBytes: 1 << 20, MaxAge: 30 * 24 * time.Hour,
@@ -157,29 +144,31 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 			[]string{"event-consumer"},
 		)
 	}()
-	waitForRuntimeAccount(t, ctx, pool)
-	stopBootstrap()
-	for name, result := range map[string]<-chan error{
-		"outbox": bootstrapOutboxResult,
-		"engine": bootstrapEngineResult,
-	} {
-		select {
-		case bootstrapErr := <-result:
-			if bootstrapErr != nil {
-				t.Fatalf("bootstrap %s worker shutdown: %v", name, bootstrapErr)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("bootstrap %s worker did not shut down", name)
+	bootstrapWorkers := []runtimeWorkerResult{
+		{name: "outbox", result: bootstrapOutboxResult},
+		{name: "engine", result: bootstrapEngineResult},
+	}
+	bootstrapStopped := false
+	defer func() {
+		if bootstrapStopped {
+			return
 		}
+		stopBootstrap()
+		if workerErr := waitForRuntimeWorkers(bootstrapWorkers); workerErr != nil {
+			t.Errorf("bootstrap worker cleanup: %v", workerErr)
+		}
+	}()
+	waitForRuntimeAccount(t, ctx, pool)
+	waitForRuntimeBalance(t, ctx, pool)
+	stopBootstrap()
+	bootstrapErr := waitForRuntimeWorkers(bootstrapWorkers)
+	bootstrapStopped = true
+	if bootstrapErr != nil {
+		t.Fatal(bootstrapErr)
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO identity.user_accounts (user_id, account_id)
-		VALUES ('urn:xb:user:trader-1', 'urn:xb:account:acct-1');
-		INSERT INTO ledger.balances (
-			account_id, currency, total, used, free, equity, ledger_sequence
-		) VALUES (
-			'urn:xb:account:acct-1', 'USDC', 1000, 0, 1000, 1000, 0
-	)`); err != nil {
+		VALUES ('urn:xb:user:trader-1', 'urn:xb:account:acct-1')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -1296,13 +1285,9 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 		}
 	}
 	report, err := platformpostgres.NewEngineStore(pool).ReconcileShard(ctx, 7)
-	// This compatibility fixture deliberately installs one catalog instrument
-	// and one balance directly so read contracts have legacy data. Those
-	// account for the only expected projection mismatches; the engine-created
-	// accounts and every admitted command must reconcile exactly.
-	if !errors.Is(err, platformpostgres.ErrReconciliationMismatch) ||
-		report.ConfigurationMismatchCount != 1 ||
-		report.LedgerMismatchCount != 2 ||
+	if err != nil ||
+		report.ConfigurationMismatchCount != 0 ||
+		report.LedgerMismatchCount != 0 ||
 		report.DeliveryMismatchCount != 0 ||
 		report.OrderFillMismatchCount != 0 ||
 		report.PositionMismatchCount != 0 ||
@@ -1317,7 +1302,33 @@ func TestRuntimeServesRESTAndGRPCFromRealComposition(t *testing.T) {
 	}
 }
 
-func admitRuntimeAccountConfiguration(
+type runtimeWorkerResult struct {
+	name   string
+	result <-chan error
+}
+
+func waitForRuntimeWorkers(workers []runtimeWorkerResult) error {
+	var workerErrors []error
+	for _, worker := range workers {
+		select {
+		case workerErr := <-worker.result:
+			if workerErr != nil {
+				workerErrors = append(
+					workerErrors,
+					fmt.Errorf("bootstrap %s worker shutdown: %w", worker.name, workerErr),
+				)
+			}
+		case <-time.After(10 * time.Second):
+			workerErrors = append(
+				workerErrors,
+				fmt.Errorf("bootstrap %s worker did not shut down", worker.name),
+			)
+		}
+	}
+	return errors.Join(workerErrors...)
+}
+
+func admitRuntimeConfiguration(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -1328,54 +1339,143 @@ func admitRuntimeAccountConfiguration(
 	if err != nil {
 		t.Fatal(err)
 	}
-	commandID, err := engine.ParseID("019f9518-8ac8-4ca0-8905-69bc6c165f09")
-	if err != nil {
-		t.Fatal(err)
-	}
 	logicalTime := time.Date(2026, time.July, 25, 16, 0, 0, 0, time.UTC)
-	action := engine.TradingAction{
-		Kind: engine.TradingActionConfigureAccount,
-		ConfigureAccount: &engine.ConfigureAccount{
-			AccountID: "urn:xb:account:acct-1",
-			OmsMode:   engine.OmsModeNetting,
+	commands := []struct {
+		commandIDText string
+		accountID     string
+		accountSeq    uint64
+		idempotency   string
+		action        engine.TradingAction
+	}{
+		{
+			commandIDText: "019f9518-8ac8-4ca0-8905-69bc6c165f08",
+			accountID:     "urn:xb:account:runtime-catalog",
+			accountSeq:    1,
+			idempotency:   "configure-instrument",
+			action: engine.TradingAction{
+				Kind: engine.TradingActionConfigureInstrument,
+				ConfigureInstrument: &engine.ConfigureInstrument{
+					InstrumentID:            "BTC-PERP",
+					Revision:                3,
+					PriceScale:              2,
+					QuantityScale:           3,
+					SettlementCurrency:      "USDC",
+					SettlementCurrencyScale: 2,
+					InitialMarginRate:       "0.1",
+					MaintenanceMarginRate:   "0.05",
+					MaxLeverage:             "10",
+					MakerFeeRate:            "-0.0001",
+					TakerFeeRate:            "0.0005",
+				},
+			},
+		},
+		{
+			commandIDText: "019f9518-8ac8-4ca0-8905-69bc6c165f09",
+			accountID:     "urn:xb:account:acct-1",
+			accountSeq:    1,
+			idempotency:   "configure-account",
+			action: engine.TradingAction{
+				Kind: engine.TradingActionConfigureAccount,
+				ConfigureAccount: &engine.ConfigureAccount{
+					AccountID: "urn:xb:account:acct-1",
+					OmsMode:   engine.OmsModeNetting,
+				},
+			},
+		},
+		{
+			commandIDText: "019f9518-8ac8-4ca0-8905-69bc6c165f0a",
+			accountID:     "urn:xb:account:acct-1",
+			accountSeq:    2,
+			idempotency:   "set-balance",
+			action: engine.TradingAction{
+				Kind: engine.TradingActionAdjustBalance,
+				AdjustBalance: &engine.AdjustBalance{
+					AccountID:     "urn:xb:account:acct-1",
+					Currency:      "USDC",
+					CurrencyScale: 2,
+					Operation:     engine.BalanceOperationSet,
+					Amount:        "1000",
+				},
+			},
 		},
 	}
-	payload, err := engine.EncodeTradingAction(action)
-	if err != nil {
-		t.Fatal(err)
+	for index, command := range commands {
+		commandID, parseErr := engine.ParseID(command.commandIDText)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		payload, encodeErr := engine.EncodeTradingAction(command.action)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		commandTime := logicalTime.Add(time.Duration(index) * time.Second)
+		input := engine.InputEnvelope{
+			InputID:              commandID,
+			SchemaVersion:        engine.CurrentSchemaVersion,
+			ShardID:              7,
+			Kind:                 engine.InputKindCommand,
+			SourceID:             "phase3-runtime-fixture:" + command.accountID,
+			SourceSequence:       command.accountSeq,
+			LogicalTime:          engine.NewLogicalTime(commandTime),
+			ConfigurationVersion: configurationVersion,
+			InstrumentVersion:    1,
+			Payload:              payload,
+		}
+		outboxPayload, encodeErr := engine.EncodeInputMessage(input)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		if _, beginErr := journal.Begin(ctx, application.BeginCommandRequest{
+			Scope:            "phase3-runtime-fixture:" + command.accountID,
+			IdempotencyKey:   command.idempotency,
+			RequestHash:      sha256.Sum256([]byte(command.idempotency)),
+			CommandID:        commandID,
+			AccountID:        command.accountID,
+			AccountSequence:  command.accountSeq,
+			CommandType:      string(command.action.Kind),
+			SchemaVersion:    engine.CurrentSchemaVersion,
+			CanonicalPayload: payload.Bytes(),
+			OutboxSubject:    "engine.input.7.command.v1",
+			OutboxPayload:    outboxPayload,
+			LogicalTime:      commandTime,
+			ExpiresAt:        commandTime.Add(24 * time.Hour),
+		}); beginErr != nil {
+			t.Fatal(beginErr)
+		}
 	}
-	input := engine.InputEnvelope{
-		InputID:              commandID,
-		SchemaVersion:        engine.CurrentSchemaVersion,
-		ShardID:              7,
-		Kind:                 engine.InputKindCommand,
-		SourceID:             "phase3-runtime-fixture",
-		SourceSequence:       1,
-		LogicalTime:          engine.NewLogicalTime(logicalTime),
-		ConfigurationVersion: configurationVersion,
-		InstrumentVersion:    1,
-		Payload:              payload,
-	}
-	outboxPayload, err := engine.EncodeInputMessage(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := journal.Begin(ctx, application.BeginCommandRequest{
-		Scope:            "phase3-runtime-fixture",
-		IdempotencyKey:   "configure-account",
-		RequestHash:      sha256.Sum256([]byte("configure-account")),
-		CommandID:        commandID,
-		AccountID:        "urn:xb:account:acct-1",
-		AccountSequence:  1,
-		CommandType:      string(engine.TradingActionConfigureAccount),
-		SchemaVersion:    engine.CurrentSchemaVersion,
-		CanonicalPayload: payload.Bytes(),
-		OutboxSubject:    "engine.input.7.command.v1",
-		OutboxPayload:    outboxPayload,
-		LogicalTime:      logicalTime,
-		ExpiresAt:        logicalTime.Add(24 * time.Hour),
-	}); err != nil {
-		t.Fatal(err)
+}
+
+func waitForRuntimeBalance(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) {
+	t.Helper()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var exists bool
+		err := pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				  FROM ledger.balances
+				 WHERE account_id = 'urn:xb:account:acct-1'
+				   AND currency = 'USDC'
+				   AND total = 1000
+				   AND used = 0
+				   AND free = 1000
+				   AND equity = 1000
+			)`).Scan(&exists)
+		if err == nil && exists {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("runtime balance adjustment did not commit: %v", err)
+		case <-ticker.C:
+		}
 	}
 }
 

@@ -1606,14 +1606,26 @@ func persistLedger(
 	transactions []engine.LedgerTransactionSnapshot,
 ) error {
 	for _, transaction := range transactions {
-		if _, err := tx.Exec(ctx, `
+		rows, err := tx.Query(ctx, `
 			INSERT INTO ledger.transactions (
 				transaction_id, business_key, input_id, logical_time
-			) VALUES ($1,$2,$3,$4)`,
+			) VALUES ($1,$2,$3,$4)
+			RETURNING transaction_id::text`,
 			transaction.TransactionID.String(),
 			transaction.BusinessKey,
 			transaction.InputID.String(),
 			transaction.LogicalTime.UnixNano(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"persist ledger transaction %s: %w",
+				transaction.TransactionID,
+				err,
+			)
+		}
+		if err := requireSingleLedgerInsertID(
+			rows,
+			transaction.TransactionID.String(),
 		); err != nil {
 			return fmt.Errorf(
 				"persist ledger transaction %s: %w",
@@ -1622,15 +1634,27 @@ func persistLedger(
 			)
 		}
 		for _, entry := range transaction.Entries {
-			if _, err := tx.Exec(ctx, `
+			rows, err := tx.Query(ctx, `
 				INSERT INTO ledger.entries (
 					entry_id, transaction_id, account_id, currency, amount
-				) VALUES ($1,$2,$3,$4,$5)`,
+				) VALUES ($1,$2,$3,$4,$5)
+				RETURNING entry_id::text`,
 				entry.EntryID.String(),
 				transaction.TransactionID.String(),
 				entry.AccountID,
 				entry.Currency,
 				entry.Amount,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"persist ledger entry %s: %w",
+					entry.EntryID,
+					err,
+				)
+			}
+			if err := requireSingleLedgerInsertID(
+				rows,
+				entry.EntryID.String(),
 			); err != nil {
 				return fmt.Errorf(
 					"persist ledger entry %s: %w",
@@ -1639,6 +1663,23 @@ func persistLedger(
 				)
 			}
 		}
+	}
+	return nil
+}
+
+func requireSingleLedgerInsertID(rows pgx.Rows, expected string) error {
+	returned, err := pgx.CollectExactlyOneRow(rows, pgx.RowTo[string])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("unexpected row count 0")
+	}
+	if errors.Is(err, pgx.ErrTooManyRows) {
+		return errors.New("unexpected row count greater than 1")
+	}
+	if err != nil {
+		return err
+	}
+	if returned != expected {
+		return fmt.Errorf("unexpected returned id %q", returned)
 	}
 	return nil
 }

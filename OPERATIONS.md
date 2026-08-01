@@ -550,6 +550,77 @@ unjournaled and all tip-41 state unchanged before a repaired retry; these are
 per-acquisition and per-statement bounds, not a fifteen-second end-to-end
 transaction deadline.
 
+Migration `20260731000200_phase3_runtime_authority_acl.up.sql` is a second
+exceptional privileged cutover from exact tip 42 to tip 43. Stop and drain the
+engine and every writer of the nine fenced authority relations. Use the exact
+existing owner of `identity.bootstrap_first_admin`, the authority schemas, and
+the nine relations; temporarily elevate that owner to `SUPERUSER` only for this
+cutover. The exact owner without temporary superuser authority must receive
+`42501`; a different superuser must receive owner-divergence `55000`. Neither
+failure may leave a journal, row, ACL, or function delta. Inventory
+and disable every enabled database event trigger before the attempt. Migration
+43 takes the engine shard advisory fence, `SHARE` `NOWAIT` locks on the
+protected catalogs, and `SHARE ROW EXCLUSIVE` locks on all nine authority
+relations under a five-second lock timeout and thirty-second statement timeout.
+It exact-validates `engine.schema_migrations` before changing ACLs: owner,
+relation shape and topology, the three columns and exact `applied_at` default,
+constraints, `relhasindex=true`, the sole primary index's complete executable
+state (`unique`, `primary`, `immediate`, `valid`, `ready`, and `live`),
+table/column ACLs, and zero triggers or rewrite rules. It then forces separate
+heap and primary-index scans and requires both to contain exactly the canonical
+42-row filename/checksum manifest. This rejects hidden heap-only duplicates or
+missing index entries left by an earlier false execution hint.
+Any divergence returns `55000`; preserve and investigate that evidence rather
+than retrying or repairing it as migration preparation. A hostile default,
+trigger, or rule could otherwise execute during the migrator's final checksum
+insert after the SQL body completes.
+Under the same catalog and relation fences, all nine runtime targets must have
+`relhasrules=false`, zero rewrite rules, and exactly the frozen tip-42
+executable catalog: relation shape/access method, columns/default dependencies,
+constraints, indexes, every user/internal constraint trigger plus
+`relhastriggers`, RLS flags with zero policies, and zero inheritance.
+The `engine`, `trading`, `market`, and `ledger` namespaces must also retain the
+exact migration owner and complete frozen ACL matrix. Owner drift, any
+unexpected non-owner `CREATE`, a grant option or grantor, or a missing intended
+grant returns `55000` before cleanup; preserve and investigate the unchanged
+tip-42 namespace evidence before a reviewed repair and retry.
+Catalog deparsing is pinned to `pg_catalog`; do not remove that pin even when
+the operator session uses a trusted search path. Treat any divergence as an
+authority incident: it can suppress a ledger write or execute definer code in
+a later economic transaction. Preserve the tip-42 evidence and do not let the
+ACL cutover erase it. The same rule applies database-wide to every schema-scoped
+or global non-owner default privilege: revoke the exact divergent default grant
+in a reviewed repair, verify the evidence, and retry from unchanged tip
+42. After cutover, an
+expected ledger transaction or entry insert that does not return exactly its
+one expected ID fails closed and rolls back the complete economic transaction.
+Before changing ACLs, the migration performs a read-only integrity scan of all
+target FK edges and ledger transaction/currency groups. Orphans, empty ledger
+transactions, or nonzero sums return `55000`; preserve the rows and repair
+through a reviewed forward/compensating action before retry. This scan is
+bounded by the same thirty-second statement timeout and may require an
+explicit maintenance window on a large ledger. The migration performs no row
+backfill or relation rewrite. `NOWAIT` or lock-timeout
+contention returns `55P03`, statement timeout returns `57014`, and a detected
+deadlock returns `40P01`. Each server-reported pre-`COMMIT` error rolls the
+complete transaction back; after the blocker drains, classify the exact tip-42
+journal and unchanged catalog state before explicitly retrying identical bytes.
+Before any ACL cleanup, the migration exact-validates the engine's direct
+mutation grants, grantors, grant options, and sole permitted column updates.
+An excess engine mutation grant returns `55000` while preserving the tip-42
+rows and ACL evidence; investigate and correct the authority incident rather
+than retrying or revoking the evidence as migration preparation.
+A missing `COMMIT` acknowledgment is an unknown outcome: inspect the
+migration-43 filename/checksum, complete 43-row manifest, exact ACL matrix,
+function body/owner/ACL, frozen target defaults, zero target rewrite rules,
+the complete target executable-catalog hash (including enabled internal FK
+triggers), and relation files before deciding whether a retry is
+needed. After a committed attempt, independently verify all of those facts and
+rerun reconciliation, including its orphan-entry check, before restoring
+readiness. Then
+restore the exact owner to `NOSUPERUSER`. Do not run the terminal bootstrap
+until this verification succeeds.
+
 After migration, verify the exact checksum and tip, the sole built-in
 `platformgo-superadmin` role, its sole `*/*/allow` policy, zero assignments and
 zero bootstrap events, unchanged preexisting identity/API-key/audit digests
@@ -561,7 +632,11 @@ only reviewed event triggers after this verification and before unrelated DDL.
 Do not activate an HTTP route, issue an admin token, or invent a
 password/session record.
 
-For the one terminal bootstrap:
+For the one terminal bootstrap, temporarily elevate the exact bootstrap-function
+owner to `SUPERUSER` immediately before step 1. A demoted definer owner cannot
+take the protected system-catalog fences and the call fails `42501`. Keep that
+owner elevated through any unknown-outcome replay and the fresh-session durable
+verification in step 4; the operator login receives no superuser authority.
 
 1. Create a short-lived, individually attributable login outside the
    application, give it a strong out-of-band credential, and grant it only
@@ -578,7 +653,7 @@ For the one terminal bootstrap:
    operator login with the exact `session_user` spelling; that spelling is
    bound into the request hash and immutable receipt and must be reused for
    replay or unknown-commit reconciliation. Record the reviewed
-   SHA-256 checksum of migration 42 from the exact deployed artifact as
+   SHA-256 checksum of migration 43 from the exact deployed artifact as
    `migration_checksum_sha256_hex`; the function uses it as a pre-write
    deployment precondition.
 3. Connect as that login with client-side stop-on-error enabled. Run the
@@ -603,9 +678,10 @@ For the one terminal bootstrap:
    ```
 
    Before writing, the function locks and exact-validates the `engine` namespace
-   plus the 42-row migration journal, including zero user triggers/rules, the
-   supplied migration-42 checksum, and the canonical ordered manifest through
-   migration 41. The returned `created` row is
+   plus the 43-row migration journal, including the sole exact migration-43
+   successor filename, zero user triggers/rules, the supplied migration-43
+   checksum, and the canonical ordered manifest through migration 42. The
+   returned `created` row is
    provisional until PostgreSQL confirms `COMMIT`. Do not acknowledge success
    or begin credential cleanup from a result observed inside an open
    transaction.
@@ -620,10 +696,10 @@ For the one terminal bootstrap:
    post-commit observation establishes durable success. The stored wildcard
    policy applies to each concrete catalog request; `*` is not itself a valid
    requested resource or action.
-5. Only after step 4 succeeds, revoke the login's bootstrap-role membership,
-   disable its login credential, and remove the short-lived login after
-   retaining the actor name in the audit/operations record. The group role
-   remains inert as `NOLOGIN`.
+5. Only after step 4 succeeds, restore the bootstrap-function owner to
+   `NOSUPERUSER`, revoke the login's bootstrap-role membership, disable its login
+   credential, and remove the short-lived login after retaining the actor name
+   in the audit/operations record. The group role remains inert as `NOLOGIN`.
 
 A connection loss before or during `COMMIT`, including after the function
 returned `created`, is an unknown outcome. Do not acknowledge success, remove
@@ -644,9 +720,9 @@ immutability triggers, function definition and ACL, migration checksum, and
 actor before deciding whether to retry. There is intentionally no unassign,
 delete, role-edit, or lockout-recovery mutation in this slice. Any such
 capability and production admin route activation require a separately reviewed
-forward change. Rollback after a committed tip 42 is a forward-compatible code
-artifact or an explicitly authorized complete restore; never edit migration 42
-or its journal row.
+forward change. Rollback after a committed tip 43 is a forward-compatible code
+artifact or an explicitly authorized complete restore; never edit migration 42,
+migration 43, or either journal row.
 
 ### Phase 3 command market-sequence binding upgrade
 

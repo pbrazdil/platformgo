@@ -1117,10 +1117,18 @@ func compareLedger(
 	expected map[string]engine.LedgerTransactionSnapshot,
 ) (uint64, error) {
 	var transactionCount uint64
+	var orphanEntryCount uint64
 	if err := tx.QueryRow(ctx, `
-		SELECT count(*)
-		  FROM ledger.transactions`,
-	).Scan(&transactionCount); err != nil {
+		SELECT
+			(SELECT count(*) FROM ledger.transactions),
+			(
+				SELECT count(*)
+				  FROM ledger.entries AS entry
+				  LEFT JOIN ledger.transactions AS transaction
+				    ON transaction.transaction_id = entry.transaction_id
+				 WHERE transaction.transaction_id IS NULL
+			)`,
+	).Scan(&transactionCount, &orphanEntryCount); err != nil {
 		return 0, err
 	}
 	rows, err := tx.Query(ctx, `
@@ -1180,7 +1188,7 @@ func compareLedger(
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-	var mismatches uint64
+	mismatches := orphanEntryCount
 	if transactionCount > uint64(len(actual)) {
 		mismatches += transactionCount - uint64(len(actual))
 	}

@@ -57,6 +57,26 @@ func (store *EngineStore) ReconcileShard(
 	defer func() {
 		_ = ownership.Close(context.WithoutCancel(ctx))
 	}()
+	return store.ReconcileOwnedShard(ctx, shardID, ownership)
+}
+
+// ReconcileOwnedShard runs the same fail-closed reconciliation while an
+// engine processor retains the shard's lifetime ownership fence.
+func (store *EngineStore) ReconcileOwnedShard(
+	ctx context.Context,
+	shardID engine.ShardID,
+	ownership *ShardOwnership,
+) (ReconciliationReport, error) {
+	if store == nil || store.pool == nil {
+		return ReconciliationReport{}, errors.New(
+			"reconcile owned shard: PostgreSQL pool is required",
+		)
+	}
+	if ownership == nil || ownership.shardID != shardID {
+		return ReconciliationReport{}, errors.New(
+			"reconcile owned shard: matching shard ownership is required",
+		)
+	}
 	tx, token, releaseOwnership, beginErr := store.beginEngineTx(ctx, ownership)
 	if beginErr != nil {
 		return ReconciliationReport{}, fmt.Errorf(
@@ -443,8 +463,6 @@ func (store *EngineStore) ReconcileShard(
 		  FROM (
 			SELECT entry.transaction_id, entry.currency
 			  FROM ledger.entries AS entry
-			  JOIN ledger.transactions AS transaction
-			    ON transaction.transaction_id = entry.transaction_id
 			 GROUP BY entry.transaction_id, entry.currency
 			HAVING sum(amount) <> 0
 		  ) AS unbalanced`,

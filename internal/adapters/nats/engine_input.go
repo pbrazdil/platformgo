@@ -105,8 +105,8 @@ type EngineProcessor struct {
 	transportReady bool
 }
 
-// NewEngineProcessor restores the PostgreSQL-authoritative shard state before
-// consuming any new JetStream input.
+// NewEngineProcessor restores and reconciles a ready PostgreSQL-authoritative
+// shard under its lifetime ownership fence before consuming JetStream input.
 func NewEngineProcessor(
 	ctx context.Context,
 	store *platformpostgres.EngineStore,
@@ -127,6 +127,29 @@ func NewEngineProcessor(
 	if err != nil {
 		_ = ownership.Close(context.WithoutCancel(ctx))
 		return nil, fmt.Errorf("create engine processor: recover shard %d: %w", shardID, err)
+	}
+	if state.Ready() {
+		report, reconcileErr := store.ReconcileOwnedShard(
+			ctx,
+			shardID,
+			ownership,
+		)
+		if reconcileErr != nil {
+			_ = ownership.Close(context.WithoutCancel(ctx))
+			return nil, fmt.Errorf(
+				"create engine processor: reconcile shard %d: %w",
+				shardID,
+				reconcileErr,
+			)
+		}
+		if !report.Ready {
+			_ = ownership.Close(context.WithoutCancel(ctx))
+			return nil, fmt.Errorf(
+				"create engine processor: %w: shard %d reconciliation is not ready",
+				engine.ErrShardNotReady,
+				shardID,
+			)
+		}
 	}
 	return &EngineProcessor{
 		store:          store,

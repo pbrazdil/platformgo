@@ -1591,6 +1591,68 @@ func TestReconcileShardFailsClosedOnTradingProjectionCorruption(t *testing.T) {
 			},
 		},
 		{
+			name: "balanced orphan ledger entries",
+			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
+				_, err := pool.Exec(context.Background(), `
+					DO $block$
+					DECLARE
+						trigger_name name;
+					BEGIN
+						SELECT tgname
+						  INTO trigger_name
+						  FROM pg_catalog.pg_trigger
+						 WHERE tgrelid = 'ledger.entries'::pg_catalog.regclass
+						   AND tgisinternal
+						   AND tgtype = 5
+						 ORDER BY tgname
+						 LIMIT 1;
+						EXECUTE pg_catalog.format(
+							'ALTER TABLE ledger.entries DISABLE TRIGGER %I',
+							trigger_name
+						);
+					END
+					$block$;
+					INSERT INTO ledger.entries (
+						entry_id, transaction_id, account_id, currency, amount
+					) VALUES
+						(
+							'019f9460-4b36-4e9b-8f44-682611f78920',
+							'019f9460-4b36-4e9b-8f44-682611f78922',
+							'system:clearing', 'USDC', 11
+						),
+						(
+							'019f9460-4b36-4e9b-8f44-682611f78921',
+							'019f9460-4b36-4e9b-8f44-682611f78922',
+							'system:clearing', 'USDC', -11
+						);
+					SET CONSTRAINTS ledger.ledger_transaction_must_balance IMMEDIATE;
+					DO $block$
+					DECLARE
+						trigger_name name;
+					BEGIN
+						FOR trigger_name IN
+							SELECT tgname
+							  FROM pg_catalog.pg_trigger
+							 WHERE tgrelid = 'ledger.entries'::pg_catalog.regclass
+							   AND tgisinternal
+							   AND tgenabled <> 'O'
+						LOOP
+							EXECUTE pg_catalog.format(
+								'ALTER TABLE ledger.entries ENABLE TRIGGER %I',
+								trigger_name
+							);
+						END LOOP;
+					END
+					$block$`)
+				if err != nil {
+					t.Fatalf("insert balanced orphan ledger entries: %v", err)
+				}
+			},
+			reportKind: func(report platformpostgres.ReconciliationReport) uint64 {
+				return report.LedgerMismatchCount
+			},
+		},
+		{
 			name: "domain event payload",
 			mutate: func(t *testing.T, pool *pgxpool.Pool, _ reconciliationFixture) {
 				_, err := pool.Exec(context.Background(), `
@@ -2062,6 +2124,61 @@ func TestReconcileShardRejectsCorruptPendingCommandJournal(t *testing.T) {
 				t.Fatal("corrupt pending journal restart became ready")
 			}
 		})
+	}
+}
+
+func TestEngineProcessorReconcilesReadyShardBeforeActivation(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	fixture := seedReconciliationFixture(t, pool, 8)
+	if _, err := pool.Exec(ctx, `
+		ALTER TABLE ledger.entries DISABLE TRIGGER ALL`); err != nil {
+		t.Fatalf("disable ledger triggers for startup corruption: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO ledger.entries (
+			entry_id, transaction_id, account_id, currency, amount
+		) VALUES
+			(
+				'019f9460-4b36-4e9b-8f44-682611f78930',
+				'019f9460-4b36-4e9b-8f44-682611f78932',
+				'system:clearing', 'USDC', 11
+			),
+			(
+				'019f9460-4b36-4e9b-8f44-682611f78931',
+				'019f9460-4b36-4e9b-8f44-682611f78932',
+				'system:clearing', 'USDC', -11
+			)`); err != nil {
+		t.Fatalf("insert startup orphan ledger entries: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		ALTER TABLE ledger.entries ENABLE TRIGGER ALL`); err != nil {
+		t.Fatalf("restore ledger triggers before startup: %v", err)
+	}
+
+	processor, err := platformnats.NewEngineProcessor(ctx, fixture.store, 8)
+	if processor != nil {
+		_ = processor.Close(context.Background())
+		t.Fatal("engine processor activated a shard with orphan ledger entries")
+	}
+	if !errors.Is(err, platformpostgres.ErrReconciliationMismatch) {
+		t.Fatalf("engine processor startup error = %v, want reconciliation mismatch", err)
+	}
+	var faults int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM engine.shard_faults WHERE shard_id = 8`,
+	).Scan(&faults); err != nil {
+		t.Fatalf("count startup reconciliation faults: %v", err)
+	}
+	if faults != 1 {
+		t.Fatalf("startup reconciliation faults = %d, want 1", faults)
+	}
+	recovered, err := fixture.store.RecoverTradingState(ctx, 8)
+	if err != nil {
+		t.Fatalf("recover startup-reconciled shard: %v", err)
+	}
+	if recovered.Ready() {
+		t.Fatal("startup reconciliation corruption recovered as ready")
 	}
 }
 
@@ -3440,6 +3557,187 @@ func TestEngineStoreBindsCompleteCommandEnvelope(t *testing.T) {
 			assertRowCount(t, pool, "trading.accounts", 0)
 			assertRowCount(t, pool, "engine.input_receipts", 0)
 		})
+	}
+}
+
+func TestEngineStoreRejectsSuppressedLedgerEntryInsert(t *testing.T) {
+	ctx := context.Background()
+	pool := postgresPool(t)
+	resetDurableSchemas(t, pool)
+	if err := newCurrentTestMigrator(
+		t,
+		pool,
+		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+	).MigrateAndProvision(ctx, 7); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	store := platformpostgres.NewEngineStore(pool)
+	state := engine.NewState(7)
+	ids := testkit.NewShardIDSequence(7)
+	clock := testkit.NewManualClock(
+		engine.NewLogicalTime(time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC)),
+	)
+	configureInstrument := engine.TradingAction{
+		Kind: engine.TradingActionConfigureInstrument,
+		ConfigureInstrument: &engine.ConfigureInstrument{
+			InstrumentID:            "BTC-PERP-SUPPRESSED-LEDGER",
+			Revision:                1,
+			PriceScale:              2,
+			QuantityScale:           3,
+			SettlementCurrency:      "USDC",
+			SettlementCurrencyScale: 2,
+			InitialMarginRate:       "0.1",
+			MaintenanceMarginRate:   "0.05",
+			MaxLeverage:             "10",
+			MakerFeeRate:            "0",
+			TakerFeeRate:            "0",
+		},
+	}
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		configureInstrument,
+		platformpostgres.ApplyOptions{},
+	)
+	configureAccount := engine.TradingAction{
+		Kind: engine.TradingActionConfigureAccount,
+		ConfigureAccount: &engine.ConfigureAccount{
+			AccountID: "account-suppressed-ledger",
+			OmsMode:   engine.OmsModeNetting,
+		},
+	}
+	state, _, _, _ = applyStoredTrading(
+		t,
+		pool,
+		store,
+		state,
+		ids,
+		clock,
+		configureAccount,
+		platformpostgres.ApplyOptions{},
+	)
+
+	if _, err := pool.Exec(ctx, `
+		CREATE RULE suppress_engine_ledger_entries AS
+		ON INSERT TO ledger.entries
+		DO INSTEAD NOTHING`); err != nil {
+		t.Fatalf("install suppressing ledger rule: %v", err)
+	}
+	deposit := engine.TradingAction{
+		Kind: engine.TradingActionAdjustBalance,
+		AdjustBalance: &engine.AdjustBalance{
+			AccountID:     "account-suppressed-ledger",
+			Currency:      "USDC",
+			CurrencyScale: 2,
+			Operation:     engine.BalanceOperationDeposit,
+			Amount:        "10",
+		},
+	}
+	input := nextStoredInput(t, state, ids, clock, deposit)
+	seedPendingCommand(t, pool, input, deposit)
+	type durableCounts struct {
+		receipts     int
+		checkpoints  int
+		faults       int
+		transactions int
+		entries      int
+		balances     int
+		fills        int
+		outbox       int
+		publications int
+	}
+	readCounts := func() durableCounts {
+		t.Helper()
+		var counts durableCounts
+		if err := pool.QueryRow(ctx, `
+			SELECT
+				(SELECT count(*) FROM engine.input_receipts),
+				(SELECT count(*) FROM engine.shard_checkpoints),
+				(SELECT count(*) FROM engine.shard_faults),
+				(SELECT count(*) FROM ledger.transactions),
+				(SELECT count(*) FROM ledger.entries),
+				(SELECT count(*) FROM ledger.balances),
+				(SELECT count(*) FROM trading.fills),
+				(SELECT count(*) FROM messaging.outbox),
+				(SELECT count(*) FROM realtime.publications)`,
+		).Scan(
+			&counts.receipts,
+			&counts.checkpoints,
+			&counts.faults,
+			&counts.transactions,
+			&counts.entries,
+			&counts.balances,
+			&counts.fills,
+			&counts.outbox,
+			&counts.publications,
+		); err != nil {
+			t.Fatalf("inspect suppressed-ledger durable counts: %v", err)
+		}
+		return counts
+	}
+	beforeCounts := readCounts()
+	beforeHash := state.Hash()
+	next, _, duplicate, err := store.ApplyTrading(
+		ctx,
+		state,
+		input,
+		deposit,
+		platformpostgres.ApplyOptions{},
+	)
+	if !adminBootstrapIsPostgresCode(err, "0A000") ||
+		!strings.Contains(err.Error(), "persist ledger entry") {
+		t.Fatalf("suppressed ledger entry error = %v, want ledger 0A000", err)
+	}
+	if duplicate {
+		t.Fatal("suppressed ledger write was treated as a duplicate")
+	}
+	if next.Hash() != beforeHash {
+		t.Fatal("suppressed ledger write returned mutated engine state")
+	}
+	if afterCounts := readCounts(); afterCounts != beforeCounts {
+		t.Fatalf(
+			"suppressed ledger write changed durable counts: before %+v after %+v",
+			beforeCounts,
+			afterCounts,
+		)
+	}
+
+	restartedStore := platformpostgres.NewEngineStore(pool)
+	recovered, err := restartedStore.RecoverTradingState(ctx, 7)
+	if err != nil {
+		t.Fatalf("recover after suppressed ledger rollback: %v", err)
+	}
+	if recovered.Hash() != beforeHash {
+		t.Fatal("recovery observed state from suppressed ledger write")
+	}
+	next, _, duplicate, err = restartedStore.ApplyTrading(
+		ctx,
+		recovered,
+		input,
+		deposit,
+		platformpostgres.ApplyOptions{},
+	)
+	if !adminBootstrapIsPostgresCode(err, "0A000") ||
+		!strings.Contains(err.Error(), "persist ledger entry") {
+		t.Fatalf("suppressed ledger retry error = %v, want ledger 0A000", err)
+	}
+	if duplicate {
+		t.Fatal("suppressed ledger retry was treated as a duplicate")
+	}
+	if next.Hash() != beforeHash {
+		t.Fatal("suppressed ledger retry returned mutated engine state")
+	}
+	if afterCounts := readCounts(); afterCounts != beforeCounts {
+		t.Fatalf(
+			"suppressed ledger retry changed durable counts: before %+v after %+v",
+			beforeCounts,
+			afterCounts,
+		)
 	}
 }
 

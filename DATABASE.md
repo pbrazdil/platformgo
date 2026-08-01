@@ -1036,7 +1036,12 @@ migrator reloads and compares the complete
 applied manifest after acquiring the journal lock. The journal and relation
 catalogs include exact owner/kind/persistence/RLS, standalone
 nonpartitioned/noninherited topology, columns/defaults, constraints, indexes,
-internal and user triggers, rules, table/column ACLs, and graph state.
+the journal relation's `relhasindex` hint and complete primary-index
+execution state, internal and user triggers, rules, table/column ACLs, and
+graph state. Under the retained journal/catalog fences it independently forces
+heap and primary-index reads of the exact 42-row predecessor manifest; their
+counts and canonical filename/checksum hashes must be identical before the
+cutover can begin.
 All fences are retained through the checksum journal commit, so concurrent
 role, function, ACL, journal, or RBAC DDL cannot enter between validation and
 seeding. It then seeds exactly one fixed built-in
@@ -1047,10 +1052,13 @@ administrator, credential, session, token, or runtime route.
 mutation boundary. A member login supplies an explicit request ID, SHA-256
 idempotency key hash, canonical lowercase-UUID admin subject, event UUID,
 canonical microsecond UTC logical time, and the expected 32-byte checksum of
-migration 42. The checksum is a deployment precondition and is not part of the
-business idempotency hash. Under the journal lock, the function requires the
-exact 42-row tip, the requested migration-42 checksum, and the canonical
-ordered checksum of all 41 predecessor rows before any authority write. It
+migration 43. The checksum is a deployment precondition and is not part of the
+business idempotency hash. Forward migration 43 advances the exact-tip fence:
+under the journal lock, the function requires the exact 43-row tip, the sole
+successor filename
+`20260731000200_phase3_runtime_authority_acl.up.sql`, the requested exact
+migration-43 checksum, and the canonical ordered checksum of all 42 predecessor
+rows before any authority write. It
 rejects a null, malformed, or noncanonical input with SQLSTATE `22023`, before
 any authority write. It then derives an exact request hash,
 serializes through fixed advisory locks, and writes the sole assignment plus
@@ -1081,6 +1089,61 @@ one-role, zero-parent, one-assignment, one-policy, and one-receipt graph;
 unexpected topology, constraints, defaults, indexes, rules, ACLs, or
 immediate/deferred trigger authority raises `55000` before any write and rolls
 back the caller's transaction.
+
+Migration 43 is itself a second exceptional privileged migration. The exact
+existing owner of the bootstrap function, authority schemas, and fenced
+relations must be temporarily elevated to `SUPERUSER` so it can acquire the
+protected-catalog fences; neither the ordinary steady-state migrator nor a
+different superuser owner is accepted. The privilege is removed immediately
+after independent tip/checksum, ACL, function, and filenode verification. The
+already locked migration journal must exactly match the tip-42 owner, relation
+kind and persistence, RLS/partition/inheritance topology, three columns,
+`applied_at = clock_timestamp()` default, constraints, sole index, table and
+column ACLs, and zero triggers or rewrite rules. Migration 43 checks that full
+catalog under its protected fences before the ACL cutover, so the migrator's
+later checksum insert cannot execute a hidden post-scrub side effect; any
+divergence raises `55000` and remains available for investigation. The same
+fenced preflight exact-validates the `engine`, `trading`, `market`, and
+`ledger` schema owners and complete ACL matrices. Unexpected non-owner
+`CREATE`, grant options, grantors, missing grants, or owner drift raise `55000`
+without scrubbing the tip-42 evidence. It also requires `relhasrules=false`, a zero rewrite-rule graph, and
+exactly the frozen tip-42 executable catalog on all nine target relations:
+relation shape/access method, columns and default dependency graph,
+constraints, indexes, every user/internal constraint trigger and relation
+execution hint, RLS flags with zero policies, and zero inheritance.
+The migration pins `search_path=pg_catalog` before every catalog lookup and
+deparse so a caller, role, or database search path cannot shadow a trusted
+built-in while preserving the same rendered expression. This prevents a hidden
+rule from suppressing a durable write and prevents an executable default,
+constraint, index, trigger, or policy from regaining authority inside a later
+economic transaction. Every database-wide or schema-scoped non-owner default
+grant is also forbidden: it could otherwise grant a runtime or unexpected role
+authority over a later forward-migration table, sequence, function, or type. The
+pre-cutover ACL check admits only the documented
+direct engine mutation matrix: owner-granted, non-grantable table `INSERT` and,
+where required,
+table `UPDATE`, plus column `UPDATE` only on
+`engine.shard_ownership_epochs(epoch, acquired_at)`. Any engine
+`DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, `MAINTAIN`, table-level ownership-epoch
+`UPDATE`, other column mutation, non-owner grantor, or grant option raises
+`55000` before any revoke or journal change. Missing intended grants remain
+repairable by the atomic ACL scrub; excess mutation authority is preserved for
+investigation instead of being silently erased. The same exact function owner
+must be temporarily re-elevated for the terminal
+bootstrap because its `SECURITY DEFINER` body takes the protected-catalog
+fences. It remains elevated through unknown-outcome replay and fresh-session
+durable verification, then returns to `NOSUPERUSER`.
+The runtime ledger adapter independently requires exactly one returned ID for
+each expected transaction and entry insert; any zero-row, multi-row, or wrong-ID result
+returns an error and rolls back the enclosing receipt, state, ledger,
+checkpoint, and outbox transaction.
+While all nine target writers are locked, migration 43 also scans every target
+foreign-key edge and the complete ledger graph. Orphan rows, transactions with
+no entries, or any nonzero `(transaction_id, currency)` sum raise `55000`
+before the ACL cutover and remain untouched for incident analysis. Engine
+activation and explicit reconciliation repeat the orphan and balance checks,
+so restored or post-cutover corruption removes shard readiness rather than
+disappearing from an inner join.
 Row-level update/delete and statement-level truncate triggers make the receipt
 append-only even to the migration owner.
 
