@@ -1036,7 +1036,12 @@ migrator reloads and compares the complete
 applied manifest after acquiring the journal lock. The journal and relation
 catalogs include exact owner/kind/persistence/RLS, standalone
 nonpartitioned/noninherited topology, columns/defaults, constraints, indexes,
-internal and user triggers, rules, table/column ACLs, and graph state.
+the journal relation's `relhasindex` hint and complete primary-index
+execution state, internal and user triggers, rules, table/column ACLs, and
+graph state. Under the retained journal/catalog fences it independently forces
+heap and primary-index reads of the exact 42-row predecessor manifest; their
+counts and canonical filename/checksum hashes must be identical before the
+cutover can begin.
 All fences are retained through the checksum journal commit, so concurrent
 role, function, ACL, journal, or RBAC DDL cannot enter between validation and
 seeding. It then seeds exactly one fixed built-in

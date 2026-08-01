@@ -9,7 +9,7 @@ major-upgrade, backup-restore, recovery, and reconciliation rehearsal.
 
 ## Current status
 
-Last updated: 2026-07-31
+Last updated: 2026-08-01
 
 Current delivery stage: **Phase 3 — compatibility edges, in progress**.
 
@@ -183,7 +183,12 @@ The active runtime-authority ACL slice adds forward migration 43 over the nine
 remaining EngineStore authority relations. It rejects unexpected pre-cutover
 table or column mutation authority, including any engine grant outside the
 exact relation/column allowlist or carrying a grant option, and divergent
-trigger/function catalogs before changing ACLs. All nine target relations must
+trigger/function catalogs before changing ACLs. The migration journal must
+also retain `relhasindex=true` and the exact ready, valid, live primary-index
+execution state so the final checksum insert cannot bypass uniqueness. Forced
+heap and primary-index scans must also agree on the exact 42-row predecessor
+manifest before the cutover. All
+nine target relations must
 also retain the frozen tip-42 default-expression allowlist, `relhasrules=false`,
 and a zero-row rewrite-rule graph. Their complete executable catalog is frozen:
 relation shape and access method, columns and bound defaults, constraints,

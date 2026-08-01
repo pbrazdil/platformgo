@@ -564,7 +564,12 @@ protected catalogs, and `SHARE ROW EXCLUSIVE` locks on all nine authority
 relations under a five-second lock timeout and thirty-second statement timeout.
 It exact-validates `engine.schema_migrations` before changing ACLs: owner,
 relation shape and topology, the three columns and exact `applied_at` default,
-constraints, sole index, table/column ACLs, and zero triggers or rewrite rules.
+constraints, `relhasindex=true`, the sole primary index's complete executable
+state (`unique`, `primary`, `immediate`, `valid`, `ready`, and `live`),
+table/column ACLs, and zero triggers or rewrite rules. It then forces separate
+heap and primary-index scans and requires both to contain exactly the canonical
+42-row filename/checksum manifest. This rejects hidden heap-only duplicates or
+missing index entries left by an earlier false execution hint.
 Any divergence returns `55000`; preserve and investigate that evidence rather
 than retrying or repairing it as migration preparation. A hostile default,
 trigger, or rule could otherwise execute during the migrator's final checksum

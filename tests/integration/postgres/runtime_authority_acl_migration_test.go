@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 )
 
@@ -1799,6 +1800,7 @@ func TestRuntimeAuthorityACLMigrationRejectsMigrationJournalSideEffects(t *testi
 		install       string
 		repair        string
 		artifactQuery string
+		hiddenHeapRow bool
 	}{
 		{
 			name: "after insert trigger",
@@ -1902,6 +1904,98 @@ func TestRuntimeAuthorityACLMigrationRejectsMigrationJournalSideEffects(t *testi
 				           'engine.schema_migrations'::pg_catalog.regclass
 				   AND attname = 'applied_at'`,
 		},
+		{
+			name: "relation index execution hint",
+			install: `
+				UPDATE pg_catalog.pg_class
+				   SET relhasindex = false
+				 WHERE oid =
+				           'engine.schema_migrations'::pg_catalog.regclass`,
+			repair: `
+				UPDATE pg_catalog.pg_class
+				   SET relhasindex = true
+				 WHERE oid =
+				           'engine.schema_migrations'::pg_catalog.regclass`,
+			artifactQuery: `
+				SELECT NOT relhasindex
+				  FROM pg_catalog.pg_class
+				 WHERE oid =
+				           'engine.schema_migrations'::pg_catalog.regclass`,
+		},
+		{
+			name: "primary index ready execution hint",
+			install: `
+				UPDATE pg_catalog.pg_index
+				   SET indisready = false
+				 WHERE indexrelid =
+				           'engine.schema_migrations_pkey'::pg_catalog.regclass`,
+			repair: `
+				UPDATE pg_catalog.pg_index
+				   SET indisready = true
+				 WHERE indexrelid =
+				           'engine.schema_migrations_pkey'::pg_catalog.regclass`,
+			artifactQuery: `
+				SELECT NOT indisready
+				  FROM pg_catalog.pg_index
+				 WHERE indexrelid =
+				           'engine.schema_migrations_pkey'::pg_catalog.regclass`,
+		},
+		{
+			name: "primary index valid execution hint",
+			install: `
+				UPDATE pg_catalog.pg_index
+				   SET indisvalid = false
+				 WHERE indexrelid =
+				           'engine.schema_migrations_pkey'::pg_catalog.regclass`,
+			repair: `
+				UPDATE pg_catalog.pg_index
+				   SET indisvalid = true
+				 WHERE indexrelid =
+				           'engine.schema_migrations_pkey'::pg_catalog.regclass`,
+			artifactQuery: `
+				SELECT NOT indisvalid
+				  FROM pg_catalog.pg_index
+				 WHERE indexrelid =
+				           'engine.schema_migrations_pkey'::pg_catalog.regclass`,
+		},
+		{
+			name: "primary index live execution hint",
+			install: `
+				UPDATE pg_catalog.pg_index
+				   SET indislive = false
+				 WHERE indexrelid =
+				           'engine.schema_migrations_pkey'::pg_catalog.regclass`,
+			repair: `
+				UPDATE pg_catalog.pg_index
+				   SET indislive = true
+				 WHERE indexrelid =
+				           'engine.schema_migrations_pkey'::pg_catalog.regclass`,
+			artifactQuery: `
+				SELECT NOT indislive
+				  FROM pg_catalog.pg_index
+				 WHERE indexrelid =
+				           'engine.schema_migrations_pkey'::pg_catalog.regclass`,
+		},
+		{
+			name:          "hidden duplicate journal heap row",
+			hiddenHeapRow: true,
+			install: `
+				UPDATE pg_catalog.pg_class
+				   SET relhasindex = false
+				 WHERE oid =
+				           'engine.schema_migrations'::pg_catalog.regclass`,
+			repair: `
+				DELETE FROM engine.schema_migrations
+				 WHERE applied_at =
+				           '2000-01-01 00:00:00+00'::timestamptz`,
+			artifactQuery: `
+				SELECT EXISTS (
+					SELECT 1
+					  FROM engine.schema_migrations
+					 WHERE applied_at =
+					           '2000-01-01 00:00:00+00'::timestamptz
+				)`,
+		},
 	}
 
 	for _, test := range tests {
@@ -1951,6 +2045,9 @@ func TestRuntimeAuthorityACLMigrationRejectsMigrationJournalSideEffects(t *testi
 			if _, err := pool.Exec(ctx, test.install); err != nil {
 				t.Fatalf("install migration journal side effect: %v", err)
 			}
+			if test.hiddenHeapRow {
+				installRuntimeAuthorityHiddenJournalRow(t, pool)
+			}
 
 			before := runtimeAuthorityCutoverDigest(t, pool)
 			err := newCurrentTestMigrator(
@@ -1964,7 +2061,11 @@ func TestRuntimeAuthorityACLMigrationRejectsMigrationJournalSideEffects(t *testi
 			if after := runtimeAuthorityCutoverDigest(t, pool); after != before {
 				t.Fatalf("rejected migration changed evidence: before %s after %s", before, after)
 			}
-			assertMigrationHistoryTip(t, pool, 42, runtimeAuthorityACLPreviousMigration)
+			if test.hiddenHeapRow {
+				assertRuntimeAuthorityRejectedHiddenJournalRow(t, pool)
+			} else {
+				assertMigrationHistoryTip(t, pool, 42, runtimeAuthorityACLPreviousMigration)
+			}
 
 			var artifactPreserved bool
 			if err := pool.QueryRow(ctx, test.artifactQuery).Scan(&artifactPreserved); err != nil {
@@ -2006,6 +2107,7 @@ func TestRuntimeAuthorityACLMigrationRejectsMigrationJournalSideEffects(t *testi
 				t.Fatalf("verify retry after journal repair: %v", err)
 			}
 			assertMigrationHistoryTip(t, pool, 43, runtimeAuthorityACLMigration)
+			assertRuntimeAuthorityMigrationJournalIndexComplete(t, pool)
 			assertRuntimeAuthorityTablePrivileges(t, pool, "platformgo_engine", map[string]string{
 				"engine.deployment_shard":            "SELECT",
 				"engine.shard_ownership_epochs":      "SELECT,INSERT",
@@ -2026,6 +2128,208 @@ func TestRuntimeAuthorityACLMigrationRejectsMigrationJournalSideEffects(t *testi
 
 		})
 	}
+}
+
+func installRuntimeAuthorityHiddenJournalRow(
+	t *testing.T,
+	pool *pgxpool.Pool,
+) {
+	t.Helper()
+	ctx := context.Background()
+	var checksum []byte
+	if err := pool.QueryRow(ctx, `
+		SELECT checksum
+		  FROM engine.schema_migrations
+		 WHERE filename =
+		           '20260731000100_phase3_admin_bootstrap_authority.up.sql'`,
+	).Scan(&checksum); err != nil {
+		t.Fatalf("read hidden-journal fixture checksum: %v", err)
+	}
+	config, err := pgxpool.ParseConfig(os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN"))
+	if err != nil {
+		t.Fatalf("parse hidden-journal fixture DSN: %v", err)
+	}
+	hiddenPool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open hidden-journal fixture pool: %v", err)
+	}
+	var relhasindex bool
+	if err := hiddenPool.QueryRow(ctx, `
+		SELECT relhasindex
+		  FROM pg_catalog.pg_class
+		 WHERE oid =
+		           'engine.schema_migrations'::pg_catalog.regclass`,
+	).Scan(&relhasindex); err != nil {
+		hiddenPool.Close()
+		t.Fatalf("inspect hidden-journal relation hint: %v", err)
+	}
+	if relhasindex {
+		hiddenPool.Close()
+		t.Fatal("hidden-journal fixture session observed relhasindex=true")
+	}
+	if _, err := hiddenPool.Exec(ctx, `
+		INSERT INTO engine.schema_migrations (
+			filename, checksum, applied_at
+		)
+		VALUES (
+			'20260731000100_phase3_admin_bootstrap_authority.up.sql',
+			$1,
+			'2000-01-01 00:00:00+00'::timestamptz
+		)`, checksum); err != nil {
+		hiddenPool.Close()
+		t.Fatalf("insert hidden migration journal row: %v", err)
+	}
+	hiddenPool.Close()
+	if _, err := pool.Exec(ctx, `
+		UPDATE pg_catalog.pg_class
+		   SET relhasindex = true
+		 WHERE oid =
+		           'engine.schema_migrations'::pg_catalog.regclass`); err != nil {
+		t.Fatalf("restore migration journal relation index hint: %v", err)
+	}
+}
+
+func assertRuntimeAuthorityRejectedHiddenJournalRow(
+	t *testing.T,
+	pool *pgxpool.Pool,
+) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin rejected journal physical-manifest verification: %v", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	heapCount, _ := runtimeAuthorityMigrationManifest(t, tx, true)
+	if _, err := tx.Exec(ctx, `
+		SET LOCAL enable_seqscan = off;
+		SET LOCAL enable_indexscan = on;
+		SET LOCAL enable_indexonlyscan = on;
+		SET LOCAL enable_bitmapscan = off`); err != nil {
+		t.Fatalf("force rejected journal primary-index manifest: %v", err)
+	}
+	indexCount, indexHash := runtimeAuthorityMigrationManifest(t, tx, false)
+	if heapCount != 43 || indexCount != 42 || indexHash !=
+		"e157f3a5ce0dabe82d8a4dd32d5913bf74973b8e984f1c779ac1d515bb378156" {
+		t.Fatalf(
+			"rejected journal physical manifests = heap %d index %d/%s",
+			heapCount,
+			indexCount,
+			indexHash,
+		)
+	}
+}
+
+func assertRuntimeAuthorityMigrationJournalIndexComplete(
+	t *testing.T,
+	pool *pgxpool.Pool,
+) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin migration journal index verification: %v", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	heapCount, heapHash := runtimeAuthorityMigrationManifest(
+		t,
+		tx,
+		true,
+	)
+	if _, err := tx.Exec(ctx, `
+		SET LOCAL enable_seqscan = off;
+		SET LOCAL enable_indexscan = on;
+		SET LOCAL enable_indexonlyscan = on;
+		SET LOCAL enable_bitmapscan = off`); err != nil {
+		t.Fatalf("force migration journal primary-index manifest: %v", err)
+	}
+	var plan string
+	if err := tx.QueryRow(ctx, `
+		EXPLAIN (COSTS OFF)
+		SELECT filename, checksum
+		  FROM engine.schema_migrations
+		 WHERE filename >= ''
+		 ORDER BY filename`).Scan(&plan); err != nil {
+		t.Fatalf("explain migration journal primary-index manifest: %v", err)
+	}
+	if !strings.Contains(plan, "Index Scan using schema_migrations_pkey") {
+		t.Fatalf("migration journal manifest plan = %q, want primary index scan", plan)
+	}
+	indexCount, indexHash := runtimeAuthorityMigrationManifest(
+		t,
+		tx,
+		false,
+	)
+	if heapCount != 43 || indexCount != 43 || heapHash != indexHash {
+		t.Fatalf(
+			"migration journal physical manifests = heap %d/%s index %d/%s",
+			heapCount,
+			heapHash,
+			indexCount,
+			indexHash,
+		)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("finish migration journal index verification: %v", err)
+	}
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO engine.schema_migrations (filename, checksum)
+		VALUES ($1, $2)`,
+		runtimeAuthorityACLMigration,
+		runtimeAuthorityACLMigrationChecksum(t),
+	)
+	if !adminBootstrapIsPostgresCode(err, "23505") {
+		t.Fatalf("duplicate migration journal insert error = %v, want 23505", err)
+	}
+}
+
+func runtimeAuthorityMigrationManifest(
+	t *testing.T,
+	tx pgx.Tx,
+	heap bool,
+) (int, string) {
+	t.Helper()
+	ctx := context.Background()
+	if heap {
+		if _, err := tx.Exec(ctx, `
+			SET LOCAL enable_seqscan = on;
+			SET LOCAL enable_indexscan = off;
+			SET LOCAL enable_indexonlyscan = off;
+			SET LOCAL enable_bitmapscan = off`); err != nil {
+			t.Fatalf("force migration journal heap manifest: %v", err)
+		}
+	}
+	manifestQuery := `
+		SELECT filename, pg_catalog.encode(checksum, 'hex')
+		  FROM engine.schema_migrations
+		 ORDER BY filename`
+	if !heap {
+		manifestQuery = `
+			SELECT filename, pg_catalog.encode(checksum, 'hex')
+			  FROM engine.schema_migrations
+			 WHERE filename >= ''
+			 ORDER BY filename`
+	}
+	rows, err := tx.Query(ctx, manifestQuery)
+	if err != nil {
+		t.Fatalf("read migration journal physical manifest: %v", err)
+	}
+	defer rows.Close()
+	hash := sha256.New()
+	count := 0
+	for rows.Next() {
+		var filename, checksum string
+		if err := rows.Scan(&filename, &checksum); err != nil {
+			t.Fatalf("scan migration journal physical manifest: %v", err)
+		}
+		_, _ = fmt.Fprintf(hash, "%s:%s\n", filename, checksum)
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate migration journal physical manifest: %v", err)
+	}
+	return count, fmt.Sprintf("%x", hash.Sum(nil))
 }
 
 func TestRuntimeAuthorityACLMigrationRejectsTargetRewriteRule(t *testing.T) {

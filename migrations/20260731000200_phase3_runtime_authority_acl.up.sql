@@ -90,6 +90,18 @@ DECLARE
     actual_columns text[];
     actual_constraints text[];
     actual_indexes text[];
+    previous_enable_seqscan text :=
+        pg_catalog.current_setting('enable_seqscan');
+    previous_enable_indexscan text :=
+        pg_catalog.current_setting('enable_indexscan');
+    previous_enable_indexonlyscan text :=
+        pg_catalog.current_setting('enable_indexonlyscan');
+    previous_enable_bitmapscan text :=
+        pg_catalog.current_setting('enable_bitmapscan');
+    heap_manifest_count bigint;
+    heap_manifest_hash bytea;
+    index_manifest_count bigint;
+    index_manifest_hash bytea;
 BEGIN
     SELECT role.oid
       INTO migration_owner_oid
@@ -164,6 +176,7 @@ BEGIN
            AND relation.relowner = migration_owner_oid
            AND relation.relkind = 'r'
            AND relation.relpersistence = 'p'
+           AND relation.relhasindex
            AND NOT relation.relrowsecurity
            AND NOT relation.relforcerowsecurity
            AND NOT relation.relispartition
@@ -183,6 +196,26 @@ BEGIN
         OR actual_indexes IS DISTINCT FROM ARRAY[
             'CREATE UNIQUE INDEX schema_migrations_pkey ON engine.schema_migrations USING btree (filename)'
         ]::text[]
+        OR NOT EXISTS (
+            SELECT 1
+              FROM pg_catalog.pg_index AS index_row
+             WHERE index_row.indrelid = relation_oid
+               AND index_row.indexrelid =
+                       'engine.schema_migrations_pkey'::pg_catalog.regclass
+               AND index_row.indisunique
+               AND index_row.indisprimary
+               AND NOT index_row.indisexclusion
+               AND index_row.indimmediate
+               AND NOT index_row.indisclustered
+               AND index_row.indisvalid
+               AND NOT index_row.indcheckxmin
+               AND index_row.indisready
+               AND index_row.indislive
+               AND NOT index_row.indisreplident
+               AND NOT index_row.indnullsnotdistinct
+               AND index_row.indexprs IS NULL
+               AND index_row.indpred IS NULL
+        )
         OR EXISTS (
             SELECT 1
               FROM pg_catalog.pg_trigger AS trigger_row
@@ -225,6 +258,74 @@ BEGIN
             ERRCODE = '55000',
             MESSAGE = 'migration journal catalog is divergent';
     END IF;
+
+    -- A previously false execution hint can leave heap rows absent from the
+    -- primary index even after every catalog flag is restored. Prove the exact
+    -- predecessor manifest independently through both physical access paths.
+    PERFORM pg_catalog.set_config('enable_seqscan', 'on', true);
+    PERFORM pg_catalog.set_config('enable_indexscan', 'off', true);
+    PERFORM pg_catalog.set_config('enable_indexonlyscan', 'off', true);
+    PERFORM pg_catalog.set_config('enable_bitmapscan', 'off', true);
+    SELECT pg_catalog.count(*),
+           pg_catalog.sha256(
+               pg_catalog.convert_to(
+                   pg_catalog.string_agg(
+                       migration.filename || ':' ||
+                       pg_catalog.encode(migration.checksum, 'hex') || E'\n',
+                       ''
+                       ORDER BY migration.filename
+                   ),
+                   'UTF8'
+               )
+           )
+      INTO heap_manifest_count, heap_manifest_hash
+      FROM engine.schema_migrations AS migration;
+
+    PERFORM pg_catalog.set_config('enable_seqscan', 'off', true);
+    PERFORM pg_catalog.set_config('enable_indexscan', 'on', true);
+    PERFORM pg_catalog.set_config('enable_indexonlyscan', 'on', true);
+    PERFORM pg_catalog.set_config('enable_bitmapscan', 'off', true);
+    SELECT pg_catalog.count(*),
+           pg_catalog.sha256(
+               pg_catalog.convert_to(
+                   pg_catalog.string_agg(
+                       migration.filename || ':' ||
+                       pg_catalog.encode(migration.checksum, 'hex') || E'\n',
+                       ''
+                       ORDER BY migration.filename
+                   ),
+                   'UTF8'
+               )
+           )
+      INTO index_manifest_count, index_manifest_hash
+      FROM engine.schema_migrations AS migration
+     WHERE migration.filename >= '';
+
+    IF heap_manifest_count <> 42
+       OR index_manifest_count <> 42
+       OR heap_manifest_hash IS DISTINCT FROM pg_catalog.decode(
+           'e157f3a5ce0dabe82d8a4dd32d5913bf74973b8e984f1c779ac1d515bb378156',
+           'hex'
+       )
+       OR index_manifest_hash IS DISTINCT FROM heap_manifest_hash
+    THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'migration journal physical manifest is divergent';
+    END IF;
+
+    PERFORM pg_catalog.set_config(
+        'enable_seqscan', previous_enable_seqscan, true
+    );
+    PERFORM pg_catalog.set_config(
+        'enable_indexscan', previous_enable_indexscan, true
+    );
+    PERFORM pg_catalog.set_config(
+        'enable_indexonlyscan', previous_enable_indexonlyscan, true
+    );
+    PERFORM pg_catalog.set_config(
+        'enable_bitmapscan', previous_enable_bitmapscan, true
+    );
 END
 $$;
 
