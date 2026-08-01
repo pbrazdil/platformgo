@@ -943,22 +943,27 @@ func TestAdminBootstrapPostWriteGraphValidationRejectsInjectedAssignment(
 		"platformgo_admin_bootstrap",
 	)
 	keyHash := sha256.Sum256([]byte("stable-bootstrap-post-write-key"))
-	var outcome string
-	err := terminal.QueryRow(ctx, `
-		SELECT outcome
-		  FROM identity.bootstrap_first_admin($1, $2, $3, $4, $5, $6)`,
+	_, attempts, err := queryAdminBootstrapAfterTransientLockContention(
+		ctx,
+		terminal,
 		"bootstrap-request-post-write",
 		keyHash[:],
 		"admin::urn:xb:admin:00000000-0000-4000-8000-00000000004b",
 		"00000000-0000-4000-8000-00000000004b",
 		"2026-07-31T00:00:00.000000Z",
 		runtimeAuthorityACLMigrationChecksum(t),
-	).Scan(&outcome)
+	)
+	if attempts > 1 {
+		t.Logf(
+			"explicit runtime bootstrap lock-contention retry reached "+
+				"the injected-assignment rejection on attempt %d",
+			attempts,
+		)
+	}
 	if !adminBootstrapIsPostgresCode(err, "55000") {
 		t.Fatalf(
-			"bootstrap with injected assignment error = %v outcome %q, want 55000",
+			"bootstrap with injected assignment error = %v, want 55000",
 			err,
-			outcome,
 		)
 	}
 

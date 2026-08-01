@@ -92,15 +92,15 @@ func (migrator *currentTestMigrator) Migrate(ctx context.Context) error {
 	for attempt := 1; attempt <= attempts; attempt++ {
 		err := migrator.migrator.Migrate(retryCtx)
 		if !isCurrentMigrationContention(err) {
-			if lastContention != nil &&
-				retryCtx.Err() != nil &&
-				errors.Is(err, retryCtx.Err()) {
+			if err != nil && lastContention != nil && retryCtx.Err() != nil {
 				return fmt.Errorf(
 					"explicit current-migration lock-contention retry "+
-						"stopped after %d attempts: %w; last contention: %w",
+						"stopped after %d attempts: %w; last contention: %w; "+
+						"terminal migration error: %w",
 					attempt,
 					retryCtx.Err(),
 					lastContention,
+					err,
 				)
 			}
 			if attempt > 1 {

@@ -1998,7 +1998,7 @@ func TestRuntimeAuthorityACLMigrationRejectsMigrationJournalSideEffects(t *testi
 				t.Fatalf("repair migration journal side effect: %v", err)
 			}
 			files := migrationFilesThrough(t, runtimeAuthorityACLMigration)
-			current := platformpostgres.NewMigrator(pool, files)
+			current := newCurrentTestMigrator(t, pool, files)
 			if err := current.Migrate(ctx); err != nil {
 				t.Fatalf("retry migration after journal repair: %v", err)
 			}
