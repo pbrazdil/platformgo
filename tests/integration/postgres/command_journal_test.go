@@ -5,8 +5,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -16,15 +14,7 @@ import (
 )
 
 func TestCommandJournalRejectsConflictsAndReplaysCompletedResponse(t *testing.T) {
-	pool := postgresPool(t)
-	resetDurableSchemas(t, pool)
-	if err := newCurrentTestMigrator(
-		t,
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(context.Background(), 7); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	pool := currentProvisionedStorePool(t, 7)
 
 	journal := platformpostgres.NewCommandJournal(pool)
 	commandID := engine.IDFromSequence(engine.ID{}, 1)
@@ -136,15 +126,7 @@ func TestCommandJournalRejectsConflictsAndReplaysCompletedResponse(t *testing.T)
 }
 
 func TestCommandJournalRejectsOutOfOrderAndPrematureCompletion(t *testing.T) {
-	pool := postgresPool(t)
-	resetDurableSchemas(t, pool)
-	if err := newCurrentTestMigrator(
-		t,
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(context.Background(), 7); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	pool := currentProvisionedStorePool(t, 7)
 
 	journal := platformpostgres.NewCommandJournal(pool)
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
@@ -218,15 +200,7 @@ func TestCommandJournalRejectsOutOfOrderAndPrematureCompletion(t *testing.T) {
 }
 
 func TestCommandJournalDurablyBindsAccountToOneShard(t *testing.T) {
-	pool := postgresPool(t)
-	resetDurableSchemas(t, pool)
-	if err := newCurrentTestMigrator(
-		t,
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(context.Background(), 7); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	pool := currentProvisionedStorePool(t, 7)
 
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 	first := validCommandRequest(
@@ -311,15 +285,7 @@ func TestCommandJournalDurablyBindsAccountToOneShard(t *testing.T) {
 }
 
 func TestDeploymentShardProvisioningDeterminesConcurrentAuthority(t *testing.T) {
-	pool := postgresPool(t)
-	resetDurableSchemas(t, pool)
-	if err := newCurrentTestMigrator(
-		t,
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	pool := currentStorePool(t)
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 	unconfigured := validCommandRequest(
 		t,
@@ -363,7 +329,7 @@ func TestDeploymentShardProvisioningDeterminesConcurrentAuthority(t *testing.T) 
 	migrator := newCurrentTestMigrator(
 		t,
 		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+		currentMigrationFS(),
 	)
 	if err := migrator.ProvisionDeploymentShard(
 		context.Background(),
@@ -489,15 +455,7 @@ func TestDeploymentShardProvisioningDeterminesConcurrentAuthority(t *testing.T) 
 }
 
 func TestCommandJournalRejectsRedundantMetadataMismatch(t *testing.T) {
-	pool := postgresPool(t)
-	resetDurableSchemas(t, pool)
-	if err := newCurrentTestMigrator(
-		t,
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(context.Background(), 7); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	pool := currentProvisionedStorePool(t, 7)
 
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 	tests := []struct {

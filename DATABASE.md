@@ -24,6 +24,17 @@ major-upgrade, backup-restore, recovery, and reconciliation gates in
 PostgreSQL 19 `INSERT ... ON CONFLICT DO SELECT FOR UPDATE` behavior and must
 be requalified by the full gate on the released PostgreSQL 19 GA build.
 
+### Test template boundary
+
+The optional current-tip store-test accelerator uses PostgreSQL database
+templates only on a second, dedicated, disposable cluster. Its maintenance
+database is never migrated or cloned: the harness creates the reusable baseline
+from `template0`, verifies the exact migration digest and prepared global-role
+manifest, then clones only explicitly allowlisted store tests. The primary test
+database remains the authority for migration, catalog, ACL/role lifecycle,
+durability, recovery, and upgrade evidence. Template-clone results never
+replace those canonical gates and create no production support claim.
+
 ## 3. Logical schemas
 
 ```text

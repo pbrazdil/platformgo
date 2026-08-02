@@ -94,6 +94,19 @@ Use real PostgreSQL when testing:
 
 Each test gets isolated state and full cleanup.
 
+Current-tip store tests with no migration, catalog, recovery, or PostgreSQL
+role-lifecycle assertion may opt in to the template-clone lane. That lane
+builds one migrated baseline from `template0` on a second dedicated PostgreSQL
+cluster and creates a separate database for each test. The caller/profile
+allowlist is closed; a test is not eligible merely because cloning makes it
+green.
+
+The template lane is acceleration evidence, not canonical migration or
+durability evidence. Clean migration application, upgrade, rollback, role/ACL,
+catalog, restart, recovery, restore/PITR, and host/postmaster crash tests always
+use the original fresh/reset primary database. The complete ordinary and race
+suites also keep the template DSN unset, so their evidence remains canonical.
+
 ### 4.4 NATS integration tests
 
 Use real NATS/JetStream when testing:
@@ -396,3 +409,34 @@ PLATFORMGO_TEST_POSTGRES_RESET_AUTHORIZED=YES_I_UNDERSTAND_THIS_DROPS_SCHEMAS
 
 Never set the reset authorization for a persistent, shared, staging, or
 production database.
+
+The opt-in template lane additionally requires an independently authorized,
+fresh PostgreSQL 19 Beta 2 cluster whose only non-system database is the exact
+maintenance database `platformgo_template_root`:
+
+```text
+PLATFORMGO_TEST_POSTGRES_TEMPLATE_DSN=postgres://.../platformgo_template_root
+PLATFORMGO_TEST_POSTGRES_TEMPLATE_AUTHORIZED=YES_I_UNDERSTAND_THIS_CREATES_AND_DROPS_DATABASES
+```
+
+The harness takes a session advisory lock for its full lifetime, proves the
+primary and template `pg_control_system().system_identifier` values differ,
+requires exact server-version equality, rejects unexpected databases, roles,
+or maintenance-root objects before DDL, and rechecks the prepared global-role
+manifest around every clone. It never uses `DROP DATABASE ... WITH (FORCE)`;
+all registered pools must close and active sessions must drain before a plain
+drop. Template and clone names are digest-derived members of the disposable
+`platformgo_test_*` namespace and do not contain raw lease text or secrets.
+
+On macOS, the repository's measured native PostgreSQL 19 Beta 2 path is faster
+than the Docker path. Run the contained native setup and focused suite with:
+
+```bash
+./scripts/test-postgres-template-fast.sh
+```
+
+It uses `/opt/homebrew/opt/postgresql@19/bin` by default, starts two temporary
+Unix-socket-only clusters with canonical durability settings, and removes both
+clusters afterward. Override the binary directory with
+`PLATFORMGO_TEST_POSTGRES_BIN`. With two already-running disposable clusters,
+set all four variables above and run `./scripts/test-postgres-template.sh`.

@@ -5782,51 +5782,7 @@ func resetDurableSchemas(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 
 	dropDurableSchemas(t, pool)
-	_, err := pool.Exec(
-		context.Background(),
-		`DO $$
-		BEGIN
-			IF NOT EXISTS (
-				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_api'
-			) THEN
-				CREATE ROLE platformgo_api NOLOGIN;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_engine'
-			) THEN
-				CREATE ROLE platformgo_engine NOLOGIN;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_outbox'
-			) THEN
-				CREATE ROLE platformgo_outbox NOLOGIN;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_projector'
-			) THEN
-				CREATE ROLE platformgo_projector NOLOGIN;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM pg_roles WHERE rolname = 'platformgo_realtime'
-			) THEN
-				CREATE ROLE platformgo_realtime NOLOGIN;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM pg_roles
-				 WHERE rolname = 'platformgo_realtime_repair'
-			) THEN
-				CREATE ROLE platformgo_realtime_repair NOLOGIN;
-			END IF;
-			IF NOT EXISTS (
-				SELECT 1 FROM pg_roles
-				 WHERE rolname = 'platformgo_admin_bootstrap'
-			) THEN
-				CREATE ROLE platformgo_admin_bootstrap NOLOGIN;
-			END IF;
-		END;
-		$$`,
-	)
-	if err != nil {
+	if err := postgresfixture.ProvisionRuntimeRoles(context.Background(), pool); err != nil {
 		t.Fatalf("provision test runtime roles: %v", err)
 	}
 }

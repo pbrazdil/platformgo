@@ -9,7 +9,7 @@ major-upgrade, backup-restore, recovery, and reconciliation rehearsal.
 
 ## Current status
 
-Last updated: 2026-08-01
+Last updated: 2026-08-02
 
 Current delivery stage: **Phase 3 — compatibility edges, in progress**.
 
@@ -25,6 +25,14 @@ Phases 0 through 2 are complete:
   migrations, atomic command/state/ledger/checkpoint/outbox transactions,
   single-writer shard ownership, JetStream delivery, replay, reconciliation,
   and restart/fault coverage.
+
+The test harness now also has an opt-in two-cluster PostgreSQL 19 Beta 2
+template lane for allowlisted current-tip store tests. It keeps all migration,
+catalog, ACL/role, recovery, and complete-suite evidence on the canonical fresh
+primary path. Native local PostgreSQL is the default fast runner because it
+outperformed the equivalent Docker setup on the initial eligible slice. This
+is test acceleration only and does not change Phase 3 behavior or the
+PostgreSQL 19 GA production blocker.
 
 The landed Phase 3 work establishes the first compatibility slice:
 executable `app` and `nautilus` commands; frozen OpenAPI, protobuf, and
