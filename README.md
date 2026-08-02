@@ -3,9 +3,11 @@
 Clean-room Go replacement for `upcomers-org/platform`, using pinned source
 tests as the executable specification. The intended production stack is Go,
 PostgreSQL 19 or newer, NATS with JetStream, Centrifugo, and Hyperliquid first.
-The current pre-release qualification is PostgreSQL 19 Beta 2 for development
-and CI only; production requires PostgreSQL 19 GA and a separately reviewed
-major-upgrade, backup-restore, recovery, and reconciliation rehearsal.
+The owner-approved minimum supported PostgreSQL build for development, CI, and
+production is PostgreSQL 19 Beta 2. Production support does not wait for
+PostgreSQL 19 GA; every rollout still requires a separately reviewed
+major-upgrade, backup-restore, recovery, and reconciliation rehearsal on the
+exact deployed build.
 
 ## Current status
 
@@ -32,7 +34,7 @@ catalog, ACL/role, recovery, and complete-suite evidence on the canonical fresh
 primary path. Native local PostgreSQL is the default fast runner because it
 outperformed the equivalent Docker setup on the initial eligible slice. This
 is test acceleration only and does not change Phase 3 behavior or the
-PostgreSQL 19 GA production blocker.
+production upgrade, restore, recovery, and reconciliation gates.
 
 The landed Phase 3 work establishes the first compatibility slice:
 executable `app` and `nautilus` commands; frozen OpenAPI, protobuf, and
@@ -541,9 +543,9 @@ intermediate-tip rollback/retry evidence.
 The exact implementation passed independent migration, determinism, and release
 review plus hosted CI before merge. Its pinned authentication and idempotency
 behavior now also has separate semantic port-ledger acceptance through the real
-HTTP and PostgreSQL boundary. PostgreSQL 19 Beta 2 remains development/CI-only;
-production remains NO-GO until PostgreSQL 19 GA and the full upgrade, restore,
-recovery, and reconciliation gate.
+HTTP and PostgreSQL boundary. PostgreSQL 19 Beta 2 is the owner-approved
+production floor; production remains NO-GO until the full upgrade, restore,
+recovery, and reconciliation gate passes on the exact deployed build.
 
 The realtime gateway source behavior is now also separately accepted through
 the production PostgreSQL publication store, realtime worker, real Centrifugo
@@ -927,8 +929,8 @@ zero, and a fresh current recovery and reconciliation remain exact. No direct
 SQL economic repair or production historical-writer switch is introduced.
 Live readiness, JetStream consumer acknowledgment, and process-drain
 orchestration remain outside this database upgrade test.
-Production additionally remains blocked on PostgreSQL 19 GA, a production-like
-post-correction backup/restore proof, commit-acknowledgment outcome resolution
+Production additionally remains blocked on a production-like post-correction
+backup/restore proof, commit-acknowledgment outcome resolution
 for migrations 009/010, production-scale lock timing, proof that every deployed
 shard ID fits migration 009's signed-int32 advisory-lock key domain (or a
 separately reviewed forward compatibility path), and proof that every old

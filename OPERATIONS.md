@@ -3,15 +3,16 @@
 ## PostgreSQL 19 qualification and production boundary
 
 The current migrator and every runtime schema verifier require PostgreSQL 19 or
-newer, with PostgreSQL 19 Beta 2 as the exact prerelease floor. Beta 2 is
-qualified only for development and CI. It is not approved for production.
-Production requires PostgreSQL 19 GA plus a production-like rehearsal from the
+newer. PostgreSQL 19 Beta 2 is the owner-approved minimum supported build for
+development, CI, and production; a PostgreSQL 19 GA release is not a production
+prerequisite. Production still requires a production-like rehearsal from the
 then-supported deployed major using the chosen `pg_upgrade`, dump/restore, or
-logical-replication procedure. The release evidence must include a complete
-pre-upgrade backup and restore drill, immutable artifact and database version
-identity, application of every migration through the current tip, recovery, and
-zero reconciliation mismatch. A clean-database Beta 2 CI run is not evidence of
-a safe production major upgrade.
+logical-replication procedure on the exact build selected for deployment. The
+release evidence must include a complete pre-upgrade backup and restore drill,
+immutable artifact and database version identity, application of every
+migration through the current tip, recovery, and zero reconciliation mismatch.
+A clean-database Beta 2 CI run alone is not evidence of a safe production major
+upgrade.
 
 ## 1. Deployment order
 
@@ -979,13 +980,14 @@ tables. After new traffic is accepted, rollback is a reviewed forward fix with
 traffic withdrawn; restoring the old boundary would discard accepted durable
 facts.
 
-This cutover is qualified only on PostgreSQL 19 Beta 2 for development and CI
-because its claim path uses PostgreSQL 19
+This cutover is qualified on the supported PostgreSQL 19 Beta 2 production
+floor and its claim path uses PostgreSQL 19
 `INSERT ... ON CONFLICT DO SELECT FOR UPDATE`. Rerun the complete policy,
 format, lint, test, race, deterministic-repeat, PostgreSQL integration,
-migration, recovery, and security gate on PostgreSQL 19 GA. Production remains
-NO-GO before GA and remains blocked afterward until the production upgrade,
-restore, recovery, and reconciliation evidence is complete.
+migration, recovery, and security gate on the exact build selected for
+production. Production remains blocked until the production upgrade, restore,
+recovery, and reconciliation evidence is complete; waiting for PostgreSQL 19 GA
+is not an additional gate.
 
 ### Phase 3 realtime schema upgrade
 
@@ -1428,11 +1430,12 @@ A production release requires:
 - rollback/forward-fix plan.
 
 For the first PostgreSQL 19 production release, these gates additionally
-require a PostgreSQL 19 GA build, a production-like major-upgrade rehearsal
-from the currently deployed major, a complete pre-upgrade restore drill,
-successful immutable migration through the current schema tip, and clean
-post-upgrade recovery and reconciliation. PostgreSQL 19 Beta 2 development/CI
-qualification does not satisfy this production gate.
+require the exact supported PostgreSQL 19 Beta 2-or-newer build selected for
+deployment, a production-like major-upgrade rehearsal from the currently
+deployed major, a complete pre-upgrade restore drill, successful immutable
+migration through the current schema tip, and clean post-upgrade recovery and
+reconciliation. Development and CI qualification alone does not satisfy this
+production gate.
 
 The rehearsal must additionally prove:
 
@@ -1454,4 +1457,4 @@ The rehearsal must additionally prove:
   migrations 009 and 010.
 
 Until those upgrade tests and orchestration proofs exist, production remains
-blocked even after PostgreSQL 19 GA.
+blocked regardless of which supported PostgreSQL 19 build is selected.
