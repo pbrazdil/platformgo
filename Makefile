@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 GOVULNCHECK := go run golang.org/x/vuln/cmd/govulncheck@v1.6.0
 
-.PHONY: policy port-map-complete fmt fmt-check lint test test-race test-repeat vuln verify
+.PHONY: policy port-map-complete fmt fmt-check lint test test-race test-repeat test-postgres-template test-postgres-template-fast vuln verify
 
 policy:
 	python3 ./scripts/check-agent-runtime.py
@@ -42,6 +42,12 @@ test-repeat:
 	  pkgs="$$(go list ./internal/... ./testkit/... 2>/dev/null || true)"; \
 	  if [ -n "$$pkgs" ]; then go test $$pkgs -shuffle=on -count=20; fi; \
 	fi
+
+test-postgres-template:
+	./scripts/test-postgres-template.sh
+
+test-postgres-template-fast:
+	./scripts/test-postgres-template-fast.sh
 
 vuln:
 	$(GOVULNCHECK) ./...
