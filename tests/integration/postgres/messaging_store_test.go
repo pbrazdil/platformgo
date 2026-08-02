@@ -3,8 +3,6 @@ package postgres_test
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -16,15 +14,7 @@ import (
 )
 
 func TestOutboxRetriesUnknownOutcomeWithStableMessageID(t *testing.T) {
-	pool := postgresPool(t)
-	resetDurableSchemas(t, pool)
-	if err := newCurrentTestMigrator(
-		t,
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(context.Background(), 7); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	pool := currentProvisionedStorePool(t, 7)
 
 	messageID := engine.IDFromSequence(engine.ID{}, 41)
 	if _, err := pool.Exec(context.Background(), `
@@ -89,15 +79,7 @@ func TestOutboxRetriesUnknownOutcomeWithStableMessageID(t *testing.T) {
 }
 
 func TestOutboxDoesNotPublishLaterAccountCommandBeforeEarlierCommand(t *testing.T) {
-	pool := postgresPool(t)
-	resetDurableSchemas(t, pool)
-	if err := newCurrentTestMigrator(
-		t,
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(context.Background(), 7); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	pool := currentProvisionedStorePool(t, 7)
 
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 	journal := platformpostgres.NewCommandJournal(pool)
@@ -208,15 +190,7 @@ func TestOutboxBlocksMissingPredecessorAndRejectsCorruptCommandBinding(t *testin
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
-			pool := postgresPool(t)
-			resetDurableSchemas(t, pool)
-			if err := newCurrentTestMigrator(
-				t,
-				pool,
-				os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-			).MigrateAndProvision(ctx, 7); err != nil {
-				t.Fatalf("MigrateAndProvision: %v", err)
-			}
+			pool := currentProvisionedStorePool(t, 7)
 			now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 			ids := []engine.ID{
 				engine.IDFromSequence(engine.ID{}, 211),
@@ -278,15 +252,7 @@ func TestOutboxBlocksMissingPredecessorAndRejectsCorruptCommandBinding(t *testin
 }
 
 func TestOutboxRuntimeRoleExecutesProductionClaimAndRepublish(t *testing.T) {
-	adminPool := postgresPool(t)
-	resetDurableSchemas(t, adminPool)
-	if err := newCurrentTestMigrator(
-		t,
-		adminPool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).MigrateAndProvision(context.Background(), 7); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	adminPool := canonicalCurrentProvisionedStorePool(t, 7)
 
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 	commandID := engine.IDFromSequence(engine.ID{}, 301)
@@ -355,7 +321,7 @@ func TestOutboxRuntimeRoleExecutesProductionClaimAndRepublish(t *testing.T) {
 		t.Fatalf("seed engine event: %v", err)
 	}
 
-	rolePool := outboxRolePool(t)
+	rolePool := outboxRolePool(t, adminPool)
 	var currentRole string
 	if err := rolePool.QueryRow(
 		context.Background(),
@@ -428,15 +394,7 @@ func TestOutboxRuntimeRoleExecutesProductionClaimAndRepublish(t *testing.T) {
 }
 
 func TestInboxClaimAndConsumerEffectCommitTogether(t *testing.T) {
-	pool := postgresPool(t)
-	resetDurableSchemas(t, pool)
-	if err := newCurrentTestMigrator(
-		t,
-		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-	).Migrate(context.Background()); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	pool := currentStorePool(t)
 	if _, err := pool.Exec(
 		context.Background(),
 		"CREATE TABLE messaging.projection_probe (message_id uuid PRIMARY KEY)",
@@ -569,17 +527,10 @@ func (publisher *recordingPublisher) Publish(
 	return uint64(100 + len(publisher.messages)), nil
 }
 
-func outboxRolePool(t *testing.T) *pgxpool.Pool {
+func outboxRolePool(t *testing.T, admin *pgxpool.Pool) *pgxpool.Pool {
 	t.Helper()
 
-	dsn := os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("PLATFORMGO_TEST_POSTGRES_DSN is required")
-	}
-	config, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse PostgreSQL config: %v", err)
-	}
+	config := admin.Config().Copy()
 	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		_, err := conn.Exec(ctx, "SET ROLE platformgo_outbox")
 		return err
