@@ -14,15 +14,16 @@ PostgreSQL is the authoritative durable store for all business state. NATS and C
 
 ### Supported PostgreSQL version
 
-The migrator and runtime schema verifier require PostgreSQL 19 or newer. While
-PostgreSQL 19 is prerelease software, the exact minimum accepted build is
+The migrator and runtime schema verifier require PostgreSQL 19 or newer. The
+owner-approved minimum supported build for development, CI, and production is
 PostgreSQL 19 Beta 2; development snapshots, Beta 1, older majors, and
-noncanonical version strings fail closed. PostgreSQL 19 Beta 2 is qualified
-only for development and CI. Production requires PostgreSQL 19 GA and the
+noncanonical version strings fail closed. Production support does not depend on
+a PostgreSQL 19 GA release. Every production rollout still requires the
 major-upgrade, backup-restore, recovery, and reconciliation gates in
-`OPERATIONS.md`. The broker-echo replay claim additionally depends on the
-PostgreSQL 19 `INSERT ... ON CONFLICT DO SELECT FOR UPDATE` behavior and must
-be requalified by the full gate on the released PostgreSQL 19 GA build.
+`OPERATIONS.md` on the exact build selected for deployment. The broker-echo
+replay claim additionally depends on PostgreSQL 19
+`INSERT ... ON CONFLICT DO SELECT FOR UPDATE` behavior and must pass the full
+release gate on that deployed build.
 
 ### Test template boundary
 
