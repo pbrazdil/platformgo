@@ -1,23 +1,32 @@
 package postgres_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	"github.com/upcomers-org/platformgo/internal/edge"
 )
 
 const (
-	predictionPublicVenue          = "polymarket"
-	predictionPublicEventKey       = "test-cup-winner-2099"
-	predictionPublicEventTitle     = "Test Cup Winner 2099"
-	predictionPublicMarketKey      = "test-cup-winner-2099"
-	predictionPublicMarketQuestion = "Who wins the Test Cup 2099?"
-	predictionPublicBinaryKey      = "0xtest-will-it-rain"
-	predictionPublicBinaryQuestion = "Will it rain on test day?"
+	predictionPublicVenue           = "polymarket"
+	predictionPublicEventKey        = "test-cup-winner-2099"
+	predictionPublicEventTitle      = "Test Cup Winner 2099"
+	predictionPublicMarketKey       = "test-cup-winner-2099"
+	predictionPublicMarketQuestion  = "Who wins the Test Cup 2099?"
+	predictionPublicBinaryKey       = "0xtest-will-it-rain"
+	predictionPublicBinaryQuestion  = "Will it rain on test day?"
+	predictionTieKalshiKey          = "tie-kalshi-market"
+	predictionTiePolymarketKey      = "tie-polymarket-market"
+	predictionDisabledOnlyMarketKey = "disabled-only-market"
+	predictionLegTieMarketKey       = "tie-leg-market"
+	predictionLegTieLowInstrument   = "TIE-LEG-AA"
+	predictionLegTieHighInstrument  = "TIE-LEG-ZZ"
+	predictionCorruptMarketKey      = "corrupt-read-model"
 )
 
 var (
@@ -183,6 +192,164 @@ func TestPostgresPredictionLegsSurfaceAsPureDefinitionsWithoutLivePrice(t *testi
 	}
 }
 
+// Deterministic strengthening for:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/catalog/e2e_prediction_trader.rs:60
+//	test: prediction_public_list_nests_legs_under_market_and_event
+//
+// Equal stage/time metadata is ordered by a total source-venue, market-key,
+// and market-ID tuple instead of insertion order.
+func TestPostgresPredictionMarketsUseTotalMarketTieBreak(t *testing.T) {
+	ctx := context.Background()
+	pool := currentStorePool(t)
+	seedPredictionPublicCatalog(t, pool)
+	seedPredictionMarketTieRows(t, pool)
+
+	markets, err := platformpostgres.NewCompatibilityStore(pool).PredictionMarkets(ctx)
+	if err != nil {
+		t.Fatalf("read prediction market ties: %v", err)
+	}
+	tie := make([]edge.PredictionMarketView, 0, 2)
+	for _, market := range markets {
+		if market.MarketKey == predictionTieKalshiKey ||
+			market.MarketKey == predictionTiePolymarketKey {
+			tie = append(tie, market)
+		}
+	}
+	if len(tie) != 2 {
+		t.Fatalf("tie markets = %#v", tie)
+	}
+	if tie[0].SourceVenue != "kalshi" || tie[0].MarketKey != predictionTieKalshiKey ||
+		tie[1].SourceVenue != "polymarket" || tie[1].MarketKey != predictionTiePolymarketKey {
+		t.Fatalf("tie market order = %#v", tie)
+	}
+}
+
+// Deterministic strengthening for:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/catalog/e2e_prediction_trader.rs:60
+//	test: prediction_public_list_nests_legs_under_market_and_event
+//
+// A market with no enabled legs is not a public market, even when its parent
+// metadata is otherwise valid.
+func TestPostgresPredictionMarketsOmitDisabledOnlyMarkets(t *testing.T) {
+	ctx := context.Background()
+	pool := currentStorePool(t)
+	seedPredictionPublicCatalog(t, pool)
+	seedPredictionDisabledOnlyMarket(t, pool)
+
+	markets, err := platformpostgres.NewCompatibilityStore(pool).PredictionMarkets(ctx)
+	if err != nil {
+		t.Fatalf("read disabled-only prediction market: %v", err)
+	}
+	if predictionMarketByKey(markets, predictionDisabledOnlyMarketKey) != nil {
+		t.Fatalf("disabled-only market surfaced: %#v", markets)
+	}
+}
+
+// Deterministic strengthening for:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/catalog/e2e_prediction_trader.rs:60
+//	test: prediction_public_list_nests_legs_under_market_and_event
+//
+// Equal outcome indexes are ordered by the authoritative instrument ID. The
+// fixture drops only a disposable uniqueness constraint on (market_id,
+// outcome_index) when the planned schema has one, so the read-model tie-break
+// remains testable without changing production schema or migrations.
+func TestPostgresPredictionLegsUseTotalInstrumentTieBreak(t *testing.T) {
+	ctx := context.Background()
+	pool := currentStorePool(t)
+	seedPredictionPublicCatalog(t, pool)
+	dropPredictionOutcomeUniqueness(t, pool)
+	seedPredictionLegTieRows(t, pool)
+
+	markets, err := platformpostgres.NewCompatibilityStore(pool).PredictionMarkets(ctx)
+	if err != nil {
+		t.Fatalf("read prediction leg ties: %v", err)
+	}
+	market := predictionMarketByKey(markets, predictionLegTieMarketKey)
+	if market == nil {
+		t.Fatalf("leg-tie market is absent: %#v", markets)
+	}
+	if len(market.Legs) != 2 {
+		t.Fatalf("leg-tie legs = %#v", market.Legs)
+	}
+	if market.Legs[0].Symbol != predictionLegTieLowInstrument ||
+		market.Legs[1].Symbol != predictionLegTieHighInstrument ||
+		market.Legs[0].OutcomeIndex != 0 || market.Legs[1].OutcomeIndex != 0 {
+		t.Fatalf("leg tie order = %#v", market.Legs)
+	}
+}
+
+// Deterministic strengthening for:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/catalog/e2e_prediction_trader.rs:60
+//	test: prediction_public_list_nests_legs_under_market_and_event
+//
+// A malformed enabled leg is a corrupt read-model. The reader must fail the
+// whole query and return no valid prefix rather than silently omitting or
+// partially returning the remaining markets.
+func TestPostgresPredictionMarketsFailClosedOnCorruptOutcomeMetadata(t *testing.T) {
+	ctx := context.Background()
+	pool := currentStorePool(t)
+	seedPredictionPublicCatalog(t, pool)
+	relaxPredictionOutcomeMetadataNullability(t, pool)
+	seedPredictionCorruptLeg(t, pool)
+
+	markets, err := platformpostgres.NewCompatibilityStore(pool).PredictionMarkets(ctx)
+	if err == nil {
+		t.Fatalf("corrupt prediction metadata unexpectedly succeeded: %#v", markets)
+	}
+	if markets != nil {
+		t.Fatalf("corrupt prediction metadata returned valid prefix: %#v", markets)
+	}
+}
+
+// Deterministic strengthening for:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/catalog/e2e_prediction_trader.rs:60
+//	test: prediction_public_list_nests_legs_under_market_and_event
+//
+// A fixed PostgreSQL state must produce byte-identical DTO JSON across
+// repeated reads, including nested event and leg ordering.
+func TestPostgresPredictionMarketsRepeatIdentically(t *testing.T) {
+	ctx := context.Background()
+	pool := currentStorePool(t)
+	seedPredictionPublicCatalog(t, pool)
+
+	var want []byte
+	for attempt := 0; attempt < 20; attempt++ {
+		store := platformpostgres.NewCompatibilityStore(pool)
+		markets, err := store.PredictionMarkets(ctx)
+		if err != nil {
+			t.Fatalf("repeat prediction read %d: %v", attempt, err)
+		}
+		got, err := json.Marshal(markets)
+		if err != nil {
+			t.Fatalf("marshal repeat prediction read %d: %v", attempt, err)
+		}
+		if attempt == 0 {
+			want = got
+			continue
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("prediction read %d changed bytes:\nwant %s\n got %s", attempt, want, got)
+		}
+	}
+}
+
+// Snapshot interleaving remains deferred to implementation-boundary review.
+// PredictionMarkets currently has no injectable transaction/connection hook
+// that can deterministically pause between its market, event, and leg reads;
+// a goroutine race or arbitrary sleep here would not prove a one-snapshot
+// guarantee. Once the production reader exposes its transaction boundary, add
+// a channel-coordinated before-or-after metadata toggle regression there.
+
 func predictionMarketByKey(
 	markets []edge.PredictionMarketView,
 	key string,
@@ -328,5 +495,225 @@ func seedPredictionPublicCatalog(t *testing.T, pool *pgxpool.Pool) {
 			 'TEST-WILL-IT-RAIN-NO', 1, 'No', true)
 	`); err != nil {
 		t.Fatalf("seed prediction catalog: %v", err)
+	}
+}
+
+func seedPredictionMarketTieRows(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES
+			('TIE-MARKET-KALSHI', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0),
+			('TIE-MARKET-POLYMARKET', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0);
+
+		-- Insert in reverse tuple order; the reader must not preserve insertion order.
+		INSERT INTO trading.prediction_markets (
+			market_id, source_venue, market_key, question, resolution_time,
+			mutually_exclusive, status, event_id, stage_label, stage_ordinal,
+			created_at, updated_at
+		) VALUES
+			(
+				'00000000-0000-0000-0000-000000000022', 'polymarket',
+				'tie-polymarket-market', 'tie polymarket', NULL, false, 'open',
+				NULL, NULL, 9, '2098-03-01T00:00:00Z', '2098-03-01T00:00:00Z'
+			),
+			(
+				'00000000-0000-0000-0000-000000000021', 'kalshi',
+				'tie-kalshi-market', 'tie kalshi', NULL, false, 'open',
+				NULL, NULL, 9, '2098-03-01T00:00:00Z', '2098-03-01T00:00:00Z'
+			);
+
+		INSERT INTO trading.prediction_legs (
+			instrument_id, market_id, display_name, outcome_index,
+			outcome_label, enabled
+		) VALUES
+			('TIE-MARKET-POLYMARKET',
+			 '00000000-0000-0000-0000-000000000022',
+			 'TIE-MARKET-POLYMARKET', 0, 'Poly', true),
+			('TIE-MARKET-KALSHI',
+			 '00000000-0000-0000-0000-000000000021',
+			 'TIE-MARKET-KALSHI', 0, 'Kalshi', true)
+	`); err != nil {
+		t.Fatalf("seed prediction market ties: %v", err)
+	}
+}
+
+func seedPredictionDisabledOnlyMarket(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES ('DISABLED-ONLY-LEG', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0);
+
+		INSERT INTO trading.prediction_markets (
+			market_id, source_venue, market_key, question, resolution_time,
+			mutually_exclusive, status, event_id, stage_label, stage_ordinal,
+			created_at, updated_at
+		) VALUES (
+			'00000000-0000-0000-0000-000000000031', 'polymarket',
+			'disabled-only-market', 'disabled only', NULL, false, 'open',
+			NULL, NULL, 10, '2098-04-01T00:00:00Z', '2098-04-01T00:00:00Z'
+		);
+
+		INSERT INTO trading.prediction_legs (
+			instrument_id, market_id, display_name, outcome_index,
+			outcome_label, enabled
+		) VALUES (
+			'DISABLED-ONLY-LEG',
+			'00000000-0000-0000-0000-000000000031',
+			'DISABLED-ONLY-LEG', 0, 'Disabled', false
+		)
+	`); err != nil {
+		t.Fatalf("seed disabled-only prediction market: %v", err)
+	}
+}
+
+func dropPredictionOutcomeUniqueness(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := pool.Query(ctx, `
+		SELECT constraint_name
+		  FROM (
+			SELECT
+				c.oid,
+				c.conname AS constraint_name,
+				array_agg(a.attname ORDER BY a.attname) AS constraint_columns
+			  FROM pg_constraint AS c
+			  JOIN pg_class AS r ON r.oid = c.conrelid
+			  JOIN pg_namespace AS n ON n.oid = r.relnamespace
+			  JOIN pg_attribute AS a
+				ON a.attrelid = r.oid
+				AND a.attnum = ANY (c.conkey)
+			 WHERE n.nspname = 'trading'
+			   AND r.relname = 'prediction_legs'
+			   AND c.contype IN ('p', 'u')
+			 GROUP BY c.oid, c.conname
+		  ) AS constraints
+		 WHERE constraint_columns = ARRAY['market_id', 'outcome_index']::text[]
+		 ORDER BY constraint_name`)
+	if err != nil {
+		t.Fatalf("inspect prediction leg uniqueness: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var constraintName string
+		if err := rows.Scan(&constraintName); err != nil {
+			t.Fatalf("scan prediction leg uniqueness: %v", err)
+		}
+		if _, err := pool.Exec(
+			ctx,
+			"ALTER TABLE trading.prediction_legs DROP CONSTRAINT "+
+				pgx.Identifier{constraintName}.Sanitize(),
+		); err != nil {
+			t.Fatalf("drop prediction leg uniqueness %q: %v", constraintName, err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("inspect prediction leg uniqueness: %v", err)
+	}
+}
+
+func seedPredictionLegTieRows(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES
+			('TIE-LEG-ZZ', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0),
+			('TIE-LEG-AA', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0);
+
+		INSERT INTO trading.prediction_markets (
+			market_id, source_venue, market_key, question, resolution_time,
+			mutually_exclusive, status, event_id, stage_label, stage_ordinal,
+			created_at, updated_at
+		) VALUES (
+			'00000000-0000-0000-0000-000000000041', 'polymarket',
+			'tie-leg-market', 'tie leg outcomes', NULL, false, 'open',
+			NULL, NULL, 11, '2098-05-01T00:00:00Z', '2098-05-01T00:00:00Z'
+		);
+
+		-- Insert the higher lexical instrument first to prove the reader tie-break.
+		INSERT INTO trading.prediction_legs (
+			instrument_id, market_id, display_name, outcome_index,
+			outcome_label, enabled
+		) VALUES
+			('TIE-LEG-ZZ',
+			 '00000000-0000-0000-0000-000000000041',
+			 'TIE-LEG-ZZ', 0, 'Z', true),
+			('TIE-LEG-AA',
+			 '00000000-0000-0000-0000-000000000041',
+			 'TIE-LEG-AA', 0, 'A', true)
+	`); err != nil {
+		t.Fatalf("seed prediction leg ties: %v", err)
+	}
+}
+
+func relaxPredictionOutcomeMetadataNullability(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	var nullability string
+	if err := pool.QueryRow(ctx, `
+		SELECT is_nullable
+		  FROM information_schema.columns
+		 WHERE table_schema = 'trading'
+		   AND table_name = 'prediction_legs'
+		   AND column_name = 'outcome_label'`).Scan(&nullability); err != nil {
+		t.Fatalf("inspect prediction outcome-label nullability: %v", err)
+	}
+	if nullability == "NO" {
+		if _, err := pool.Exec(
+			ctx,
+			"ALTER TABLE trading.prediction_legs ALTER COLUMN "+
+				pgx.Identifier{"outcome_label"}.Sanitize()+" DROP NOT NULL",
+		); err != nil {
+			t.Fatalf("drop prediction outcome-label NOT NULL: %v", err)
+		}
+	}
+}
+
+func seedPredictionCorruptLeg(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES ('CORRUPT-PREDICTION-LEG', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0);
+
+		INSERT INTO trading.prediction_markets (
+			market_id, source_venue, market_key, question, resolution_time,
+			mutually_exclusive, status, event_id, stage_label, stage_ordinal,
+			created_at, updated_at
+		) VALUES (
+			'00000000-0000-0000-0000-000000000051', 'polymarket',
+			'corrupt-read-model', 'corrupt read model', NULL, false, 'open',
+			NULL, NULL, 12, '2098-06-01T00:00:00Z', '2098-06-01T00:00:00Z'
+		);
+
+		INSERT INTO trading.prediction_legs (
+			instrument_id, market_id, display_name, outcome_index,
+			outcome_label, enabled
+		) VALUES (
+			'CORRUPT-PREDICTION-LEG',
+			'00000000-0000-0000-0000-000000000051',
+			'CORRUPT-PREDICTION-LEG', 0, NULL, true
+		)
+	`); err != nil {
+		t.Fatalf("seed corrupt prediction leg: %v", err)
 	}
 }
