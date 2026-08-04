@@ -153,16 +153,21 @@ func TestFillEffectiveLeverageV3RemediationUpgrade(t *testing.T) {
 		)
 	}
 
-	currentTip := newCurrentTestMigrator(
+	// This historical fixture was created by the pinned v3 database owner.
+	// Advance it through the last ordinary migration before the terminal
+	// bootstrap authority cutovers. Migrations 42-44 have separate exact-owner
+	// upgrade suites and add no economic rows or recovery behavior exercised by
+	// this remediation test.
+	preBootstrapTip := newCurrentTestMigrator(
 		t,
 		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+		migrationFilesThrough(t, adminPermissionMigration),
 	)
-	if err := currentTip.Migrate(ctx); err != nil {
-		t.Fatalf("advance remediated v3 database to current schema: %v", err)
+	if err := preBootstrapTip.Migrate(ctx); err != nil {
+		t.Fatalf("advance remediated v3 database through ordinary tip 41: %v", err)
 	}
-	if err := currentTip.VerifyCurrent(ctx); err != nil {
-		t.Fatalf("verify current schema after v3 remediation: %v", err)
+	if err := preBootstrapTip.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify ordinary tip 41 after v3 remediation: %v", err)
 	}
 	afterCurrentCutover := inspectV3RemediationDatabase(t, pool)
 	if afterCurrentCutover.durable() != afterSuccessfulCutover.durable() {

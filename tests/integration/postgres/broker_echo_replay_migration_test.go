@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -4727,7 +4726,7 @@ func migrateBrokerEchoCurrentSchema(
 	return newCurrentTestMigrator(
 		t,
 		pool,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+		migrationFilesThrough(t, brokerEchoFinalGuardMigration),
 	).Migrate(context.Background())
 }
 

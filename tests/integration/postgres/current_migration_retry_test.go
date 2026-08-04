@@ -74,6 +74,24 @@ func newCurrentTestMigrator(
 	migrations fs.FS,
 ) *currentTestMigrator {
 	t.Helper()
+	if _, err := fs.Stat(migrations, predictionMarketCatalogMigration); err == nil {
+		// Legacy integration fixtures do not own the migration-44 demotion
+		// protocol. Keep them at the final privileged tip; the dedicated
+		// current-store and prediction-catalog lanes prove tip 44.
+		migrations = migrationFilesThrough(t, runtimeAuthorityACLMigration)
+	}
+	return &currentTestMigrator{
+		t:        t,
+		migrator: platformpostgres.NewMigrator(pool, migrations),
+	}
+}
+
+func newExactCurrentTestMigrator(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	migrations fs.FS,
+) *currentTestMigrator {
+	t.Helper()
 	return &currentTestMigrator{
 		t:        t,
 		migrator: platformpostgres.NewMigrator(pool, migrations),

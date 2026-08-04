@@ -252,7 +252,7 @@ func TestOutboxBlocksMissingPredecessorAndRejectsCorruptCommandBinding(t *testin
 }
 
 func TestOutboxRuntimeRoleExecutesProductionClaimAndRepublish(t *testing.T) {
-	adminPool := canonicalCurrentProvisionedStorePool(t, 7)
+	adminPool := currentProvisionedStorePool(t, 7)
 
 	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
 	commandID := engine.IDFromSequence(engine.ID{}, 301)

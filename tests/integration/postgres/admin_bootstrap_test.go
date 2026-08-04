@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -46,7 +45,7 @@ func TestAdminBootstrapCreatesAndReplaysOneAuditedAuthority(t *testing.T) {
 		ctx,
 		platformpostgres.NewMigrator(
 			admin,
-			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			migrationFilesThrough(t, runtimeAuthorityACLMigration),
 		),
 	); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
@@ -1724,7 +1723,7 @@ func TestAdminBootstrapMigrationRejectsAmbiguousOwnerAlias(t *testing.T) {
 				migrationCtx,
 				platformpostgres.NewMigrator(
 					aliasOwner,
-					os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+					migrationFilesThrough(t, runtimeAuthorityACLMigration),
 				),
 			)
 			if !adminBootstrapIsPostgresCode(err, "55000") {
@@ -4057,7 +4056,7 @@ func TestAdminBootstrapFencesConcurrentAuthorityACLUpgrade(t *testing.T) {
 		ctx,
 		platformpostgres.NewMigrator(
 			admin,
-			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			migrationFilesThrough(t, runtimeAuthorityACLMigration),
 		),
 	); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
@@ -4125,7 +4124,7 @@ func TestAdminBootstrapTransactionCannotBlockMigratorIndefinitely(t *testing.T) 
 		ctx,
 		platformpostgres.NewMigrator(
 			admin,
-			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			migrationFilesThrough(t, runtimeAuthorityACLMigration),
 		),
 	); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
@@ -4164,7 +4163,7 @@ func TestAdminBootstrapTransactionCannotBlockMigratorIndefinitely(t *testing.T) 
 	defer cancel()
 	err = platformpostgres.NewMigrator(
 		admin,
-		os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+		migrationFilesThrough(t, runtimeAuthorityACLMigration),
 	).Migrate(migrateCtx)
 	if !adminBootstrapIsPostgresCode(err, "55P03") {
 		_ = bootstrapTx.Rollback(ctx)
@@ -4330,7 +4329,7 @@ func TestAdminBootstrapConcurrentDistinctRequestsCreateOneAdmin(t *testing.T) {
 		ctx,
 		platformpostgres.NewMigrator(
 			admin,
-			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			migrationFilesThrough(t, runtimeAuthorityACLMigration),
 		),
 	); err != nil {
 		t.Fatalf("migrate admin bootstrap authority: %v", err)
@@ -4444,16 +4443,7 @@ func TestAdminBootstrapMigrationMakesPreviousArtifactSchemaAhead(t *testing.T) {
 	admin := postgresPool(t)
 	requireBrokerFundingPostgres19Beta2(t, admin)
 	resetDurableSchemas(t, admin)
-	if err := migrateAdminBootstrapAfterTransientLockContention(
-		t,
-		ctx,
-		platformpostgres.NewMigrator(
-			admin,
-			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
-		),
-	); err != nil {
-		t.Fatalf("migrate admin bootstrap authority: %v", err)
-	}
+	migrateCurrentTipAsDemotedExactOwner(t, admin)
 	if err := platformpostgres.NewMigrator(
 		admin,
 		migrationFilesThrough(t, adminPermissionMigration),
@@ -4463,7 +4453,7 @@ func TestAdminBootstrapMigrationMakesPreviousArtifactSchemaAhead(t *testing.T) {
 	) {
 		t.Fatalf("previous artifact VerifyCurrent error = %v", err)
 	}
-	assertMigrationHistoryTip(t, admin, 43, runtimeAuthorityACLMigration)
+	assertMigrationHistoryTip(t, admin, 44, predictionMarketCatalogMigration)
 }
 
 func callAdminBootstrap(
@@ -5007,12 +4997,15 @@ func migrateAdminBootstrapCurrent(
 	admin *pgxpool.Pool,
 ) error {
 	t.Helper()
+	// Historical admin-bootstrap tests intentionally stop at the immutable
+	// runtime-authority tip (migration 43). Current-tip migration 44 fixtures
+	// use migrateCurrentTipAsDemotedExactOwner explicitly.
 	return migrateAdminBootstrapAfterTransientLockContention(
 		t,
 		ctx,
 		platformpostgres.NewMigrator(
 			admin,
-			os.DirFS(filepath.Join("..", "..", "..", "migrations")),
+			migrationFilesThrough(t, runtimeAuthorityACLMigration),
 		),
 	)
 }

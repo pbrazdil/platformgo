@@ -37,10 +37,26 @@ const (
 	TemplateOperationUnsealBase  = "unseal-template"
 	TemplateOperationDropBase    = "drop-template"
 
-	templateHarnessVersion      = "1"
-	templateRoleManifestVersion = "runtime-roles-v1"
+	templateHarnessVersion      = "2"
+	templateRoleManifestVersion = "runtime-roles-v2-template-owner"
 	templateAdvisoryLockKey     = int64(0x5047544d504c5631)
 )
+
+// TemplateBuildPhase identifies the two ownership-sensitive parts of a
+// current-tip template build.  The first phase runs as the temporary exact
+// owner while it is still a superuser so it can create the predecessor
+// schema.  The second phase reconnects as that same owner after the role has
+// been demoted, and must apply and verify the current tip without privileged
+// catalog access.
+type TemplateBuildPhase uint8
+
+const (
+	TemplateBuildPhasePreDemotion TemplateBuildPhase = iota + 1
+	TemplateBuildPhasePostDemotion
+)
+
+// TemplatePrepare is the ownership-aware template build callback.
+type TemplatePrepare func(context.Context, *pgxpool.Pool, TemplateBuildPhase) error
 
 var (
 	ErrTemplateDatabaseDDLNotAuthorized = errors.New("PostgreSQL template database DDL is not authorized")
@@ -159,43 +175,74 @@ type TemplateDatabaseConfig struct {
 	Profile     string
 	Migrations  fs.FS
 	AfterDDL    func(operation, databaseName string) error
+	// AfterRoleDDL is a fault-injection hook for role DDL.  It is separate
+	// from AfterDDL because role creation/demotion/cleanup happen while the
+	// manager is still constructing or tearing down its private state.
+	AfterRoleDDL func(operation, roleName string) error
 }
 
 type TemplateDatabaseManager struct {
 	mu sync.Mutex
 
-	rootConn       *pgx.Conn
-	primaryPool    *pgxpool.Pool
-	templateConfig *pgx.ConnConfig
-	config         TemplateDatabaseConfig
-	templateName   string
-	templateMarker string
-	templateOwner  string
-	clusterFacts   clusterFacts
-	initialRoles   roleSnapshot
-	baselineRoles  roleSnapshot
-	ownedRoles     []string
-	clones         map[string]*TemplateDatabase
-	closed         bool
-	poisoned       error
+	rootConn                     *pgx.Conn
+	inspectionConn               *pgx.Conn
+	primaryPool                  *pgxpool.Pool
+	templateConfig               *pgx.ConnConfig
+	config                       TemplateDatabaseConfig
+	templateName                 string
+	templateMarker               string
+	templateOwner                string
+	templateOwnerPassword        string
+	templateOwnerOID             uint32
+	templateOwnerCreated         bool
+	templateOwnerCreateAttempted bool
+	templateOwnerManifest        templateOwnerRoleState
+	clusterFacts                 clusterFacts
+	initialRoles                 roleSnapshot
+	baselineRoles                roleSnapshot
+	ownedRoles                   []string
+	clones                       map[string]*TemplateDatabase
+	advisoryHeld                 bool
+	closed                       bool
+	poisoned                     error
 }
 
 type TemplateDatabase struct {
+	mu      sync.Mutex
 	manager *TemplateDatabaseManager
 	name    string
 	dsn     string
 	marker  string
-	once    sync.Once
-	err     error
+	closed  bool
 }
 
 func (database *TemplateDatabase) DSN() string { return database.dsn }
 
+// Name returns the immutable disposable database name represented by this
+// handle.  It is intentionally read-only so tests can inspect ownership
+// without reaching into manager state.
+func (database *TemplateDatabase) Name() string { return database.name }
+
+// TemplateName returns the immutable disposable database name used for the
+// sealed current-tip template.
+func (manager *TemplateDatabaseManager) TemplateName() string {
+	if manager == nil {
+		return ""
+	}
+	return manager.templateName
+}
+
 func (database *TemplateDatabase) Close(ctx context.Context) error {
-	database.once.Do(func() {
-		database.err = database.manager.dropClone(ctx, database.name)
-	})
-	return database.err
+	database.mu.Lock()
+	defer database.mu.Unlock()
+	if database.closed {
+		return nil
+	}
+	if err := database.manager.dropClone(ctx, database.name); err != nil {
+		return err
+	}
+	database.closed = true
+	return nil
 }
 
 type clusterFacts struct {
@@ -217,10 +264,38 @@ type roleSnapshot struct {
 	names []string
 }
 
+// NewTemplateDatabaseManager preserves the legacy callback shape for callers
+// that only need a predecessor-phase failure fixture.  Current-tip template
+// construction must use NewTemplateDatabaseManagerPhased so the callback can
+// explicitly select the migration set for each ownership phase.
 func NewTemplateDatabaseManager(
 	ctx context.Context,
 	config TemplateDatabaseConfig,
 	prepare func(context.Context, *pgxpool.Pool) error,
+) (*TemplateDatabaseManager, error) {
+	if prepare == nil {
+		return nil, errors.New("template prepare callback is required")
+	}
+	return NewTemplateDatabaseManagerPhased(ctx, config, func(
+		phaseCtx context.Context,
+		pool *pgxpool.Pool,
+		phase TemplateBuildPhase,
+	) error {
+		if phase == TemplateBuildPhasePostDemotion {
+			return errors.New("legacy template prepare callback cannot complete the demoted current-tip phase; use NewTemplateDatabaseManagerPhased")
+		}
+		return prepare(phaseCtx, pool)
+	})
+}
+
+// NewTemplateDatabaseManagerPhased builds and seals a disposable current-tip
+// template through two explicit ownership phases.  A manager-created exact
+// owner is the database and relation owner for both phases; only its role
+// attributes change between callbacks.
+func NewTemplateDatabaseManagerPhased(
+	ctx context.Context,
+	config TemplateDatabaseConfig,
+	prepare TemplatePrepare,
 ) (*TemplateDatabaseManager, error) {
 	cleanupCtx := context.WithoutCancel(ctx)
 	if err := ValidateTemplateDatabaseAuthorization(); err != nil {
@@ -329,18 +404,28 @@ func NewTemplateDatabaseManager(
 			_, _ = rootConn.Exec(cleanupCtx, `SELECT pg_advisory_unlock($1)`, templateAdvisoryLockKey)
 		}
 	}()
+	inspectionConn, err := pgx.ConnectConfig(ctx, templateConfig.Copy())
+	if err != nil {
+		return nil, fmt.Errorf("open template inspection connection: %w", err)
+	}
+	closeInspection := true
+	defer func() {
+		if closeInspection {
+			_ = inspectionConn.Close(cleanupCtx)
+		}
+	}()
 
-	lockedFacts, err := readClusterFacts(ctx, rootConn)
+	lockedFacts, err := readClusterFacts(ctx, inspectionConn)
 	if err != nil {
 		return nil, fmt.Errorf("recheck locked template cluster: %w", err)
 	}
 	if lockedFacts.SystemID == primaryFacts.SystemID || lockedFacts.SystemID != templateFacts.SystemID {
 		return nil, fmt.Errorf("%w: system identifier changed while acquiring lock", ErrTemplateClusterNotDedicated)
 	}
-	if pristineErr := validatePristineTemplateCluster(ctx, rootConn, lockedFacts.CurrentUser); pristineErr != nil {
+	if pristineErr := validatePristineTemplateCluster(ctx, inspectionConn, lockedFacts.CurrentUser); pristineErr != nil {
 		return nil, pristineErr
 	}
-	initialRoles, err := readRoleSnapshot(ctx, rootConn)
+	initialRoles, err := readRoleSnapshot(ctx, inspectionConn)
 	if err != nil {
 		return nil, fmt.Errorf("capture initial template roles: %w", err)
 	}
@@ -367,23 +452,27 @@ func NewTemplateDatabaseManager(
 	if err != nil {
 		return nil, err
 	}
+	templateOwner, templateOwnerPassword := templateOwnerCredentials(digest)
 	templateName, _, err := TemplateDatabaseNames(digest, "manager")
 	if err != nil {
 		return nil, err
 	}
-	marker := "platformgo-template:v1:" + hex.EncodeToString(digest[:]) + ":" + config.Caller + ":" + config.Profile
+	marker := "platformgo-template:v2:" + hex.EncodeToString(digest[:]) + ":" + config.Caller + ":" + config.Profile
 
 	manager := &TemplateDatabaseManager{
-		rootConn:       rootConn,
-		primaryPool:    primaryPool,
-		templateConfig: templateConfig,
-		config:         config,
-		templateName:   templateName,
-		templateMarker: marker,
-		templateOwner:  lockedFacts.CurrentUser,
-		clusterFacts:   lockedFacts,
-		initialRoles:   initialRoles,
-		clones:         make(map[string]*TemplateDatabase),
+		rootConn:              rootConn,
+		inspectionConn:        inspectionConn,
+		primaryPool:           primaryPool,
+		templateConfig:        templateConfig,
+		config:                config,
+		templateName:          templateName,
+		templateMarker:        marker,
+		templateOwner:         templateOwner,
+		templateOwnerPassword: templateOwnerPassword,
+		clusterFacts:          lockedFacts,
+		initialRoles:          initialRoles,
+		clones:                make(map[string]*TemplateDatabase),
+		advisoryHeld:          true,
 	}
 	cleanupPending := true
 	defer func() {
@@ -396,7 +485,7 @@ func NewTemplateDatabaseManager(
 		cleanupPending = false
 		return nil, errors.Join(buildErr, cleanupErr)
 	}
-	baselineRoles, err := readRoleSnapshot(ctx, rootConn)
+	baselineRoles, err := readRoleSnapshot(ctx, inspectionConn)
 	if err != nil {
 		cleanupErr := manager.cleanupFailedBuild(cleanupCtx)
 		cleanupPending = false
@@ -404,17 +493,20 @@ func NewTemplateDatabaseManager(
 	}
 	manager.baselineRoles = baselineRoles
 	manager.ownedRoles = addedRoleNames(initialRoles, baselineRoles)
-	if !equalStrings(manager.ownedRoles, runtimeRoleNames) {
+	expectedRoles := append(append([]string(nil), runtimeRoleNames...), templateOwner)
+	sort.Strings(expectedRoles)
+	if !equalStrings(manager.ownedRoles, expectedRoles) {
 		cleanupErr := manager.cleanupFailedBuild(cleanupCtx)
 		cleanupPending = false
 		return nil, errors.Join(
-			fmt.Errorf("%w: prepared role inventory is outside the exact runtime-role manifest", ErrTemplateRoleDrift),
+			fmt.Errorf("%w: prepared role inventory is outside the exact runtime-role manifest plus manager owner", ErrTemplateRoleDrift),
 			cleanupErr,
 		)
 	}
 
 	closePrimary = false
 	closeRoot = false
+	closeInspection = false
 	unlockOnFailure = false
 	cleanupPending = false
 	return manager, nil
@@ -422,8 +514,11 @@ func NewTemplateDatabaseManager(
 
 func (manager *TemplateDatabaseManager) buildTemplate(
 	ctx context.Context,
-	prepare func(context.Context, *pgxpool.Pool) error,
+	prepare TemplatePrepare,
 ) error {
+	if err := manager.createTemplateOwner(ctx); err != nil {
+		return fmt.Errorf("create current template owner: %w", err)
+	}
 	if exists, _, _, err := manager.databaseState(ctx, manager.templateName); err != nil {
 		return err
 	} else if exists {
@@ -434,7 +529,7 @@ func (manager *TemplateDatabaseManager) buildTemplate(
 		ctx,
 		TemplateOperationCreateBase,
 		manager.templateName,
-		"CREATE DATABASE "+identifier+" TEMPLATE template0",
+		"CREATE DATABASE "+identifier+" OWNER "+pgx.Identifier{manager.templateOwner}.Sanitize()+" TEMPLATE template0",
 		func(reconcileCtx context.Context) error {
 			return manager.requireDatabaseIdentity(reconcileCtx, manager.templateName, "")
 		},
@@ -447,6 +542,8 @@ func (manager *TemplateDatabaseManager) buildTemplate(
 		return fmt.Errorf("configure template build pool: %w", err)
 	}
 	poolConfig.ConnConfig.Database = manager.templateName
+	poolConfig.ConnConfig.User = manager.templateOwner
+	poolConfig.ConnConfig.Password = manager.templateOwnerPassword
 	poolConfig.MaxConns = 4
 	buildPool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
@@ -461,10 +558,33 @@ func (manager *TemplateDatabaseManager) buildTemplate(
 		buildPool.Close()
 		return err
 	}
-	prepareErr := prepare(ctx, buildPool)
+	prepareErr := prepare(ctx, buildPool, TemplateBuildPhasePreDemotion)
 	buildPool.Close()
 	if prepareErr != nil {
-		return fmt.Errorf("prepare current template database: %w", prepareErr)
+		return fmt.Errorf("prepare current template database before owner demotion: %w", prepareErr)
+	}
+	if err := manager.demoteTemplateOwner(ctx); err != nil {
+		return fmt.Errorf("demote current template owner: %w", err)
+	}
+	postPool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		return fmt.Errorf("open demoted template build pool: %w", err)
+	}
+	if err := postPool.Ping(ctx); err != nil {
+		postPool.Close()
+		return fmt.Errorf("ping demoted template build pool: %w", err)
+	}
+	if err := validateTemplateBuildOwner(ctx, postPool, manager.templateName, manager.templateOwner); err != nil {
+		postPool.Close()
+		return err
+	}
+	postPrepareErr := prepare(ctx, postPool, TemplateBuildPhasePostDemotion)
+	postPool.Close()
+	if postPrepareErr != nil {
+		return fmt.Errorf("prepare current template database after owner demotion: %w", postPrepareErr)
+	}
+	if err := manager.validateDemotedTemplateOwner(ctx); err != nil {
+		return err
 	}
 	if err := manager.applyDatabaseMutation(
 		ctx,
@@ -487,6 +607,235 @@ func (manager *TemplateDatabaseManager) buildTemplate(
 		},
 	); err != nil {
 		return fmt.Errorf("seal current template database: %w", err)
+	}
+	// Mark/seal hooks run on separate mutation connections and may observe or
+	// mutate role state after their database postconditions succeed.  Recheck
+	// the complete demoted owner manifest and database owner OID immediately
+	// before the caller snapshots the prepared role baseline.
+	if err := manager.validateDemotedTemplateOwner(ctx); err != nil {
+		return fmt.Errorf("validate sealed current template owner: %w", err)
+	}
+	return nil
+}
+
+func (manager *TemplateDatabaseManager) validateDemotedTemplateOwner(ctx context.Context) error {
+	state, err := readTemplateOwnerRole(ctx, manager.inspectionConn, manager.templateOwner)
+	if err != nil {
+		return err
+	}
+	if !roleStateMatches(manager.templateOwnerManifest, state, false) {
+		return fmt.Errorf("%w: template owner role %q drifted after the demoted build phase", ErrTemplateRoleDrift, manager.templateOwner)
+	}
+	var databaseOwnerOID uint32
+	if err := manager.inspectionConn.QueryRow(ctx, `
+		SELECT datdba::integer
+		  FROM pg_database
+		 WHERE datname = $1`, manager.templateName).Scan(&databaseOwnerOID); err != nil {
+		return fmt.Errorf("inspect current template database owner: %w", err)
+	}
+	if databaseOwnerOID != manager.templateOwnerOID {
+		return fmt.Errorf("%w: current template database owner OID = %d, want %d", ErrTemplateRoleDrift, databaseOwnerOID, manager.templateOwnerOID)
+	}
+	return nil
+}
+
+const (
+	templateRoleCreateOperation      = "create-template-owner"
+	templateRoleDemoteOperation      = "demote-template-owner"
+	templateRoleDropOperation        = "drop-template-owner"
+	templateRoleDropRuntimeOperation = "drop-runtime-role"
+)
+
+type templateOwnerRoleState struct {
+	exists       bool
+	roleOID      uint32
+	superuser    bool
+	createdb     bool
+	createrole   bool
+	canLogin     bool
+	inherit      bool
+	connLimit    int32
+	validUntil   string
+	config       string
+	passwordHash string
+	replication  bool
+	bypassRLS    bool
+	membershipCt int
+}
+
+func templateOwnerCredentials(digest [32]byte) (string, string) {
+	text := hex.EncodeToString(digest[:])
+	// Keep both identifiers well below PostgreSQL's NAMEDATALEN limit and
+	// derive them solely from the canonical template authority digest.
+	return "platformgo_tpl_owner_" + text[:24], "platformgo_tpl_password_" + text
+}
+
+func (manager *TemplateDatabaseManager) createTemplateOwner(ctx context.Context) error {
+	existing, err := readTemplateOwnerRole(ctx, manager.inspectionConn, manager.templateOwner)
+	if err != nil {
+		return err
+	}
+	if existing.exists {
+		return fmt.Errorf("%w: derived template owner role %q already exists", ErrTemplateClusterNotPristine, manager.templateOwner)
+	}
+	manager.templateOwnerCreateAttempted = true
+	ownerIdentifier := pgx.Identifier{manager.templateOwner}.Sanitize()
+	statement := "CREATE ROLE " + ownerIdentifier + " LOGIN SUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD " + quoteLiteral(manager.templateOwnerPassword)
+	if err := manager.applyRoleMutation(
+		ctx,
+		templateRoleCreateOperation,
+		manager.templateOwner,
+		statement,
+		func(reconcileCtx context.Context) error {
+			state, stateErr := readTemplateOwnerRole(reconcileCtx, manager.inspectionConn, manager.templateOwner)
+			if stateErr != nil {
+				return stateErr
+			}
+			if state.exists {
+				manager.templateOwnerOID = state.roleOID
+			}
+			if !temporaryOwnerRoleState(state) {
+				return fmt.Errorf("template owner role %q does not match the exact temporary-superuser manifest", manager.templateOwner)
+			}
+			return nil
+		},
+	); err != nil {
+		return err
+	}
+	state, err := readTemplateOwnerRole(ctx, manager.inspectionConn, manager.templateOwner)
+	if err != nil {
+		return err
+	}
+	if !temporaryOwnerRoleState(state) {
+		return fmt.Errorf("template owner role %q changed before its create postcondition was recorded", manager.templateOwner)
+	}
+	manager.templateOwnerOID = state.roleOID
+	manager.templateOwnerManifest = state
+	manager.templateOwnerCreated = true
+	return nil
+}
+
+func (manager *TemplateDatabaseManager) demoteTemplateOwner(ctx context.Context) error {
+	ownerIdentifier := pgx.Identifier{manager.templateOwner}.Sanitize()
+	before, err := readTemplateOwnerRole(ctx, manager.inspectionConn, manager.templateOwner)
+	if err != nil {
+		return err
+	}
+	if !before.exists || before.roleOID != manager.templateOwnerOID || !roleStateMatches(manager.templateOwnerManifest, before, true) {
+		return fmt.Errorf("%w: template owner role %q has unexpected memberships before demotion", ErrTemplateRoleDrift, manager.templateOwner)
+	}
+	statement := "ALTER ROLE " + ownerIdentifier + " NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+	if err := manager.applyRoleMutation(
+		ctx,
+		templateRoleDemoteOperation,
+		manager.templateOwner,
+		statement,
+		func(reconcileCtx context.Context) error {
+			state, stateErr := readTemplateOwnerRole(reconcileCtx, manager.inspectionConn, manager.templateOwner)
+			if stateErr != nil {
+				return stateErr
+			}
+			if !state.exists || !roleStateMatches(manager.templateOwnerManifest, state, false) {
+				return fmt.Errorf("%w: template owner role %q was not safely demoted", ErrTemplateRoleDrift, manager.templateOwner)
+			}
+			return nil
+		},
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readTemplateOwnerRole(ctx context.Context, conn *pgx.Conn, roleName string) (templateOwnerRoleState, error) {
+	var state templateOwnerRoleState
+	err := conn.QueryRow(ctx, `
+		SELECT r.oid::integer,
+		       r.rolsuper,
+		       r.rolcreatedb,
+		       r.rolcreaterole,
+		       r.rolcanlogin,
+		       r.rolinherit,
+		       r.rolconnlimit,
+		       COALESCE(r.rolvaliduntil::text, ''),
+		       COALESCE(array_to_string(r.rolconfig, ','), ''),
+		       COALESCE(auth.rolpassword, ''),
+		       r.rolreplication,
+		       r.rolbypassrls,
+		       (SELECT count(*) FROM pg_auth_members m
+		          WHERE m.member = r.oid OR m.roleid = r.oid)
+		  FROM pg_roles r
+		  JOIN pg_catalog.pg_authid auth ON auth.oid = r.oid
+		 WHERE r.rolname = $1`, roleName).Scan(
+		&state.roleOID,
+		&state.superuser,
+		&state.createdb,
+		&state.createrole,
+		&state.canLogin,
+		&state.inherit,
+		&state.connLimit,
+		&state.validUntil,
+		&state.config,
+		&state.passwordHash,
+		&state.replication,
+		&state.bypassRLS,
+		&state.membershipCt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return state, nil
+	}
+	if err != nil {
+		return state, fmt.Errorf("inspect template owner role %q: %w", roleName, err)
+	}
+	state.exists = true
+	return state, nil
+}
+
+func temporaryOwnerRoleState(state templateOwnerRoleState) bool {
+	return state.exists &&
+		state.superuser &&
+		state.canLogin &&
+		state.inherit &&
+		state.connLimit == -1 &&
+		state.validUntil == "" &&
+		state.config == "" &&
+		state.passwordHash != "" &&
+		!state.createdb &&
+		!state.createrole &&
+		!state.replication &&
+		!state.bypassRLS &&
+		state.membershipCt == 0
+}
+
+func roleStateMatches(expected, actual templateOwnerRoleState, superuser bool) bool {
+	return actual.exists &&
+		actual.roleOID == expected.roleOID &&
+		actual.superuser == superuser &&
+		actual.canLogin == expected.canLogin &&
+		actual.inherit == expected.inherit &&
+		actual.connLimit == expected.connLimit &&
+		actual.validUntil == expected.validUntil &&
+		actual.config == expected.config &&
+		actual.passwordHash == expected.passwordHash &&
+		!actual.createdb &&
+		!actual.createrole &&
+		!actual.replication &&
+		!actual.bypassRLS &&
+		actual.membershipCt == 0
+}
+
+func validateTemplateBuildOwner(ctx context.Context, pool *pgxpool.Pool, databaseName, ownerName string) error {
+	var actualDatabase, currentUser, sessionUser, databaseOwner string
+	if err := pool.QueryRow(ctx, `
+		SELECT current_database(),
+		       current_user,
+		       session_user,
+		       pg_get_userbyid((SELECT datdba FROM pg_database WHERE datname = current_database()))`).Scan(
+		&actualDatabase,
+		&currentUser, &sessionUser, &databaseOwner); err != nil {
+		return fmt.Errorf("inspect demoted template build owner: %w", err)
+	}
+	if actualDatabase != databaseName || currentUser != ownerName || sessionUser != ownerName || databaseOwner != ownerName {
+		return fmt.Errorf("template build identity = database %q/session %q/current %q/owner %q, want database %q/owner %q", actualDatabase, sessionUser, currentUser, databaseOwner, databaseName, ownerName)
 	}
 	return nil
 }
@@ -540,7 +889,7 @@ func (manager *TemplateDatabaseManager) Clone(ctx context.Context, lease string)
 		ctx,
 		TemplateOperationCreateClone,
 		cloneName,
-		"CREATE DATABASE "+cloneIdentifier+" TEMPLATE "+templateIdentifier,
+		"CREATE DATABASE "+cloneIdentifier+" OWNER "+pgx.Identifier{manager.templateOwner}.Sanitize()+" TEMPLATE "+templateIdentifier,
 		func(reconcileCtx context.Context) error {
 			return manager.requireDatabaseIdentity(reconcileCtx, cloneName, "")
 		},
@@ -619,13 +968,30 @@ func (manager *TemplateDatabaseManager) Close(ctx context.Context) error {
 	if manager.closed {
 		return nil
 	}
-	manager.closed = true
-	var result error
-	if manager.poisoned != nil {
-		result = errors.Join(result, manager.poisoned)
+	if err := manager.ensureInspectionConn(ctx); err != nil {
+		return fmt.Errorf("reconnect template inspection connection: %w", err)
 	}
-	if err := manager.validateRoles(ctx); err != nil {
-		result = errors.Join(result, err)
+	reconcileCtx, cancelReconcile := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelReconcile()
+	var result error
+	templateExists, _, _, stateErr := manager.databaseState(reconcileCtx, manager.templateName)
+	if stateErr != nil {
+		result = errors.Join(result, stateErr)
+	} else if templateExists {
+		if err := manager.validateRoles(reconcileCtx); err != nil {
+			result = errors.Join(result, err)
+		} else {
+			// A prior Clone failure poisons new work, but a caller may repair the
+			// foreign drift before retrying cleanup.  Do not make that transient
+			// observation permanently block teardown.
+			manager.poisoned = nil
+		}
+	} else {
+		// The previous cleanup attempt may already have dropped the template
+		// and manager-owned roles before a final pristine check failed.  A
+		// retry must validate the initial snapshot, not the now-absent build
+		// manifest.
+		manager.poisoned = nil
 	}
 
 	names := make([]string, 0, len(manager.clones))
@@ -635,7 +1001,7 @@ func (manager *TemplateDatabaseManager) Close(ctx context.Context) error {
 	sort.Strings(names)
 	for _, name := range names {
 		database := manager.clones[name]
-		exists, owner, marker, err := manager.databaseState(ctx, name)
+		exists, owner, marker, err := manager.databaseState(reconcileCtx, name)
 		if err != nil {
 			result = errors.Join(result, err)
 			continue
@@ -667,22 +1033,66 @@ func (manager *TemplateDatabaseManager) Close(ctx context.Context) error {
 		delete(manager.clones, name)
 	}
 	if len(manager.clones) == 0 {
-		if err := manager.dropTemplate(ctx); err != nil {
+		if err := manager.dropTemplate(reconcileCtx); err != nil {
 			result = errors.Join(result, err)
-		} else if err := manager.restoreInitialRoles(ctx); err != nil {
+		} else if err := manager.restoreInitialRoles(reconcileCtx); err != nil {
 			result = errors.Join(result, err)
-		} else if err := validatePristineTemplateCluster(ctx, manager.rootConn, manager.templateOwner); err != nil {
+		} else if err := validatePristineTemplateCluster(reconcileCtx, manager.inspectionConn, manager.clusterFacts.CurrentUser); err != nil {
 			result = errors.Join(result, err)
 		}
 	}
-	if _, err := manager.rootConn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, templateAdvisoryLockKey); err != nil {
-		result = errors.Join(result, fmt.Errorf("release template cluster lock: %w", err))
+	if result != nil {
+		return result
 	}
-	if err := manager.rootConn.Close(ctx); err != nil {
-		result = errors.Join(result, fmt.Errorf("close template cluster connection: %w", err))
+	finalizeCtx := context.Background()
+	if manager.advisoryHeld {
+		if _, err := manager.rootConn.Exec(finalizeCtx, `SELECT pg_advisory_unlock($1)`, templateAdvisoryLockKey); err != nil {
+			return fmt.Errorf("release template cluster lock: %w", err)
+		}
+		manager.advisoryHeld = false
+	}
+	// Unlock success is the irreversible finalization transition: all
+	// catalog work is complete, so future Close calls must not attempt to use
+	// connections that are being closed below.  Close every remaining resource
+	// even when one close operation reports an error.
+	manager.closed = true
+	var closeErr error
+	if manager.inspectionConn != nil {
+		if err := manager.inspectionConn.Close(finalizeCtx); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("close template inspection connection: %w", err))
+		}
+	}
+	if manager.rootConn != nil {
+		if err := manager.rootConn.Close(finalizeCtx); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("close template cluster connection: %w", err))
+		}
 	}
 	manager.primaryPool.Close()
-	return result
+	return closeErr
+}
+
+// ensureInspectionConn keeps catalog reads/reconciliation reconnectable after
+// a caller deadline cancels a blocked query.  The advisory-lock connection is
+// intentionally never reused for this probe or replacement.
+func (manager *TemplateDatabaseManager) ensureInspectionConn(ctx context.Context) error {
+	if manager.inspectionConn != nil {
+		pingCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		_, pingErr := manager.inspectionConn.Exec(pingCtx, "SELECT 1")
+		cancel()
+		if pingErr == nil {
+			return nil
+		}
+		_ = manager.inspectionConn.Close(context.Background())
+		manager.inspectionConn = nil
+	}
+	connectCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	connection, err := pgx.ConnectConfig(connectCtx, manager.templateConfig.Copy())
+	if err != nil {
+		return err
+	}
+	manager.inspectionConn = connection
+	return nil
 }
 
 func (manager *TemplateDatabaseManager) dropTemplate(ctx context.Context) error {
@@ -726,6 +1136,14 @@ func (manager *TemplateDatabaseManager) dropTemplate(ctx context.Context) error 
 }
 
 func (manager *TemplateDatabaseManager) cleanupFailedBuild(ctx context.Context) error {
+	// A canceled build context may have left the long-lived inspection
+	// connection in a poisoned/busy state.  Reconnect it from the
+	// non-cancelable cleanup context before touching the disposable database or
+	// role inventory; the advisory-lock holder must remain fenced until this
+	// cleanup has a usable catalog connection.
+	if err := manager.ensureInspectionConn(ctx); err != nil {
+		return fmt.Errorf("reconnect template inspection connection for failed build cleanup: %w", err)
+	}
 	var result error
 	if exists, _, _, err := manager.databaseState(ctx, manager.templateName); err != nil {
 		result = errors.Join(result, err)
@@ -752,11 +1170,13 @@ func (manager *TemplateDatabaseManager) cleanupFailedBuild(ctx context.Context) 
 			result = errors.Join(result, err)
 		}
 	}
-	currentRoles, err := readRoleSnapshot(ctx, manager.rootConn)
+	currentRoles, err := readRoleSnapshot(ctx, manager.inspectionConn)
 	if err != nil {
 		result = errors.Join(result, fmt.Errorf("inspect roles after failed template build: %w", err))
 	} else {
-		manager.ownedRoles = managedRoleAdditions(manager.initialRoles, currentRoles)
+		ownerCleanupEligible := manager.templateOwnerCreated ||
+			(manager.templateOwnerCreateAttempted && manager.templateOwnerOID != 0)
+		manager.ownedRoles = managedRoleAdditions(manager.initialRoles, currentRoles, manager.templateOwner, ownerCleanupEligible)
 	}
 	if err := manager.restoreInitialRoles(ctx); err != nil {
 		result = errors.Join(result, err)
@@ -765,7 +1185,7 @@ func (manager *TemplateDatabaseManager) cleanupFailedBuild(ctx context.Context) 
 }
 
 func (manager *TemplateDatabaseManager) validateRoles(ctx context.Context) error {
-	current, err := readRoleSnapshot(ctx, manager.rootConn)
+	current, err := readRoleSnapshot(ctx, manager.inspectionConn)
 	if err != nil {
 		return fmt.Errorf("inspect template cluster roles: %w", err)
 	}
@@ -776,7 +1196,7 @@ func (manager *TemplateDatabaseManager) validateRoles(ctx context.Context) error
 }
 
 func (manager *TemplateDatabaseManager) restoreInitialRoles(ctx context.Context) error {
-	current, err := readRoleSnapshot(ctx, manager.rootConn)
+	current, err := readRoleSnapshot(ctx, manager.inspectionConn)
 	if err != nil {
 		return err
 	}
@@ -790,16 +1210,47 @@ func (manager *TemplateDatabaseManager) restoreInitialRoles(ctx context.Context)
 			ownedPresent = append(ownedPresent, name)
 		}
 	}
-	if len(ownedPresent) > 0 {
-		identifiers := make([]string, 0, len(ownedPresent))
-		for _, name := range ownedPresent {
-			identifiers = append(identifiers, pgx.Identifier{name}.Sanitize())
+	for _, name := range ownedPresent {
+		if name == manager.templateOwner && (manager.templateOwnerCreated || manager.templateOwnerCreateAttempted) {
+			state, stateErr := readTemplateOwnerRole(ctx, manager.inspectionConn, name)
+			if stateErr != nil {
+				return fmt.Errorf("inspect template owner before cleanup: %w", stateErr)
+			}
+			if !state.exists || manager.templateOwnerOID == 0 || state.roleOID != manager.templateOwnerOID {
+				return fmt.Errorf("%w: refusing to drop a replacement template owner role %q", ErrTemplateRoleDrift, name)
+			}
+			// Membership drift is surfaced by the demotion preflight and is
+			// never silently repaired while the template is being built.  At
+			// this point cleanup has already torn down the disposable database,
+			// so remove only the manager-owned role's memberships before DROP.
+			if err := removeRoleMembershipsForCleanup(ctx, manager.inspectionConn, name); err != nil {
+				return fmt.Errorf("cleanup template owner memberships: %w", err)
+			}
 		}
-		if _, dropErr := manager.rootConn.Exec(ctx, "DROP ROLE "+strings.Join(identifiers, ", ")); dropErr != nil {
-			return fmt.Errorf("restore initial template roles: %w", dropErr)
+		operation := templateRoleDropRuntimeOperation
+		if name == manager.templateOwner {
+			operation = templateRoleDropOperation
+		}
+		if err := manager.applyRoleMutation(
+			ctx,
+			operation,
+			name,
+			"DROP ROLE "+pgx.Identifier{name}.Sanitize(),
+			func(reconcileCtx context.Context) error {
+				state, stateErr := readTemplateOwnerRole(reconcileCtx, manager.inspectionConn, name)
+				if stateErr != nil {
+					return stateErr
+				}
+				if state.exists {
+					return fmt.Errorf("role %q remains after DROP", name)
+				}
+				return nil
+			},
+		); err != nil {
+			return fmt.Errorf("restore initial template role %q: %w", name, err)
 		}
 	}
-	final, err := readRoleSnapshot(ctx, manager.rootConn)
+	final, err := readRoleSnapshot(ctx, manager.inspectionConn)
 	if err != nil {
 		return err
 	}
@@ -809,12 +1260,50 @@ func (manager *TemplateDatabaseManager) restoreInitialRoles(ctx context.Context)
 	return nil
 }
 
+func removeRoleMembershipsForCleanup(ctx context.Context, conn *pgx.Conn, roleName string) error {
+	rows, err := conn.Query(ctx, `
+		SELECT parent.rolname, member.rolname
+		  FROM pg_auth_members AS membership
+		  JOIN pg_roles AS parent ON parent.oid = membership.roleid
+		  JOIN pg_roles AS member ON member.oid = membership.member
+		 WHERE membership.roleid = (SELECT oid FROM pg_roles WHERE rolname = $1)
+		    OR membership.member = (SELECT oid FROM pg_roles WHERE rolname = $1)
+		 ORDER BY parent.rolname, member.rolname`, roleName)
+	if err != nil {
+		return fmt.Errorf("inspect role memberships: %w", err)
+	}
+	type membership struct{ parent, member string }
+	var memberships []membership
+	for rows.Next() {
+		var item membership
+		if scanErr := rows.Scan(&item.parent, &item.member); scanErr != nil {
+			rows.Close()
+			return scanErr
+		}
+		memberships = append(memberships, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, item := range memberships {
+		if _, revokeErr := conn.Exec(
+			ctx,
+			"REVOKE "+pgx.Identifier{item.parent}.Sanitize()+" FROM "+pgx.Identifier{item.member}.Sanitize(),
+		); revokeErr != nil {
+			return fmt.Errorf("remove role membership %q -> %q: %w", item.parent, item.member, revokeErr)
+		}
+	}
+	return nil
+}
+
 func (manager *TemplateDatabaseManager) databaseState(
 	ctx context.Context,
 	name string,
 ) (bool, string, string, error) {
 	var owner, marker string
-	err := manager.rootConn.QueryRow(ctx, `
+	err := manager.inspectionConn.QueryRow(ctx, `
 		SELECT pg_get_userbyid(datdba), COALESCE(shobj_description(oid, 'pg_database'), '')
 		  FROM pg_database
 		 WHERE datname = $1`, name).Scan(&owner, &marker)
@@ -829,12 +1318,18 @@ func (manager *TemplateDatabaseManager) databaseState(
 
 func (manager *TemplateDatabaseManager) ensureNoSessions(ctx context.Context, name string) error {
 	for attempt := 0; attempt < 50; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("wait for database sessions to drain: %w", err)
+		}
 		var count int
-		if err := manager.rootConn.QueryRow(ctx, `
+		queryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		err := manager.inspectionConn.QueryRow(queryCtx, `
 			SELECT count(*)
 			  FROM pg_stat_activity
 			 WHERE datname = $1
-			   AND pid <> pg_backend_pid()`, name).Scan(&count); err != nil {
+			   AND pid <> pg_backend_pid()`, name).Scan(&count)
+		cancel()
+		if err != nil {
 			return fmt.Errorf("inspect database sessions: %w", err)
 		}
 		if count == 0 {
@@ -866,6 +1361,22 @@ func (manager *TemplateDatabaseManager) execDatabaseDDL(ctx context.Context, sta
 	return nil
 }
 
+// execRoleDDL deliberately uses a short-lived maintenance connection instead
+// of the advisory-lock holder.  If the transport disappears after PostgreSQL
+// commits CREATE/ALTER/DROP ROLE, the root connection remains available for
+// exact role-state reconciliation and deterministic cleanup.
+func (manager *TemplateDatabaseManager) execRoleDDL(ctx context.Context, statement string) error {
+	connection, err := pgx.ConnectConfig(ctx, manager.templateConfig.Copy())
+	if err != nil {
+		return fmt.Errorf("open isolated role-DDL connection: %w", err)
+	}
+	defer func() { _ = connection.Close(context.WithoutCancel(ctx)) }()
+	if _, err := connection.Exec(ctx, statement); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (manager *TemplateDatabaseManager) applyDatabaseMutation(
 	ctx context.Context,
 	operation string,
@@ -878,6 +1389,34 @@ func (manager *TemplateDatabaseManager) applyDatabaseMutation(
 	mutationErr := manager.execDatabaseDDL(mutationCtx, statement)
 	if mutationErr == nil && manager.config.AfterDDL != nil {
 		mutationErr = manager.config.AfterDDL(operation, databaseName)
+	}
+	reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	reconcileErr := reconcile(reconcileCtx)
+	if reconcileErr == nil {
+		return nil
+	}
+	if mutationErr != nil {
+		return errors.Join(mutationErr, reconcileErr)
+	}
+	return reconcileErr
+}
+
+func (manager *TemplateDatabaseManager) applyRoleMutation(
+	ctx context.Context,
+	operation string,
+	roleName string,
+	statement string,
+	reconcile func(context.Context) error,
+) error {
+	mutationCtx, cancelMutation := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancelMutation()
+	mutationErr := error(nil)
+	if err := manager.execRoleDDL(mutationCtx, statement); err != nil {
+		mutationErr = err
+	}
+	if mutationErr == nil && manager.config.AfterRoleDDL != nil {
+		mutationErr = manager.config.AfterRoleDDL(operation, roleName)
 	}
 	reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
@@ -928,7 +1467,7 @@ func (manager *TemplateDatabaseManager) requireDatabaseFlags(
 	isTemplate bool,
 ) error {
 	var actualAllowConnections, actualIsTemplate bool
-	err := manager.rootConn.QueryRow(ctx, `
+	err := manager.inspectionConn.QueryRow(ctx, `
 		SELECT datallowconn, datistemplate
 		  FROM pg_database
 		 WHERE datname = $1`, name).Scan(&actualAllowConnections, &actualIsTemplate)
@@ -1185,11 +1724,14 @@ func addedRoleNames(before, after roleSnapshot) []string {
 	return additions
 }
 
-func managedRoleAdditions(before, after roleSnapshot) []string {
+func managedRoleAdditions(before, after roleSnapshot, owner string, ownerCreated bool) []string {
 	added := addedRoleNames(before, after)
 	allowed := make(map[string]struct{}, len(runtimeRoleNames))
 	for _, name := range runtimeRoleNames {
 		allowed[name] = struct{}{}
+	}
+	if ownerCreated && owner != "" {
+		allowed[owner] = struct{}{}
 	}
 	managed := make([]string, 0, len(added))
 	for _, name := range added {

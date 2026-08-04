@@ -6,8 +6,11 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	"github.com/upcomers-org/platformgo/internal/engine"
 	"github.com/upcomers-org/platformgo/internal/testsupport/postgresfixture"
 )
@@ -37,11 +40,7 @@ func currentStorePool(t *testing.T) *pgxpool.Pool {
 	if os.Getenv("PLATFORMGO_TEST_POSTGRES_TEMPLATE_DSN") == "" {
 		pool := postgresPool(t)
 		resetDurableSchemas(t, pool)
-		if err := newCurrentTestMigrator(t, pool, currentMigrationFS()).Migrate(
-			context.Background(),
-		); err != nil {
-			t.Fatalf("Migrate: %v", err)
-		}
+		migrateCurrentTipAsDemotedExactOwner(t, pool)
 		return pool
 	}
 
@@ -85,9 +84,9 @@ func canonicalCurrentProvisionedStorePool(t *testing.T, shardID engine.ShardID) 
 	t.Helper()
 	pool := postgresPool(t)
 	resetDurableSchemas(t, pool)
-	if err := newCurrentTestMigrator(t, pool, currentMigrationFS()).MigrateAndProvision(
-		context.Background(),
-		shardID,
+	migrateCurrentTipAsDemotedExactOwner(t, pool)
+	if err := platformpostgres.NewMigrator(pool, currentMigrationFS()).ProvisionDeploymentShard(
+		context.Background(), shardID,
 	); err != nil {
 		t.Fatalf("MigrateAndProvision: %v", err)
 	}
@@ -98,7 +97,7 @@ func sharedCurrentTemplateManager(t *testing.T) *postgresfixture.TemplateDatabas
 	t.Helper()
 	sharedCurrentTemplate.once.Do(func() {
 		sharedCurrentTemplate.manager, sharedCurrentTemplate.err =
-			postgresfixture.NewTemplateDatabaseManager(
+			postgresfixture.NewTemplateDatabaseManagerPhased(
 				context.Background(),
 				postgresfixture.TemplateDatabaseConfig{
 					PrimaryDSN:  os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN"),
@@ -107,14 +106,21 @@ func sharedCurrentTemplateManager(t *testing.T) *postgresfixture.TemplateDatabas
 					Profile:     postgresfixture.TemplateProfileCurrent,
 					Migrations:  currentMigrationFS(),
 				},
-				func(ctx context.Context, pool *pgxpool.Pool) error {
-					if err := postgresfixture.ResetDurableSchemas(ctx, pool); err != nil {
-						return err
+				func(ctx context.Context, pool *pgxpool.Pool, phase postgresfixture.TemplateBuildPhase) error {
+					if phase == postgresfixture.TemplateBuildPhasePreDemotion {
+						if err := postgresfixture.ResetDurableSchemas(ctx, pool); err != nil {
+							return err
+						}
+						if err := postgresfixture.ProvisionRuntimeRoles(ctx, pool); err != nil {
+							return err
+						}
+						return newCurrentTestMigrator(
+							t,
+							pool,
+							migrationFilesThrough(t, runtimeAuthorityACLMigration),
+						).Migrate(ctx)
 					}
-					if err := postgresfixture.ProvisionRuntimeRoles(ctx, pool); err != nil {
-						return err
-					}
-					migrator := newCurrentTestMigrator(t, pool, currentMigrationFS())
+					migrator := newExactCurrentTestMigrator(t, pool, currentMigrationFS())
 					if err := migrator.Migrate(ctx); err != nil {
 						return err
 					}
@@ -126,4 +132,84 @@ func sharedCurrentTemplateManager(t *testing.T) *postgresfixture.TemplateDatabas
 		t.Fatalf("create shared current PostgreSQL template: %v", sharedCurrentTemplate.err)
 	}
 	return sharedCurrentTemplate.manager
+}
+
+// migrateCurrentTipAsDemotedExactOwner builds the current fixture through
+// migration 43 with a temporary superuser, then applies and verifies migration
+// 44 as that same role after demotion. The inspection pool remains the caller's
+// administrative connection; the owner role is cleaned up with the disposable
+// database/template by the test cleanup stack.
+func migrateCurrentTipAsDemotedExactOwner(
+	t *testing.T,
+	inspectionPool *pgxpool.Pool,
+) {
+	t.Helper()
+	ctx := context.Background()
+	ownerName := fmt.Sprintf("platformgo_current_owner_%d", os.Getpid())
+	ownerID := pgx.Identifier{ownerName}.Sanitize()
+	var inspectionOwner string
+	if err := inspectionPool.QueryRow(ctx, "SELECT current_user").Scan(&inspectionOwner); err != nil {
+		t.Fatalf("read inspection owner: %v", err)
+	}
+	inspectionOwnerID := pgx.Identifier{inspectionOwner}.Sanitize()
+	if _, err := inspectionPool.Exec(ctx, fmt.Sprintf(`
+		CREATE ROLE %s LOGIN SUPERUSER PASSWORD 'platformgo-test-password'`, ownerID)); err != nil {
+		t.Fatalf("create current migration owner: %v", err)
+	}
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("preserving current migration owner %q and database objects for failure evidence", ownerName)
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := inspectionPool.Exec(cleanupCtx, "REASSIGN OWNED BY "+ownerID+" TO "+inspectionOwnerID); err != nil {
+			t.Errorf("reassign current migration owner objects to inspection owner: %v", err)
+			return
+		}
+		if _, err := inspectionPool.Exec(cleanupCtx, "DROP ROLE "+ownerID); err != nil {
+			t.Errorf("cleanup current migration owner role without CASCADE: %v", err)
+			return
+		}
+		var exists bool
+		if err := inspectionPool.QueryRow(cleanupCtx, `
+			SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, ownerName).Scan(&exists); err != nil {
+			t.Errorf("verify current migration owner cleanup: %v", err)
+			return
+		}
+		if exists {
+			t.Errorf("current migration owner role %q remains after explicit cleanup", ownerName)
+		}
+	})
+
+	ownerConfig := inspectionPool.Config().Copy()
+	ownerConfig.ConnConfig.User = ownerName
+	ownerConfig.ConnConfig.Password = "platformgo-test-password"
+	ownerConfig.MaxConns = 4
+	ownerPool, err := pgxpool.NewWithConfig(ctx, ownerConfig)
+	if err != nil {
+		t.Fatalf("open current migration owner pool: %v", err)
+	}
+	t.Cleanup(ownerPool.Close)
+	if err := ownerPool.Ping(ctx); err != nil {
+		t.Fatalf("ping current migration owner pool: %v", err)
+	}
+
+	if err := newCurrentTestMigrator(
+		t,
+		ownerPool,
+		migrationFilesThrough(t, runtimeAuthorityACLMigration),
+	).Migrate(ctx); err != nil {
+		t.Fatalf("apply tip 43 as current migration owner: %v", err)
+	}
+	if _, err := inspectionPool.Exec(ctx, "ALTER ROLE "+ownerID+" NOSUPERUSER"); err != nil {
+		t.Fatalf("demote current migration owner: %v", err)
+	}
+	migrator := platformpostgres.NewMigrator(ownerPool, currentMigrationFS())
+	if err := migrator.Migrate(ctx); err != nil {
+		t.Fatalf("apply migration 44 as demoted current owner: %v", err)
+	}
+	if err := migrator.VerifyCurrent(ctx); err != nil {
+		t.Fatalf("verify migration 44 as demoted current owner: %v", err)
+	}
 }

@@ -6,14 +6,63 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	platformpostgres "github.com/upcomers-org/platformgo/internal/adapters/postgres"
 	"github.com/upcomers-org/platformgo/internal/testsupport/postgresfixture"
 )
+
+const templateAdvisoryLockKey int64 = 5784684937417086513
+
+type templateAdvisoryLockSession struct {
+	pid int32
+}
+
+func templateAdvisoryLockSessionForTest(t *testing.T, pool *pgxpool.Pool) templateAdvisoryLockSession {
+	t.Helper()
+	var session templateAdvisoryLockSession
+	err := pool.QueryRow(context.Background(), `
+		SELECT activity.pid
+		  FROM pg_catalog.pg_locks AS lock
+		  JOIN pg_catalog.pg_stat_activity AS activity ON activity.pid = lock.pid
+		 WHERE lock.locktype = 'advisory'
+		   AND lock.granted
+		   AND lock.classid = (($1::bigint >> 32)::oid)
+		   AND lock.objid = (($1::bigint & 4294967295)::oid)
+		   AND lock.objsubid = 1
+		 ORDER BY activity.pid
+		 LIMIT 1`, templateAdvisoryLockKey).Scan(&session.pid)
+	if err != nil {
+		t.Fatalf("inspect template advisory lock holder: %v", err)
+	}
+	return session
+}
+
+func assertTemplateAdvisoryLockHeldBy(t *testing.T, pool *pgxpool.Pool, session templateAdvisoryLockSession) {
+	t.Helper()
+	var held bool
+	if err := pool.QueryRow(context.Background(), `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM pg_catalog.pg_locks
+			 WHERE locktype = 'advisory'
+			   AND granted
+			   AND pid = $1
+			   AND classid = (($2::bigint >> 32)::oid)
+			   AND objid = (($2::bigint & 4294967295)::oid)
+			   AND objsubid = 1
+		)`, session.pid, templateAdvisoryLockKey).Scan(&held); err != nil {
+		t.Fatalf("inspect retained template advisory lock holder %d: %v", session.pid, err)
+	}
+	if !held {
+		t.Fatalf("template advisory lock is not retained by original holder pid %d", session.pid)
+	}
+}
 
 func TestTemplateManagerRejectsPrimaryClusterBeforeDDL(t *testing.T) {
 	primaryDSN := os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN")
@@ -310,6 +359,106 @@ func TestTemplateManagerReconcilesUnknownCreateAndDrop(t *testing.T) {
 	}
 }
 
+func TestTemplateManagerReconcilesUnknownOwnerRoleCreateAndDrop(t *testing.T) {
+	var createInjected bool
+	var demoteInjected bool
+	var dropInjected bool
+	var droppedRole string
+	manager := currentTemplateManagerWithRoleHook(
+		t,
+		nil,
+		func(operation, roleName string) error {
+			switch operation {
+			case "create-template-owner":
+				if !createInjected {
+					createInjected = true
+					return context.Canceled
+				}
+			case "demote-template-owner":
+				if !demoteInjected {
+					demoteInjected = true
+					return context.Canceled
+				}
+			case "drop-template-owner":
+				if !dropInjected {
+					dropInjected = true
+					droppedRole = roleName
+					return context.Canceled
+				}
+			}
+			return nil
+		},
+	)
+	clone, err := manager.Clone(context.Background(), "unknown-owner-outcome")
+	if err != nil {
+		t.Fatalf("reconcile committed owner role DDL and clone: %v", err)
+	}
+	if err := clone.Close(context.Background()); err != nil {
+		t.Fatalf("close clone after owner role reconciliation: %v", err)
+	}
+	if err := manager.Close(context.Background()); err != nil {
+		t.Fatalf("close manager after owner role reconciliation: %v", err)
+	}
+	if !createInjected || !demoteInjected || !dropInjected || !strings.HasPrefix(droppedRole, "platformgo_tpl_owner_") {
+		t.Fatalf("owner role fault hooks = create %t demote %t drop %t role %q, want exact owner drop", createInjected, demoteInjected, dropInjected, droppedRole)
+	}
+}
+
+func TestTemplateManagerRejectsOwnerMembershipDrift(t *testing.T) {
+	primaryDSN := os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN")
+	templateDSN := os.Getenv("PLATFORMGO_TEST_POSTGRES_TEMPLATE_DSN")
+	if primaryDSN == "" || templateDSN == "" {
+		t.Skip("both PostgreSQL test DSNs are required")
+	}
+	t.Setenv(
+		postgresfixture.TemplateDatabaseAuthorizationEnv,
+		postgresfixture.TemplateDatabaseAuthorizationValue,
+	)
+	root := poolForDSN(t, templateDSN)
+	manager, err := postgresfixture.NewTemplateDatabaseManagerPhased(
+		context.Background(),
+		postgresfixture.TemplateDatabaseConfig{
+			PrimaryDSN:  primaryDSN,
+			TemplateDSN: templateDSN,
+			Caller:      postgresfixture.TemplateCallerCurrentStore,
+			Profile:     postgresfixture.TemplateProfileCurrent,
+			Migrations:  currentMigrationFS(),
+			AfterRoleDDL: func(operation, roleName string) error {
+				if operation != "demote-template-owner" {
+					return nil
+				}
+				_, grantErr := root.Exec(
+					context.Background(),
+					"GRANT platformgo_api TO "+pgx.Identifier{roleName}.Sanitize(),
+				)
+				return grantErr
+			},
+		},
+		func(ctx context.Context, pool *pgxpool.Pool, phase postgresfixture.TemplateBuildPhase) error {
+			if phase == postgresfixture.TemplateBuildPhasePreDemotion {
+				if err := postgresfixture.ResetDurableSchemas(ctx, pool); err != nil {
+					return err
+				}
+				if err := postgresfixture.ProvisionRuntimeRoles(ctx, pool); err != nil {
+					return err
+				}
+				return newCurrentTestMigrator(t, pool, migrationFilesThrough(t, runtimeAuthorityACLMigration)).Migrate(ctx)
+			}
+			return nil
+		},
+	)
+	if manager != nil {
+		_ = manager.Close(context.Background())
+		t.Fatal("owner membership drift unexpectedly produced a template manager")
+	}
+	if !errors.Is(err, postgresfixture.ErrTemplateRoleDrift) {
+		t.Fatalf("owner membership drift error = %v, want ErrTemplateRoleDrift", err)
+	}
+	if after := databaseInventory(t, templateDSN); len(after) != 4 {
+		t.Fatalf("database inventory after owner-membership rejection = %v, want pristine four databases", after)
+	}
+}
+
 func TestTemplateManagerFailsClosedOnForeignRoleDrift(t *testing.T) {
 	manager := currentTemplateManager(t, nil)
 	root := poolForDSN(t, os.Getenv("PLATFORMGO_TEST_POSTGRES_TEMPLATE_DSN"))
@@ -353,8 +502,160 @@ func TestTemplateManagerRefusesDropWithActiveSessions(t *testing.T) {
 		t.Fatal("DROP with an active clone session unexpectedly succeeded")
 	}
 	pool.Close()
+	if err := clone.Close(context.Background()); err != nil {
+		t.Fatalf("retry clone close after active session drained: %v", err)
+	}
 	if err := manager.Close(context.Background()); err != nil {
 		t.Fatalf("manager cleanup after session drain: %v", err)
+	}
+}
+
+func TestTemplateManagerCloseRetriesAfterActiveCloneSession(t *testing.T) {
+	manager := currentTemplateManager(t, nil)
+	clone, err := manager.Clone(context.Background(), "manager-close-retry")
+	if err != nil {
+		t.Fatalf("clone: %v", err)
+	}
+	clonePool := clonePool(t, clone)
+	closeCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := manager.Close(closeCtx); err == nil {
+		t.Fatal("manager.Close with an active clone session unexpectedly succeeded")
+	}
+
+	// The failed close must retain the advisory-lock holder and a usable root
+	// connection so a later retry can reconcile and finish the same teardown.
+	root := poolForDSN(t, os.Getenv("PLATFORMGO_TEST_POSTGRES_TEMPLATE_DSN"))
+	var currentDatabase string
+	if err := root.QueryRow(context.Background(), "SELECT current_database()").Scan(&currentDatabase); err != nil {
+		t.Fatalf("root usability after failed manager.Close: %v", err)
+	}
+	if currentDatabase != postgresfixture.TemplateRootDatabase {
+		t.Fatalf("root database after failed manager.Close = %q, want %q", currentDatabase, postgresfixture.TemplateRootDatabase)
+	}
+	connection, err := root.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire advisory probe connection: %v", err)
+	}
+	var fenceAvailable bool
+	if err := connection.QueryRow(context.Background(), `SELECT pg_try_advisory_lock($1)`, templateAdvisoryLockKey).Scan(&fenceAvailable); err != nil {
+		connection.Release()
+		t.Fatalf("probe template advisory fence after failed manager.Close: %v", err)
+	}
+	if fenceAvailable {
+		_, _ = connection.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, templateAdvisoryLockKey)
+		connection.Release()
+		t.Fatal("template advisory fence was released after failed manager.Close")
+	}
+	connection.Release()
+
+	clonePool.Close()
+	if err := manager.Close(context.Background()); err != nil {
+		t.Fatalf("retry manager.Close after active clone session drained: %v", err)
+	}
+	if databases := databaseInventory(t, os.Getenv("PLATFORMGO_TEST_POSTGRES_TEMPLATE_DSN")); fmt.Sprint(databases) != fmt.Sprint([]string{
+		postgresfixture.TemplateRootDatabase,
+		"postgres",
+		"template0",
+		"template1",
+	}) {
+		t.Fatalf("database inventory after manager.Close retry = %v, want pristine cluster", databases)
+	}
+	roles := roleInventory(t, root)
+	for _, role := range roles {
+		if strings.HasPrefix(role, "platformgo_tpl_owner_") || containsString(runtimeRoleNamesForTest(), role) {
+			t.Fatalf("managed role %q remains after manager.Close retry: %v", role, roles)
+		}
+	}
+	connection, err = root.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire post-close advisory probe connection: %v", err)
+	}
+	if err := connection.QueryRow(context.Background(), `SELECT pg_try_advisory_lock($1)`, templateAdvisoryLockKey).Scan(&fenceAvailable); err != nil {
+		connection.Release()
+		t.Fatalf("probe template advisory fence after successful manager.Close: %v", err)
+	}
+	if !fenceAvailable {
+		connection.Release()
+		t.Fatal("template advisory fence remains held after successful manager.Close")
+	}
+	if _, err := connection.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, templateAdvisoryLockKey); err != nil {
+		connection.Release()
+		t.Fatalf("release post-close advisory probe lock: %v", err)
+	}
+	connection.Release()
+}
+
+func TestTemplateManagerCloseRetriesAfterBlockedCatalogQuery(t *testing.T) {
+	manager := currentTemplateManager(t, nil)
+	templateDSN := os.Getenv("PLATFORMGO_TEST_POSTGRES_TEMPLATE_DSN")
+	root := poolForDSN(t, templateDSN)
+	holder := templateAdvisoryLockSessionForTest(t, root)
+	blockerPool := poolForDSN(t, templateDSN)
+	blocker, err := blockerPool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin catalog blocker: %v", err)
+	}
+	defer func() { _ = blocker.Rollback(context.Background()) }()
+	if _, err := blocker.Exec(context.Background(), `LOCK TABLE pg_catalog.pg_database IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("lock catalog database relation: %v", err)
+	}
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	if err := manager.Close(closeCtx); err == nil {
+		t.Fatal("manager.Close with a blocked catalog query unexpectedly succeeded")
+	} else if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("blocked catalog manager.Close error = %v, want bounded context failure", err)
+	}
+
+	var currentDatabase string
+	if err := root.QueryRow(context.Background(), "SELECT current_database()").Scan(&currentDatabase); err != nil {
+		t.Fatalf("inspection/root usability after blocked catalog failure: %v", err)
+	}
+	if currentDatabase != postgresfixture.TemplateRootDatabase {
+		t.Fatalf("root database after blocked catalog failure = %q, want %q", currentDatabase, postgresfixture.TemplateRootDatabase)
+	}
+	assertTemplateAdvisoryLockHeldBy(t, root, holder)
+	probe, err := root.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire blocked catalog advisory probe: %v", err)
+	}
+	var fenceAvailable bool
+	if err := probe.QueryRow(context.Background(), `SELECT pg_try_advisory_lock(5784684937417086513)`).Scan(&fenceAvailable); err != nil {
+		probe.Release()
+		t.Fatalf("probe advisory fence after blocked catalog failure: %v", err)
+	}
+	probe.Release()
+	if fenceAvailable {
+		t.Fatal("template advisory fence was released after blocked catalog Close failure")
+	}
+
+	if err := blocker.Rollback(context.Background()); err != nil {
+		t.Fatalf("release catalog blocker: %v", err)
+	}
+	if err := manager.Close(context.Background()); err != nil {
+		t.Fatalf("retry manager.Close after catalog blocker release: %v", err)
+	}
+	if databases := databaseInventory(t, templateDSN); fmt.Sprint(databases) != fmt.Sprint([]string{
+		postgresfixture.TemplateRootDatabase,
+		"postgres",
+		"template0",
+		"template1",
+	}) {
+		t.Fatalf("database inventory after blocked catalog Close retry = %v, want pristine cluster", databases)
+	}
+}
+
+func runtimeRoleNamesForTest() []string {
+	return []string{
+		"platformgo_admin_bootstrap",
+		"platformgo_api",
+		"platformgo_engine",
+		"platformgo_outbox",
+		"platformgo_projector",
+		"platformgo_realtime",
+		"platformgo_realtime_repair",
 	}
 }
 
@@ -376,6 +677,14 @@ func currentTemplateManager(
 	t *testing.T,
 	afterDDL func(operation, databaseName string) error,
 ) *postgresfixture.TemplateDatabaseManager {
+	return currentTemplateManagerWithRoleHook(t, afterDDL, nil)
+}
+
+func currentTemplateManagerWithRoleHook(
+	t *testing.T,
+	afterDDL func(operation, databaseName string) error,
+	afterRoleDDL func(operation, roleName string) error,
+) *postgresfixture.TemplateDatabaseManager {
 	t.Helper()
 	primaryDSN := os.Getenv("PLATFORMGO_TEST_POSTGRES_DSN")
 	templateDSN := os.Getenv("PLATFORMGO_TEST_POSTGRES_TEMPLATE_DSN")
@@ -386,24 +695,29 @@ func currentTemplateManager(
 		postgresfixture.TemplateDatabaseAuthorizationEnv,
 		postgresfixture.TemplateDatabaseAuthorizationValue,
 	)
-	manager, err := postgresfixture.NewTemplateDatabaseManager(
+	manager, err := postgresfixture.NewTemplateDatabaseManagerPhased(
 		context.Background(),
 		postgresfixture.TemplateDatabaseConfig{
-			PrimaryDSN:  primaryDSN,
-			TemplateDSN: templateDSN,
-			Caller:      postgresfixture.TemplateCallerCurrentStore,
-			Profile:     postgresfixture.TemplateProfileCurrent,
-			Migrations:  currentMigrationFS(),
-			AfterDDL:    afterDDL,
+			PrimaryDSN:   primaryDSN,
+			TemplateDSN:  templateDSN,
+			Caller:       postgresfixture.TemplateCallerCurrentStore,
+			Profile:      postgresfixture.TemplateProfileCurrent,
+			Migrations:   currentMigrationFS(),
+			AfterDDL:     afterDDL,
+			AfterRoleDDL: afterRoleDDL,
 		},
-		func(ctx context.Context, pool *pgxpool.Pool) error {
-			if err := postgresfixture.ResetDurableSchemas(ctx, pool); err != nil {
-				return err
+		func(ctx context.Context, pool *pgxpool.Pool, phase postgresfixture.TemplateBuildPhase) error {
+			if phase == postgresfixture.TemplateBuildPhasePreDemotion {
+				if err := postgresfixture.ResetDurableSchemas(ctx, pool); err != nil {
+					return err
+				}
+				if err := postgresfixture.ProvisionRuntimeRoles(ctx, pool); err != nil {
+					return err
+				}
+				migrator := newCurrentTestMigrator(t, pool, migrationFilesThrough(t, runtimeAuthorityACLMigration))
+				return migrator.Migrate(ctx)
 			}
-			if err := postgresfixture.ProvisionRuntimeRoles(ctx, pool); err != nil {
-				return err
-			}
-			migrator := newCurrentTestMigrator(t, pool, currentMigrationFS())
+			migrator := newExactCurrentTestMigrator(t, pool, currentMigrationFS())
 			if err := migrator.Migrate(ctx); err != nil {
 				return err
 			}
