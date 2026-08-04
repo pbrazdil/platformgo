@@ -1489,7 +1489,14 @@ func (store *CompatibilityStore) PredictionMarkets(
 				Legs:              make([]edge.PredictionLegView, 0, 1),
 			}
 			if resolutionTime != nil {
-				formatted := formatPredictionRFC3339(*resolutionTime)
+				formatted, err := formatPredictionRFC3339(*resolutionTime)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"scan prediction market %q resolution time: %w",
+						marketID,
+						err,
+					)
+				}
 				view.ResolutionTime = &formatted
 			}
 			if eventID != nil {
@@ -1522,25 +1529,47 @@ func (store *CompatibilityStore) PredictionMarkets(
 // formatPredictionRFC3339 mirrors chrono 0.4.45 DateTime::to_rfc3339:
 // UTC is rendered with an explicit +00:00 offset and AutoSi chooses the
 // shortest fractional precision that preserves the timestamp (seconds,
-// milliseconds, microseconds, or nanoseconds).
-func formatPredictionRFC3339(value time.Time) string {
+// milliseconds, microseconds, or nanoseconds). Chrono's NaiveDate range is
+// narrower than Go's time.Time range, so values outside it fail closed.
+func formatPredictionRFC3339(value time.Time) (string, error) {
 	value = value.UTC()
 	const (
-		secondsLayout      = "2006-01-02T15:04:05-07:00"
-		millisecondsLayout = "2006-01-02T15:04:05.000-07:00"
-		microsecondsLayout = "2006-01-02T15:04:05.000000-07:00"
-		nanosecondsLayout  = "2006-01-02T15:04:05.000000000-07:00"
+		chronoMinYear = -262143
+		chronoMaxYear = 262142
 	)
+	year := value.Year()
+	if year < chronoMinYear || year > chronoMaxYear {
+		return "", fmt.Errorf(
+			"year %d is outside Chrono representable range [%d,%d]",
+			year,
+			chronoMinYear,
+			chronoMaxYear,
+		)
+	}
+	yearText := fmt.Sprintf("%04d", year)
+	if year < 0 || year > 9999 {
+		yearText = fmt.Sprintf("%+05d", year)
+	}
+	fraction := ""
 	switch nanos := value.Nanosecond(); {
 	case nanos == 0:
-		return value.Format(secondsLayout)
 	case nanos%1_000_000 == 0:
-		return value.Format(millisecondsLayout)
+		fraction = fmt.Sprintf(".%03d", nanos/1_000_000)
 	case nanos%1_000 == 0:
-		return value.Format(microsecondsLayout)
+		fraction = fmt.Sprintf(".%06d", nanos/1_000)
 	default:
-		return value.Format(nanosecondsLayout)
+		fraction = fmt.Sprintf(".%09d", nanos)
 	}
+	return fmt.Sprintf(
+		"%s-%02d-%02dT%02d:%02d:%02d%s+00:00",
+		yearText,
+		value.Month(),
+		value.Day(),
+		value.Hour(),
+		value.Minute(),
+		value.Second(),
+		fraction,
+	), nil
 }
 
 func validatePredictionIncrement(

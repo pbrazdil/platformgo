@@ -383,9 +383,29 @@ func TestPostgresPredictionMarketsRustChronoTimestampGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal prediction timestamp golden: %v", err)
 	}
-	want := `[{"sourceVenue":"polymarket","marketKey":"chrono-rfc3339-seconds","question":"Chrono seconds","resolutionTime":"2099-01-01T00:00:00+00:00","mutuallyExclusive":false,"status":"open","event":{"eventKey":"chrono-event","title":"Chrono event","status":"open"},"legs":[{"symbol":"CHRONO-PREDICTION-SECONDS","displayName":"CHRONO-PREDICTION-SECONDS","outcomeIndex":0,"outcomeLabel":"Seconds","priceIncrement":"0.01","sizeIncrement":"1"}]},{"sourceVenue":"polymarket","marketKey":"chrono-rfc3339-millis","question":"Chrono milliseconds","resolutionTime":"2099-01-01T00:00:00.123+00:00","mutuallyExclusive":false,"status":"open","legs":[{"symbol":"CHRONO-PREDICTION-MILLIS","displayName":"CHRONO-PREDICTION-MILLIS","outcomeIndex":0,"outcomeLabel":"Milliseconds","priceIncrement":"0.01","sizeIncrement":"1"}]},{"sourceVenue":"polymarket","marketKey":"chrono-rfc3339-micros","question":"Chrono microseconds","resolutionTime":"2099-01-01T00:00:00.000100+00:00","mutuallyExclusive":false,"status":"open","legs":[{"symbol":"CHRONO-PREDICTION-MICROS","displayName":"CHRONO-PREDICTION-MICROS","outcomeIndex":0,"outcomeLabel":"Microseconds","priceIncrement":"0.01","sizeIncrement":"1"}]},{"sourceVenue":"polymarket","marketKey":"chrono-rfc3339-absent","question":"Chrono absent resolution","mutuallyExclusive":false,"status":"open","legs":[{"symbol":"CHRONO-PREDICTION-ABSENT","displayName":"CHRONO-PREDICTION-ABSENT","outcomeIndex":0,"outcomeLabel":"Absent","priceIncrement":"0.01","sizeIncrement":"1"}]}]`
+	want := `[{"sourceVenue":"polymarket","marketKey":"chrono-rfc3339-year-10000","question":"Chrono year 10000","resolutionTime":"+10000-01-01T00:00:00+00:00","mutuallyExclusive":false,"status":"open","legs":[{"symbol":"CHRONO-PREDICTION-YEAR-10000","displayName":"CHRONO-PREDICTION-YEAR-10000","outcomeIndex":0,"outcomeLabel":"Year 10000","priceIncrement":"0.01","sizeIncrement":"1"}]},{"sourceVenue":"polymarket","marketKey":"chrono-rfc3339-seconds","question":"Chrono seconds","resolutionTime":"2099-01-01T00:00:00+00:00","mutuallyExclusive":false,"status":"open","event":{"eventKey":"chrono-event","title":"Chrono event","status":"open"},"legs":[{"symbol":"CHRONO-PREDICTION-SECONDS","displayName":"CHRONO-PREDICTION-SECONDS","outcomeIndex":0,"outcomeLabel":"Seconds","priceIncrement":"0.01","sizeIncrement":"1"}]},{"sourceVenue":"polymarket","marketKey":"chrono-rfc3339-millis","question":"Chrono milliseconds","resolutionTime":"2099-01-01T00:00:00.123+00:00","mutuallyExclusive":false,"status":"open","legs":[{"symbol":"CHRONO-PREDICTION-MILLIS","displayName":"CHRONO-PREDICTION-MILLIS","outcomeIndex":0,"outcomeLabel":"Milliseconds","priceIncrement":"0.01","sizeIncrement":"1"}]},{"sourceVenue":"polymarket","marketKey":"chrono-rfc3339-micros","question":"Chrono microseconds","resolutionTime":"2099-01-01T00:00:00.000100+00:00","mutuallyExclusive":false,"status":"open","legs":[{"symbol":"CHRONO-PREDICTION-MICROS","displayName":"CHRONO-PREDICTION-MICROS","outcomeIndex":0,"outcomeLabel":"Microseconds","priceIncrement":"0.01","sizeIncrement":"1"}]},{"sourceVenue":"polymarket","marketKey":"chrono-rfc3339-absent","question":"Chrono absent resolution","mutuallyExclusive":false,"status":"open","legs":[{"symbol":"CHRONO-PREDICTION-ABSENT","displayName":"CHRONO-PREDICTION-ABSENT","outcomeIndex":0,"outcomeLabel":"Absent","priceIncrement":"0.01","sizeIncrement":"1"}]}]`
 	if !bytes.Equal(got, []byte(want)) {
 		t.Fatalf("prediction timestamp golden mismatch:\nwant %s\n got %s", want, got)
+	}
+}
+
+// PostgreSQL accepts years outside Chrono's NaiveDate range. The reader must
+// reject such a row and discard an earlier valid prefix rather than exposing
+// a partially assembled catalog.
+func TestPostgresPredictionMarketsFailClosedOnChronoOutOfRangeResolutionTime(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	pool := currentStorePool(t)
+	seedPredictionPublicCatalog(t, pool)
+	seedPredictionOutOfChronoRangeTimestamp(t, pool)
+
+	markets, err := platformpostgres.NewCompatibilityStore(pool).PredictionMarkets(ctx)
+	if err == nil {
+		t.Fatalf("out-of-Chrono-range prediction market unexpectedly succeeded: %#v", markets)
+	}
+	if markets != nil {
+		t.Fatalf("out-of-Chrono-range prediction market returned valid prefix: %#v", markets)
 	}
 }
 
@@ -932,6 +952,7 @@ func seedPredictionTimestampGoldenCatalog(t *testing.T, pool *pgxpool.Pool) {
 			initial_margin_rate, maintenance_margin_rate, max_leverage,
 			maker_fee_rate, taker_fee_rate
 		) VALUES
+			('CHRONO-PREDICTION-YEAR-10000', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0),
 			('CHRONO-PREDICTION-SECONDS', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0),
 			('CHRONO-PREDICTION-MILLIS', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0),
 			('CHRONO-PREDICTION-MICROS', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0),
@@ -951,6 +972,13 @@ func seedPredictionTimestampGoldenCatalog(t *testing.T, pool *pgxpool.Pool) {
 			mutually_exclusive, status, event_id, stage_label, stage_ordinal,
 			created_at, updated_at
 		) VALUES
+			(
+				'00000000-0000-0000-0000-000000000066', 'polymarket',
+				'chrono-rfc3339-year-10000', 'Chrono year 10000',
+				'10000-01-01T00:00:00Z', false, 'open',
+				NULL, NULL, NULL,
+				'2098-08-01T00:00:04Z', '2098-08-01T00:00:04Z'
+			),
 			(
 				'00000000-0000-0000-0000-000000000062', 'polymarket',
 				'chrono-rfc3339-seconds', 'Chrono seconds',
@@ -984,6 +1012,9 @@ func seedPredictionTimestampGoldenCatalog(t *testing.T, pool *pgxpool.Pool) {
 			instrument_id, market_id, display_name, outcome_index,
 			outcome_label, enabled
 		) VALUES
+			('CHRONO-PREDICTION-YEAR-10000',
+			 '00000000-0000-0000-0000-000000000066',
+			 'CHRONO-PREDICTION-YEAR-10000', 0, 'Year 10000', true),
 			('CHRONO-PREDICTION-SECONDS',
 			 '00000000-0000-0000-0000-000000000062',
 			 'CHRONO-PREDICTION-SECONDS', 0, 'Seconds', true),
@@ -998,6 +1029,43 @@ func seedPredictionTimestampGoldenCatalog(t *testing.T, pool *pgxpool.Pool) {
 			 'CHRONO-PREDICTION-ABSENT', 0, 'Absent', true)
 	`); err != nil {
 		t.Fatalf("seed prediction timestamp golden catalog: %v", err)
+	}
+}
+
+func seedPredictionOutOfChronoRangeTimestamp(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'CHRONO-PREDICTION-OUT-OF-RANGE', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0
+		);
+
+		INSERT INTO trading.prediction_markets (
+			market_id, source_venue, market_key, question, resolution_time,
+			mutually_exclusive, status, event_id, stage_label, stage_ordinal,
+			created_at, updated_at
+		) VALUES (
+			'00000000-0000-0000-0000-000000000067', 'polymarket',
+			'chrono-rfc3339-out-of-range', 'Chrono out of range',
+			'262143-01-01T00:00:00Z', false, 'open', NULL, NULL, 1,
+			'2098-01-01T00:00:03Z', '2098-01-01T00:00:03Z'
+		);
+
+		INSERT INTO trading.prediction_legs (
+			instrument_id, market_id, display_name, outcome_index,
+			outcome_label, enabled
+		) VALUES (
+			'CHRONO-PREDICTION-OUT-OF-RANGE',
+			'00000000-0000-0000-0000-000000000067',
+			'CHRONO-PREDICTION-OUT-OF-RANGE', 0, 'Out of range', true
+		)
+	`); err != nil {
+		t.Fatalf("seed out-of-Chrono-range prediction timestamp: %v", err)
 	}
 }
 
