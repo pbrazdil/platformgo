@@ -692,14 +692,18 @@ catalog rows and no population writer; discovery/import and production
 population remain separate Phase 3 operations and this implemented read does not
 claim them.
 
-The prediction-catalog candidate is focused-green on PostgreSQL 19 Beta 2.
-Migration 44, its exact demoted-owner catalog/ACL/recovery suite, and all
-`TestPostgresPrediction*` cases pass on a fresh canonical cluster. The
-two-cluster current-tip lane also passes fixture unit and race tests, focused
-harness race/shuffle repeats, selected exact-current store and prediction
-tests, and cross-process advisory-fence serialization. Independent migration
-and template-harness reviews report no remaining P0-P2 finding. Full
-stable-candidate gates and exact-SHA release review remain pending.
+The prediction-catalog implementation candidate is fully green locally.
+Policy, format, lint, complete tests, race, deterministic repeat, and
+vulnerability gates pass. PostgreSQL 19 Beta 2 qualification covers the exact
+demoted-owner migration/catalog/ACL/recovery suite, Chrono-compatible extended
+timestamp years and fail-closed bounds, every `TestPostgresPrediction*` case,
+the two-cluster exact-current template lane with race/shuffle and cross-process
+serialization, and the complete legacy split on a fresh isolated cluster.
+Exact-SHA migration and determinism reviews report no P0-P1 or P3 finding; the
+migration review records only that acknowledgement loss is synthetically
+modeled rather than injected at the transport's `COMMIT` reply. Independent
+exact-SHA release review and the separate protected port-ledger acceptance
+remain pending.
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,
