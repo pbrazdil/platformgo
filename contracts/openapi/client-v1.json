@@ -694,6 +694,127 @@
         ],
         "type": "object"
       },
+      "PredictionEventView": {
+        "properties": {
+          "eventKey": {
+            "type": "string"
+          },
+          "series": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "closed",
+              "resolved",
+              "settled"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "eventKey",
+          "title",
+          "status"
+        ],
+        "type": "object"
+      },
+      "PredictionLegView": {
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "outcomeIndex": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "outcomeLabel": {
+            "type": "string"
+          },
+          "priceIncrement": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "sizeIncrement": {
+            "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "displayName",
+          "outcomeIndex",
+          "outcomeLabel",
+          "priceIncrement",
+          "sizeIncrement"
+        ],
+        "type": "object"
+      },
+      "PredictionMarketView": {
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/PredictionEventView"
+          },
+          "legs": {
+            "items": {
+              "$ref": "#/components/schemas/PredictionLegView"
+            },
+            "type": "array"
+          },
+          "marketKey": {
+            "type": "string"
+          },
+          "mutuallyExclusive": {
+            "type": "boolean"
+          },
+          "question": {
+            "type": "string"
+          },
+          "resolutionTime": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "sourceVenue": {
+            "enum": [
+              "hyperliquid",
+              "polymarket",
+              "kalshi"
+            ],
+            "type": "string"
+          },
+          "stageLabel": {
+            "type": "string"
+          },
+          "stageOrdinal": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "closed",
+              "resolved",
+              "settled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "sourceVenue",
+          "marketKey",
+          "question",
+          "mutuallyExclusive",
+          "status",
+          "legs"
+        ],
+        "type": "object"
+      },
       "RealtimeToken": {
         "properties": {
           "channels": {
@@ -1964,11 +2085,31 @@
       "get": {
         "operationId": "get_v1_prediction-markets",
         "responses": {
-          "default": {
-            "description": "Frozen source route inventory only; exact behavior is governed by accepted contract tests"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PredictionMarketView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Dependency unavailable"
           }
         },
-        "x-platformgo-contract-status": "source-route-inventory"
+        "x-platformgo-contract-status": "phase3-accepted-runtime"
       }
     }
   },

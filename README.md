@@ -11,7 +11,7 @@ exact deployed build.
 
 ## Current status
 
-Last updated: 2026-08-02
+Last updated: 2026-08-04
 
 Current delivery stage: **Phase 3 — compatibility edges, in progress**.
 
@@ -677,6 +677,29 @@ evidence does not claim venue freshness, source-sequence gap recovery, or
 authoritative snapshot reload;
 those fail-closed Hyperliquid lifecycle controls remain Phase 4 work.
 
+The public prediction-market catalog is the next implemented HTTP candidate;
+its protected port-ledger acceptance remains a separate review. Forward
+migration 44 adds the event, market, and enabled-leg read model as the exact
+predecessor owner after demotion to `NOSUPERUSER`, under a cooperating global
+maintenance fence and the existing shard-order boundary.
+It validates the frozen tip-43 journal, ownership, ACL, index/TOAST, runtime
+membership, and terminal-bootstrap function graph before additive DDL. The
+public `GET /v1/prediction-markets` route reads one deterministic PostgreSQL
+snapshot, nests enabled definitions without live prices, preserves exact
+increments and optional-field omission, returns `[]` for an empty catalog, and
+fails the whole response closed with an opaque `503`. The migration creates no
+catalog rows and no population writer; discovery/import and production
+population remain separate Phase 3 operations and this implemented read does not
+claim them.
+
+The prediction-catalog candidate is focused-green on PostgreSQL 19 Beta 2.
+Migration 44, its exact demoted-owner catalog/ACL/recovery suite, and all
+`TestPostgresPrediction*` cases pass on a fresh canonical cluster. The
+two-cluster current-tip lane also passes fixture unit and race tests, focused
+harness race/shuffle repeats, selected exact-current store and prediction
+tests, and cross-process advisory-fence serialization. Independent migration
+and template-harness reviews report no remaining P0-P2 finding. Full
+stable-candidate gates and exact-SHA release review remain pending.
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,

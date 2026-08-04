@@ -388,16 +388,17 @@ func serve(
 		return err
 	}
 	httpEdge := edge.NewServer(edge.ServerConfig{
-		Authenticator:  authenticator,
-		Commands:       submission,
-		Realtime:       realtime,
-		Identity:       identityService,
-		Trading:        compatibilityStore,
-		BrokerAccount:  compatibilityStore,
-		BrokerAccounts: compatibilityStore,
-		BrokerFills:    compatibilityStore,
-		BrokerFunding:  compatibilityStore,
-		BrokerBalances: compatibilityStore,
+		Authenticator:     authenticator,
+		Commands:          submission,
+		Realtime:          realtime,
+		Identity:          identityService,
+		PredictionMarkets: compatibilityStore,
+		Trading:           compatibilityStore,
+		BrokerAccount:     compatibilityStore,
+		BrokerAccounts:    compatibilityStore,
+		BrokerFills:       compatibilityStore,
+		BrokerFunding:     compatibilityStore,
+		BrokerBalances:    compatibilityStore,
 		Readiness: []edge.HealthCheck{
 			{Name: "postgres", Check: postgresReady},
 			{Name: "redis", Check: realtime.Healthy},

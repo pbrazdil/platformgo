@@ -314,6 +314,115 @@ func TestPostgresPredictionMarketsFailClosedOnCorruptOutcomeMetadata(t *testing.
 //	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
 //	source: apps/app/tests/it/catalog/e2e_prediction_trader.rs:60
 //	test: prediction_public_list_nests_legs_under_market_and_event
+//	implementation source: apps/app/src/core/markets/queries/prediction.rs:26-93
+//	function: PredictionMarketsHandler::handle
+//
+// Stage metadata is part of the public DTO. A corrupt negative ordinal or
+// empty non-null label must fail the complete PostgreSQL read, including when
+// a valid market was inserted earlier in the same disposable database.
+func TestPostgresPredictionMarketsFailClosedOnCorruptStageMetadata(t *testing.T) {
+	tests := []struct {
+		name       string
+		constraint string
+	}{
+		{
+			name:       "negative stage ordinal",
+			constraint: "prediction_markets_stage_ordinal_check",
+		},
+		{
+			name:       "empty non-null stage label",
+			constraint: "prediction_markets_stage_label_check",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := currentStorePool(t)
+			relaxPredictionStageMetadataConstraint(t, pool, test.constraint)
+			seedPredictionStageMetadataRows(t, pool, test.name)
+
+			markets, err := platformpostgres.NewCompatibilityStore(pool).PredictionMarkets(ctx)
+			if err == nil {
+				t.Fatalf("corrupt stage metadata unexpectedly succeeded: %#v", markets)
+			}
+			if markets != nil {
+				t.Fatalf("corrupt stage metadata returned valid prefix: %#v", markets)
+			}
+		})
+	}
+}
+
+// Deterministic strengthening for:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/catalog/e2e_prediction_trader.rs:60
+//	test: prediction_public_list_nests_legs_under_market_and_event
+//	implementation source: apps/app/src/core/markets/queries/prediction.rs:26-93
+//	function: PredictionMarketsHandler::handle
+//
+// Chrono provenance for the pinned formatter contract:
+//   - .sources/platform/Cargo.lock:2127-2138 resolves chrono 0.4.45.
+//   - chrono-0.4.45/src/datetime/mod.rs:634-640 implements
+//     DateTime::to_rfc3339 with SecondsFormat::AutoSi and use_z=false.
+//   - chrono-0.4.45/src/format/formatting.rs:544-558 defines AutoSi as
+//     no fraction for zero, three digits for milliseconds, and six digits for
+//     microseconds.
+//
+// The exact JSON freezes the Rust DTO declaration order, omission of absent
+// optional fields, and the UTC +00:00 (rather than Z) timestamp spelling.
+func TestPostgresPredictionMarketsRustChronoTimestampGolden(t *testing.T) {
+	ctx := context.Background()
+	pool := currentStorePool(t)
+	seedPredictionTimestampGoldenCatalog(t, pool)
+
+	markets, err := platformpostgres.NewCompatibilityStore(pool).PredictionMarkets(ctx)
+	if err != nil {
+		t.Fatalf("read prediction timestamp golden: %v", err)
+	}
+	got, err := json.Marshal(markets)
+	if err != nil {
+		t.Fatalf("marshal prediction timestamp golden: %v", err)
+	}
+	want := `[{"sourceVenue":"polymarket","marketKey":"chrono-rfc3339-seconds","question":"Chrono seconds","resolutionTime":"2099-01-01T00:00:00+00:00","mutuallyExclusive":false,"status":"open","event":{"eventKey":"chrono-event","title":"Chrono event","status":"open"},"legs":[{"symbol":"CHRONO-PREDICTION-SECONDS","displayName":"CHRONO-PREDICTION-SECONDS","outcomeIndex":0,"outcomeLabel":"Seconds","priceIncrement":"0.01","sizeIncrement":"1"}]},{"sourceVenue":"polymarket","marketKey":"chrono-rfc3339-millis","question":"Chrono milliseconds","resolutionTime":"2099-01-01T00:00:00.123+00:00","mutuallyExclusive":false,"status":"open","legs":[{"symbol":"CHRONO-PREDICTION-MILLIS","displayName":"CHRONO-PREDICTION-MILLIS","outcomeIndex":0,"outcomeLabel":"Milliseconds","priceIncrement":"0.01","sizeIncrement":"1"}]},{"sourceVenue":"polymarket","marketKey":"chrono-rfc3339-micros","question":"Chrono microseconds","resolutionTime":"2099-01-01T00:00:00.000100+00:00","mutuallyExclusive":false,"status":"open","legs":[{"symbol":"CHRONO-PREDICTION-MICROS","displayName":"CHRONO-PREDICTION-MICROS","outcomeIndex":0,"outcomeLabel":"Microseconds","priceIncrement":"0.01","sizeIncrement":"1"}]},{"sourceVenue":"polymarket","marketKey":"chrono-rfc3339-absent","question":"Chrono absent resolution","mutuallyExclusive":false,"status":"open","legs":[{"symbol":"CHRONO-PREDICTION-ABSENT","displayName":"CHRONO-PREDICTION-ABSENT","outcomeIndex":0,"outcomeLabel":"Absent","priceIncrement":"0.01","sizeIncrement":"1"}]}]`
+	if !bytes.Equal(got, []byte(want)) {
+		t.Fatalf("prediction timestamp golden mismatch:\nwant %s\n got %s", want, got)
+	}
+}
+
+// Deterministic strengthening for:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/catalog/e2e_prediction_trader.rs:192
+//	test: prediction_legs_surface_as_pure_definitions_without_live_price
+//	implementation source: apps/app/src/core/markets/queries/prediction.rs:44-63
+//	function: PredictionMarketsHandler::handle
+//
+// The pinned catalog contract permits the NUMERIC(38,18) boundary. This test
+// keeps the scale-18 increment exact and rejects any float-mediated formatting.
+func TestPostgresPredictionMarketsPreserveScale18ExactIncrement(t *testing.T) {
+	ctx := context.Background()
+	pool := currentStorePool(t)
+	seedPredictionScale18Catalog(t, pool)
+
+	markets, err := platformpostgres.NewCompatibilityStore(pool).PredictionMarkets(ctx)
+	if err != nil {
+		t.Fatalf("read scale-18 prediction market: %v", err)
+	}
+	if len(markets) != 1 || len(markets[0].Legs) != 1 {
+		t.Fatalf("scale-18 prediction markets = %#v", markets)
+	}
+	leg := markets[0].Legs[0]
+	const want = "0.000000000000000001"
+	if leg.PriceIncrement != want || leg.SizeIncrement != want {
+		t.Fatalf("scale-18 increments = %#v, want %q for both", leg, want)
+	}
+}
+
+// Deterministic strengthening for:
+//
+//	repository: upcomers-org/platform@50141367492be46ebf5623f6191a14b94af2f2bd
+//	source: apps/app/tests/it/catalog/e2e_prediction_trader.rs:60
+//	test: prediction_public_list_nests_legs_under_market_and_event
 //
 // A fixed PostgreSQL state must produce byte-identical DTO JSON across
 // repeated reads, including nested event and leg ordering.
@@ -343,12 +452,10 @@ func TestPostgresPredictionMarketsRepeatIdentically(t *testing.T) {
 	}
 }
 
-// Snapshot interleaving remains deferred to implementation-boundary review.
-// PredictionMarkets currently has no injectable transaction/connection hook
-// that can deterministically pause between its market, event, and leg reads;
-// a goroutine race or arbitrary sleep here would not prove a one-snapshot
-// guarantee. Once the production reader exposes its transaction boundary, add
-// a channel-coordinated before-or-after metadata toggle regression there.
+// Statement-snapshot note: PredictionMarkets reads markets, events, legs, and
+// instruments through one SQL statement, so PostgreSQL supplies one statement
+// snapshot. There is no multi-read interleaving test here; an artificial sleep
+// or goroutine would not prove a stronger guarantee.
 
 func predictionMarketByKey(
 	markets []edge.PredictionMarketView,
@@ -598,7 +705,7 @@ func dropPredictionOutcomeUniqueness(t *testing.T, pool *pgxpool.Pool) {
 			   AND c.contype IN ('p', 'u')
 			 GROUP BY c.oid, c.conname
 		  ) AS constraints
-		 WHERE constraint_columns = ARRAY['market_id', 'outcome_index']::text[]
+		 WHERE constraint_columns = ARRAY['market_id', 'outcome_index']::name[]
 		 ORDER BY constraint_name`)
 	if err != nil {
 		t.Fatalf("inspect prediction leg uniqueness: %v", err)
@@ -715,5 +822,217 @@ func seedPredictionCorruptLeg(t *testing.T, pool *pgxpool.Pool) {
 		)
 	`); err != nil {
 		t.Fatalf("seed corrupt prediction leg: %v", err)
+	}
+}
+
+// relaxPredictionStageMetadataConstraint drops one catalog check only on the
+// disposable database owned by the current test. Production migrations remain
+// unchanged; the dropped constraint is restored by currentStorePool's next
+// reset or clone.
+func relaxPredictionStageMetadataConstraint(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	constraintName string,
+) {
+	t.Helper()
+	switch constraintName {
+	case "prediction_markets_stage_label_check", "prediction_markets_stage_ordinal_check":
+	default:
+		t.Fatalf("unexpected prediction stage constraint %q", constraintName)
+	}
+	ctx := context.Background()
+	if _, err := pool.Exec(
+		ctx,
+		"ALTER TABLE trading.prediction_markets DROP CONSTRAINT "+
+			pgx.Identifier{constraintName}.Sanitize(),
+	); err != nil {
+		t.Fatalf("drop prediction stage constraint %q: %v", constraintName, err)
+	}
+}
+
+func seedPredictionStageMetadataRows(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	corruptionCase string,
+) {
+	t.Helper()
+	ctx := context.Background()
+	corruptStageLabel := ""
+	corruptStageOrdinal := 0
+	switch corruptionCase {
+	case "negative stage ordinal":
+		corruptStageLabel = "Round"
+		corruptStageOrdinal = -1
+	case "empty non-null stage label":
+		corruptStageOrdinal = 1
+	default:
+		t.Fatalf("unexpected prediction stage corruption case %q", corruptionCase)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES
+			('STAGE-METADATA-VALID', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0),
+			('STAGE-METADATA-CORRUPT', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0);
+
+		-- Insert a valid market first so a successful implementation cannot pass
+		-- vacuously without proving that a later corrupt row aborts the read.
+		INSERT INTO trading.prediction_markets (
+			market_id, source_venue, market_key, question, resolution_time,
+			mutually_exclusive, status, event_id, stage_label, stage_ordinal,
+			created_at, updated_at
+		) VALUES (
+			'00000000-0000-0000-0000-000000000071', 'polymarket',
+			'stage-metadata-valid', 'valid stage metadata', NULL, false, 'open',
+			NULL, NULL, 0, '2098-07-01T00:00:01Z', '2098-07-01T00:00:01Z'
+		)
+	`); err != nil {
+		t.Fatalf("seed valid prediction stage metadata: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.prediction_markets (
+			market_id, source_venue, market_key, question, resolution_time,
+			mutually_exclusive, status, event_id, stage_label, stage_ordinal,
+			created_at, updated_at
+		) VALUES (
+			'00000000-0000-0000-0000-000000000072', 'polymarket',
+			'stage-metadata-corrupt', 'corrupt stage metadata', NULL, false, 'open',
+			NULL, $1, $2,
+			'2098-07-01T00:00:02Z', '2098-07-01T00:00:02Z'
+		)
+	`, corruptStageLabel, corruptStageOrdinal); err != nil {
+		t.Fatalf("seed corrupt prediction stage market: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.prediction_legs (
+			instrument_id, market_id, display_name, outcome_index,
+			outcome_label, enabled
+		) VALUES
+			('STAGE-METADATA-VALID',
+			 '00000000-0000-0000-0000-000000000071',
+			 'STAGE-METADATA-VALID', 0, 'Valid', true),
+			('STAGE-METADATA-CORRUPT',
+			 '00000000-0000-0000-0000-000000000072',
+			 'STAGE-METADATA-CORRUPT', 0, 'Corrupt', true)
+	`); err != nil {
+		t.Fatalf("seed prediction stage metadata legs: %v", err)
+	}
+}
+
+func seedPredictionTimestampGoldenCatalog(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES
+			('CHRONO-PREDICTION-SECONDS', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0),
+			('CHRONO-PREDICTION-MILLIS', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0),
+			('CHRONO-PREDICTION-MICROS', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0),
+			('CHRONO-PREDICTION-ABSENT', 1, 2, 0, 'USDC', 6, 1, 1, 1, 0, 0);
+
+		INSERT INTO trading.prediction_events (
+			event_id, source_venue, event_key, title, series, status,
+			created_at, updated_at
+		) VALUES (
+			'00000000-0000-0000-0000-000000000061', 'polymarket',
+			'chrono-event', 'Chrono event', NULL, 'open',
+			'2098-08-01T00:00:00Z', '2098-08-01T00:00:00Z'
+		);
+
+		INSERT INTO trading.prediction_markets (
+			market_id, source_venue, market_key, question, resolution_time,
+			mutually_exclusive, status, event_id, stage_label, stage_ordinal,
+			created_at, updated_at
+		) VALUES
+			(
+				'00000000-0000-0000-0000-000000000062', 'polymarket',
+				'chrono-rfc3339-seconds', 'Chrono seconds',
+				'2099-01-01T00:00:00Z', false, 'open',
+				'00000000-0000-0000-0000-000000000061', NULL, NULL,
+				'2098-08-01T00:00:03Z', '2098-08-01T00:00:03Z'
+			),
+			(
+				'00000000-0000-0000-0000-000000000063', 'polymarket',
+				'chrono-rfc3339-millis', 'Chrono milliseconds',
+				'2099-01-01T00:00:00.123Z', false, 'open',
+				NULL, NULL, NULL,
+				'2098-08-01T00:00:02Z', '2098-08-01T00:00:02Z'
+			),
+			(
+				'00000000-0000-0000-0000-000000000064', 'polymarket',
+				'chrono-rfc3339-micros', 'Chrono microseconds',
+				'2099-01-01T00:00:00.000100Z', false, 'open',
+				NULL, NULL, NULL,
+				'2098-08-01T00:00:01Z', '2098-08-01T00:00:01Z'
+			),
+			(
+				'00000000-0000-0000-0000-000000000065', 'polymarket',
+				'chrono-rfc3339-absent', 'Chrono absent resolution',
+				NULL, false, 'open',
+				NULL, NULL, NULL,
+				'2098-08-01T00:00:00Z', '2098-08-01T00:00:00Z'
+			);
+
+		INSERT INTO trading.prediction_legs (
+			instrument_id, market_id, display_name, outcome_index,
+			outcome_label, enabled
+		) VALUES
+			('CHRONO-PREDICTION-SECONDS',
+			 '00000000-0000-0000-0000-000000000062',
+			 'CHRONO-PREDICTION-SECONDS', 0, 'Seconds', true),
+			('CHRONO-PREDICTION-MILLIS',
+			 '00000000-0000-0000-0000-000000000063',
+			 'CHRONO-PREDICTION-MILLIS', 0, 'Milliseconds', true),
+			('CHRONO-PREDICTION-MICROS',
+			 '00000000-0000-0000-0000-000000000064',
+			 'CHRONO-PREDICTION-MICROS', 0, 'Microseconds', true),
+			('CHRONO-PREDICTION-ABSENT',
+			 '00000000-0000-0000-0000-000000000065',
+			 'CHRONO-PREDICTION-ABSENT', 0, 'Absent', true)
+	`); err != nil {
+		t.Fatalf("seed prediction timestamp golden catalog: %v", err)
+	}
+}
+
+func seedPredictionScale18Catalog(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO trading.instruments (
+			instrument_id, revision, price_scale, quantity_scale,
+			settlement_currency, settlement_currency_scale,
+			initial_margin_rate, maintenance_margin_rate, max_leverage,
+			maker_fee_rate, taker_fee_rate
+		) VALUES (
+			'SCALE18-PREDICTION-LEG', 1, 18, 18, 'USDC', 6, 1, 1, 1, 0, 0
+		);
+
+		INSERT INTO trading.prediction_markets (
+			market_id, source_venue, market_key, question, resolution_time,
+			mutually_exclusive, status, event_id, stage_label, stage_ordinal,
+			created_at, updated_at
+		) VALUES (
+			'00000000-0000-0000-0000-000000000081', 'polymarket',
+			'scale18-prediction', 'Scale eighteen prediction', NULL, false, 'open',
+			NULL, NULL, 0, '2098-09-01T00:00:00Z', '2098-09-01T00:00:00Z'
+		);
+
+		INSERT INTO trading.prediction_legs (
+			instrument_id, market_id, display_name, outcome_index,
+			outcome_label, enabled
+		) VALUES (
+			'SCALE18-PREDICTION-LEG',
+			'00000000-0000-0000-0000-000000000081',
+			'SCALE18-PREDICTION-LEG', 0, 'Scale eighteen', true
+		)
+	`); err != nil {
+		t.Fatalf("seed scale-18 prediction catalog: %v", err)
 	}
 }

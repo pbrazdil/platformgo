@@ -26,24 +26,25 @@ var canonicalUUID = regexp.MustCompile(
 
 // Server is the dependency-injected HTTP compatibility edge.
 type Server struct {
-	auth             Authenticator
-	adminAuth        AdminAuthenticator
-	adminAuthorizer  AdminPermissionAuthorizer
-	adminPermissions AdminPermissionCatalogReader
-	commands         CommandSubmitter
-	realtime         RealtimeTokenIssuer
-	identity         IdentityService
-	trading          TradingReader
-	brokerAccount    BrokerAccountReader
-	brokerAccounts   BrokerAccountLister
-	brokerFills      BrokerFillsReader
-	brokerFunding    BrokerFundingReader
-	brokerBalances   BrokerBalancesReader
-	readiness        []HealthCheck
-	openAPI          map[string][]byte
-	allowOrigin      string
-	trustedProxies   []netip.Prefix
-	requestID        func() string
+	auth              Authenticator
+	adminAuth         AdminAuthenticator
+	adminAuthorizer   AdminPermissionAuthorizer
+	adminPermissions  AdminPermissionCatalogReader
+	commands          CommandSubmitter
+	realtime          RealtimeTokenIssuer
+	identity          IdentityService
+	predictionMarkets PredictionMarketsReader
+	trading           TradingReader
+	brokerAccount     BrokerAccountReader
+	brokerAccounts    BrokerAccountLister
+	brokerFills       BrokerFillsReader
+	brokerFunding     BrokerFundingReader
+	brokerBalances    BrokerBalancesReader
+	readiness         []HealthCheck
+	openAPI           map[string][]byte
+	allowOrigin       string
+	trustedProxies    []netip.Prefix
+	requestID         func() string
 }
 
 // ServerConfig contains only externally observable edge configuration.
@@ -55,6 +56,7 @@ type ServerConfig struct {
 	Commands                  CommandSubmitter
 	Realtime                  RealtimeTokenIssuer
 	Identity                  IdentityService
+	PredictionMarkets         PredictionMarketsReader
 	Trading                   TradingReader
 	BrokerAccount             BrokerAccountReader
 	BrokerAccounts            BrokerAccountLister
@@ -79,24 +81,25 @@ func NewServer(config ServerConfig) *Server {
 		requestID = newRequestID
 	}
 	return &Server{
-		auth:             config.Authenticator,
-		adminAuth:        config.AdminAuthenticator,
-		adminAuthorizer:  config.AdminPermissionAuthorizer,
-		adminPermissions: config.AdminPermissionCatalog,
-		commands:         config.Commands,
-		realtime:         config.Realtime,
-		identity:         config.Identity,
-		trading:          config.Trading,
-		brokerAccount:    config.BrokerAccount,
-		brokerAccounts:   config.BrokerAccounts,
-		brokerFills:      config.BrokerFills,
-		brokerFunding:    config.BrokerFunding,
-		brokerBalances:   config.BrokerBalances,
-		readiness:        append([]HealthCheck(nil), config.Readiness...),
-		openAPI:          config.OpenAPI,
-		allowOrigin:      origin,
-		trustedProxies:   append([]netip.Prefix(nil), config.TrustedProxies...),
-		requestID:        requestID,
+		auth:              config.Authenticator,
+		adminAuth:         config.AdminAuthenticator,
+		adminAuthorizer:   config.AdminPermissionAuthorizer,
+		adminPermissions:  config.AdminPermissionCatalog,
+		commands:          config.Commands,
+		realtime:          config.Realtime,
+		identity:          config.Identity,
+		predictionMarkets: config.PredictionMarkets,
+		trading:           config.Trading,
+		brokerAccount:     config.BrokerAccount,
+		brokerAccounts:    config.BrokerAccounts,
+		brokerFills:       config.BrokerFills,
+		brokerFunding:     config.BrokerFunding,
+		brokerBalances:    config.BrokerBalances,
+		readiness:         append([]HealthCheck(nil), config.Readiness...),
+		openAPI:           config.OpenAPI,
+		allowOrigin:       origin,
+		trustedProxies:    append([]netip.Prefix(nil), config.TrustedProxies...),
+		requestID:         requestID,
 	}
 }
 
@@ -113,6 +116,19 @@ func (server *Server) route(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	switch {
+	case request.URL.Path == "/v1/prediction-markets":
+		switch request.Method {
+		case http.MethodGet:
+			server.handlePredictionMarkets(writer, request)
+		case http.MethodHead:
+			server.handlePredictionMarkets(
+				predictionMarketsHeadWriter{ResponseWriter: writer},
+				request,
+			)
+		default:
+			writer.Header().Set("Allow", "GET,HEAD")
+			writer.WriteHeader(http.StatusMethodNotAllowed)
+		}
 	case request.Method == http.MethodGet && request.URL.Path == "/healthz":
 		writer.Header().Set("content-type", "text/plain; charset=utf-8")
 		writer.WriteHeader(http.StatusOK)
@@ -185,6 +201,47 @@ func (server *Server) route(writer http.ResponseWriter, request *http.Request) {
 	default:
 		writeError(writer, request, http.StatusNotFound, "not_found", "route not found")
 	}
+}
+
+func (server *Server) handlePredictionMarkets(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	if server.predictionMarkets == nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"catalog unavailable",
+		)
+		return
+	}
+	markets, err := server.predictionMarkets.PredictionMarkets(request.Context())
+	if err != nil {
+		writeError(
+			writer,
+			request,
+			http.StatusServiceUnavailable,
+			"unavailable",
+			"catalog unavailable",
+		)
+		return
+	}
+	if markets == nil {
+		markets = make([]PredictionMarketView, 0)
+	}
+	writeJSON(writer, http.StatusOK, markets)
+}
+
+// predictionMarketsHeadWriter preserves the GET response metadata while
+// suppressing its body for the route's Axum-compatible HEAD behavior.
+type predictionMarketsHeadWriter struct {
+	http.ResponseWriter
+}
+
+func (writer predictionMarketsHeadWriter) Write(body []byte) (int, error) {
+	return len(body), nil
 }
 
 func (server *Server) handleAdminPermissionCatalog(
