@@ -11,7 +11,7 @@ exact deployed build.
 
 ## Current status
 
-Last updated: 2026-08-02
+Last updated: 2026-08-04
 
 Current delivery stage: **Phase 3 — compatibility edges, in progress**.
 
@@ -677,6 +677,33 @@ evidence does not claim venue freshness, source-sequence gap recovery, or
 authoritative snapshot reload;
 those fail-closed Hyperliquid lifecycle controls remain Phase 4 work.
 
+The public prediction-market catalog is the next implemented HTTP candidate;
+its protected port-ledger acceptance remains a separate review. Forward
+migration 44 adds the event, market, and enabled-leg read model as the exact
+predecessor owner after demotion to `NOSUPERUSER`, under a cooperating global
+maintenance fence and the existing shard-order boundary.
+It validates the frozen tip-43 journal, ownership, ACL, index/TOAST, runtime
+membership, and terminal-bootstrap function graph before additive DDL. The
+public `GET /v1/prediction-markets` route reads one deterministic PostgreSQL
+snapshot, nests enabled definitions without live prices, preserves exact
+increments and optional-field omission, returns `[]` for an empty catalog, and
+fails the whole response closed with an opaque `503`. The migration creates no
+catalog rows and no population writer; discovery/import and production
+population remain separate Phase 3 operations and this implemented read does not
+claim them.
+
+The prediction-catalog implementation candidate is fully green locally.
+Policy, format, lint, complete tests, race, deterministic repeat, and
+vulnerability gates pass. PostgreSQL 19 Beta 2 qualification covers the exact
+demoted-owner migration/catalog/ACL/recovery suite, Chrono-compatible extended
+timestamp years and fail-closed bounds, every `TestPostgresPrediction*` case,
+the two-cluster exact-current template lane with race/shuffle and cross-process
+serialization, and the complete legacy split on a fresh isolated cluster.
+Exact-SHA migration and determinism reviews report no P0-P1 or P3 finding; the
+migration review records only that acknowledgement loss is synthetically
+modeled rather than injected at the transport's `COMMIT` reply. Independent
+exact-SHA release review and the separate protected port-ledger acceptance
+remain pending.
 Phase 3 is not complete. The runtime must still:
 
 - implement and semantically review the remaining in-scope frozen HTTP, admin,

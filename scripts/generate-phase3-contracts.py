@@ -175,6 +175,10 @@ ACCEPTED_SURFACE: dict[tuple[str, str], dict[str, object]] = {
         "statuses": [200, 503],
         "success_array": "InstrumentView",
     },
+    ("GET", "/v1/prediction-markets"): {
+        "statuses": [200, 503],
+        "success_array": "PredictionMarketView",
+    },
     ("POST", "/v1/me/realtime/token"): {
         "statuses": [200, 401, 429, 503],
         "success": "RealtimeToken",
@@ -724,6 +728,72 @@ def schemas(client: bool, broker: bool) -> dict[str, object]:
                 "enabled": {"type": "boolean"},
             },
         },
+        **({
+        "PredictionEventView": {
+            "type": "object",
+            "required": ["eventKey", "title", "status"],
+            "properties": {
+                "eventKey": {"type": "string"},
+                "title": {"type": "string"},
+                "series": {"type": "string"},
+                "status": {
+                    "type": "string",
+                    "enum": ["open", "closed", "resolved", "settled"],
+                },
+            },
+        },
+        "PredictionLegView": {
+            "type": "object",
+            "required": [
+                "symbol",
+                "displayName",
+                "outcomeIndex",
+                "outcomeLabel",
+                "priceIncrement",
+                "sizeIncrement",
+            ],
+            "properties": {
+                "symbol": {"type": "string"},
+                "displayName": {"type": "string"},
+                "outcomeIndex": {"type": "integer", "minimum": 0},
+                "outcomeLabel": {"type": "string"},
+                "priceIncrement": decimal,
+                "sizeIncrement": decimal,
+            },
+        },
+        "PredictionMarketView": {
+            "type": "object",
+            "required": [
+                "sourceVenue",
+                "marketKey",
+                "question",
+                "mutuallyExclusive",
+                "status",
+                "legs",
+            ],
+            "properties": {
+                "sourceVenue": {
+                    "type": "string",
+                    "enum": ["hyperliquid", "polymarket", "kalshi"],
+                },
+                "marketKey": {"type": "string"},
+                "question": {"type": "string"},
+                "resolutionTime": {"type": "string", "format": "date-time"},
+                "mutuallyExclusive": {"type": "boolean"},
+                "status": {
+                    "type": "string",
+                    "enum": ["open", "closed", "resolved", "settled"],
+                },
+                "stageLabel": {"type": "string"},
+                "stageOrdinal": {"type": "integer", "minimum": 0},
+                "event": {"$ref": "#/components/schemas/PredictionEventView"},
+                "legs": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/PredictionLegView"},
+                },
+            },
+        },
+        } if client else {}),
         "OrderView": {
             "type": "object",
             "required": [

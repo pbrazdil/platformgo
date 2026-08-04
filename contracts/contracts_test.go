@@ -124,6 +124,9 @@ func TestCompatibilityManifestHashesAndSourceRevision(t *testing.T) {
 	if !contains(manifest.ImplementedHTTPRoutes, "POST /v1/me/api-keys") {
 		t.Fatal("POST /v1/me/api-keys missing from compatibility manifest")
 	}
+	if !contains(manifest.ImplementedHTTPRoutes, "GET /v1/prediction-markets") {
+		t.Fatal("GET /v1/prediction-markets missing from compatibility manifest")
+	}
 	if !contains(
 		manifest.ImplementedHTTPRoutes,
 		"GET /v1/accounts/{accountId}/fills",
@@ -202,6 +205,43 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 		t.Fatalf("funding contract status = %v", funding["x-platformgo-contract-status"])
 	}
 	assertOperationSecurity(t, funding, "bearer")
+	schemas := client["components"].(map[string]any)["schemas"].(map[string]any)
+	predictionMarkets := assertMethod(t, client, "/v1/prediction-markets", "get")
+	assertResponse(t, predictionMarkets, "200")
+	assertResponse(t, predictionMarkets, "503")
+	if predictionMarkets["x-platformgo-contract-status"] != "phase3-accepted-runtime" {
+		t.Fatalf(
+			"prediction markets contract status = %v",
+			predictionMarkets["x-platformgo-contract-status"],
+		)
+	}
+	assertNonNullArrayResponseRef(
+		t,
+		predictionMarkets,
+		"200",
+		"#/components/schemas/PredictionMarketView",
+	)
+	assertPointer(t, client, "components", "schemas", "PredictionEventView")
+	assertPointer(t, client, "components", "schemas", "PredictionLegView")
+	assertPointer(t, client, "components", "schemas", "PredictionMarketView")
+	predictionMarketSchema := schemas["PredictionMarketView"].(map[string]any)
+	assertRequiredFields(
+		t,
+		predictionMarketSchema,
+		"sourceVenue",
+		"marketKey",
+		"question",
+		"mutuallyExclusive",
+		"status",
+		"legs",
+	)
+	for _, optional := range []string{
+		"resolutionTime", "stageLabel", "stageOrdinal", "event",
+	} {
+		if _, required := requiredFieldSet(predictionMarketSchema)[optional]; required {
+			t.Fatalf("PredictionMarketView.%s must remain optional", optional)
+		}
+	}
 	fills := assertMethod(t, client, "/v1/accounts/{accountId}/fills", "get")
 	assertPointer(t, client, "components", "schemas", "FillExecutionView")
 	assertPointer(t, client, "components", "schemas", "FillExecutionPage")
@@ -225,7 +265,6 @@ func TestOpenAPIContractContainsPinnedLifecycleAssertions(t *testing.T) {
 		"side",
 		"tradeId",
 	)
-	schemas := client["components"].(map[string]any)["schemas"].(map[string]any)
 	assertRequiredFields(
 		t,
 		schemas["FillExecutionView"].(map[string]any),

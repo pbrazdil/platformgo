@@ -1267,6 +1267,364 @@ func (store *CompatibilityStore) Instruments(
 	return values, nil
 }
 
+// PredictionMarkets returns one deterministic snapshot of the public
+// prediction-market catalog. The flat statement deliberately joins enabled
+// legs and authoritative instruments so the caller never observes a market or
+// leg assembled from different PostgreSQL snapshots.
+func (store *CompatibilityStore) PredictionMarkets(
+	ctx context.Context,
+) ([]edge.PredictionMarketView, error) {
+	if store == nil || store.pool == nil {
+		return nil, errors.New("list prediction markets: PostgreSQL pool is required")
+	}
+	rows, err := store.pool.Query(ctx, `
+		SELECT
+			market.market_id::text,
+			market.source_venue,
+			market.market_key,
+			market.question,
+			market.resolution_time,
+			market.mutually_exclusive,
+			market.status,
+			market.event_id::text,
+			market.stage_label,
+			market.stage_ordinal,
+			event.source_venue,
+			event.event_key,
+			event.title,
+			event.status,
+			event.series,
+			leg.instrument_id,
+			leg.display_name,
+			leg.outcome_index,
+			leg.outcome_label,
+			instrument.price_scale,
+			instrument.quantity_scale,
+			trim_scale(1 / power(10::numeric, instrument.price_scale))::text,
+			trim_scale(1 / power(10::numeric, instrument.quantity_scale))::text
+		  FROM trading.prediction_markets AS market
+		  JOIN trading.prediction_legs AS leg
+		    ON leg.market_id = market.market_id
+		   AND leg.enabled
+		  LEFT JOIN trading.prediction_events AS event
+		    ON event.event_id = market.event_id
+		  LEFT JOIN trading.instruments AS instrument
+		    ON instrument.instrument_id = leg.instrument_id
+		 ORDER BY
+			market.stage_ordinal ASC NULLS LAST,
+			market.created_at DESC,
+			market.source_venue COLLATE "C",
+			market.market_key COLLATE "C",
+			market.market_id::text COLLATE "C",
+			leg.outcome_index,
+			leg.instrument_id COLLATE "C"`)
+	if err != nil {
+		return nil, fmt.Errorf("list prediction markets: %w", err)
+	}
+	defer rows.Close()
+
+	markets := make([]edge.PredictionMarketView, 0)
+	var (
+		currentMarketID string
+		currentMarket   *edge.PredictionMarketView
+	)
+	for rows.Next() {
+		var (
+			marketID, sourceVenue, marketKey, question string
+			resolutionTime                             *time.Time
+			mutuallyExclusive                          bool
+			status                                     string
+			eventID, stageLabel                        *string
+			stageOrdinal                               *int
+			eventSourceVenue                           *string
+			eventKey, eventTitle, eventStatus          *string
+			eventSeries                                *string
+			instrumentID, displayName, outcomeLabel    *string
+			outcomeIndex                               *int
+			priceScale, quantityScale                  *int16
+			priceIncrement, sizeIncrement              *string
+		)
+		if err := rows.Scan(
+			&marketID,
+			&sourceVenue,
+			&marketKey,
+			&question,
+			&resolutionTime,
+			&mutuallyExclusive,
+			&status,
+			&eventID,
+			&stageLabel,
+			&stageOrdinal,
+			&eventSourceVenue,
+			&eventKey,
+			&eventTitle,
+			&eventStatus,
+			&eventSeries,
+			&instrumentID,
+			&displayName,
+			&outcomeIndex,
+			&outcomeLabel,
+			&priceScale,
+			&quantityScale,
+			&priceIncrement,
+			&sizeIncrement,
+		); err != nil {
+			return nil, fmt.Errorf("scan prediction market: %w", err)
+		}
+
+		if strings.TrimSpace(marketID) == "" {
+			return nil, errors.New("scan prediction market: market ID is empty")
+		}
+		for _, value := range []struct {
+			name string
+			text string
+		}{
+			{name: "source venue", text: sourceVenue},
+			{name: "market key", text: marketKey},
+			{name: "question", text: question},
+			{name: "status", text: status},
+		} {
+			if strings.TrimSpace(value.text) == "" {
+				return nil, fmt.Errorf(
+					"scan prediction market %q: %s is empty",
+					marketID,
+					value.name,
+				)
+			}
+		}
+		if err := validatePredictionVenue(sourceVenue, "market", marketID); err != nil {
+			return nil, err
+		}
+		if err := validatePredictionStatus(status, "market", marketID); err != nil {
+			return nil, err
+		}
+		if stageLabel != nil && strings.TrimSpace(*stageLabel) == "" {
+			return nil, fmt.Errorf(
+				"scan prediction market %q: stage label is empty",
+				marketID,
+			)
+		}
+		if stageOrdinal != nil && *stageOrdinal < 0 {
+			return nil, fmt.Errorf(
+				"scan prediction market %q: stage ordinal is negative",
+				marketID,
+			)
+		}
+		if instrumentID == nil || strings.TrimSpace(*instrumentID) == "" {
+			return nil, fmt.Errorf(
+				"scan prediction market %q: enabled leg instrument reference is missing",
+				marketID,
+			)
+		}
+		if displayName == nil || strings.TrimSpace(*displayName) == "" {
+			return nil, fmt.Errorf(
+				"scan prediction market %q leg %q: display name is missing",
+				marketID,
+				*instrumentID,
+			)
+		}
+		if outcomeIndex == nil || *outcomeIndex < 0 {
+			return nil, fmt.Errorf(
+				"scan prediction market %q leg %q: outcome index is invalid",
+				marketID,
+				*instrumentID,
+			)
+		}
+		if outcomeLabel == nil || strings.TrimSpace(*outcomeLabel) == "" {
+			return nil, fmt.Errorf(
+				"scan prediction market %q leg %q: outcome label is missing",
+				marketID,
+				*instrumentID,
+			)
+		}
+		if priceScale == nil || *priceScale < 0 || *priceScale > int16(economic.MaxScale) {
+			return nil, fmt.Errorf(
+				"scan prediction market %q leg %q: price scale is invalid",
+				marketID,
+				*instrumentID,
+			)
+		}
+		if quantityScale == nil || *quantityScale < 0 || *quantityScale > int16(economic.MaxScale) {
+			return nil, fmt.Errorf(
+				"scan prediction market %q leg %q: quantity scale is invalid",
+				marketID,
+				*instrumentID,
+			)
+		}
+		if err := validatePredictionIncrement(priceIncrement, "price", marketID, *instrumentID); err != nil {
+			return nil, err
+		}
+		if err := validatePredictionIncrement(sizeIncrement, "size", marketID, *instrumentID); err != nil {
+			return nil, err
+		}
+		if eventID != nil {
+			if strings.TrimSpace(*eventID) == "" ||
+				eventSourceVenue == nil ||
+				eventKey == nil || strings.TrimSpace(*eventKey) == "" ||
+				eventTitle == nil || strings.TrimSpace(*eventTitle) == "" ||
+				eventStatus == nil || strings.TrimSpace(*eventStatus) == "" {
+				return nil, fmt.Errorf(
+					"scan prediction market %q: event reference %q is missing authoritative metadata",
+					marketID,
+					*eventID,
+				)
+			}
+			if err := validatePredictionVenue(*eventSourceVenue, "event", *eventID); err != nil {
+				return nil, err
+			}
+			if err := validatePredictionStatus(*eventStatus, "event", *eventID); err != nil {
+				return nil, err
+			}
+		}
+
+		if currentMarket == nil || currentMarketID != marketID {
+			view := edge.PredictionMarketView{
+				SourceVenue:       sourceVenue,
+				MarketKey:         marketKey,
+				Question:          question,
+				MutuallyExclusive: mutuallyExclusive,
+				Status:            status,
+				StageLabel:        stageLabel,
+				StageOrdinal:      stageOrdinal,
+				Legs:              make([]edge.PredictionLegView, 0, 1),
+			}
+			if resolutionTime != nil {
+				formatted, err := formatPredictionRFC3339(*resolutionTime)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"scan prediction market %q resolution time: %w",
+						marketID,
+						err,
+					)
+				}
+				view.ResolutionTime = &formatted
+			}
+			if eventID != nil {
+				view.Event = &edge.PredictionEventView{
+					EventKey: *eventKey,
+					Title:    *eventTitle,
+					Series:   eventSeries,
+					Status:   *eventStatus,
+				}
+			}
+			markets = append(markets, view)
+			currentMarket = &markets[len(markets)-1]
+			currentMarketID = marketID
+		}
+		currentMarket.Legs = append(currentMarket.Legs, edge.PredictionLegView{
+			Symbol:         *instrumentID,
+			DisplayName:    *displayName,
+			OutcomeIndex:   *outcomeIndex,
+			OutcomeLabel:   *outcomeLabel,
+			PriceIncrement: *priceIncrement,
+			SizeIncrement:  *sizeIncrement,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list prediction markets: %w", err)
+	}
+	return markets, nil
+}
+
+// formatPredictionRFC3339 mirrors chrono 0.4.45 DateTime::to_rfc3339:
+// UTC is rendered with an explicit +00:00 offset and AutoSi chooses the
+// shortest fractional precision that preserves the timestamp (seconds,
+// milliseconds, microseconds, or nanoseconds). Chrono's NaiveDate range is
+// narrower than Go's time.Time range, so values outside it fail closed.
+func formatPredictionRFC3339(value time.Time) (string, error) {
+	value = value.UTC()
+	const (
+		chronoMinYear = -262143
+		chronoMaxYear = 262142
+	)
+	year := value.Year()
+	if year < chronoMinYear || year > chronoMaxYear {
+		return "", fmt.Errorf(
+			"year %d is outside Chrono representable range [%d,%d]",
+			year,
+			chronoMinYear,
+			chronoMaxYear,
+		)
+	}
+	yearText := fmt.Sprintf("%04d", year)
+	if year < 0 || year > 9999 {
+		yearText = fmt.Sprintf("%+05d", year)
+	}
+	fraction := ""
+	switch nanos := value.Nanosecond(); {
+	case nanos == 0:
+	case nanos%1_000_000 == 0:
+		fraction = fmt.Sprintf(".%03d", nanos/1_000_000)
+	case nanos%1_000 == 0:
+		fraction = fmt.Sprintf(".%06d", nanos/1_000)
+	default:
+		fraction = fmt.Sprintf(".%09d", nanos)
+	}
+	return fmt.Sprintf(
+		"%s-%02d-%02dT%02d:%02d:%02d%s+00:00",
+		yearText,
+		value.Month(),
+		value.Day(),
+		value.Hour(),
+		value.Minute(),
+		value.Second(),
+		fraction,
+	), nil
+}
+
+func validatePredictionIncrement(
+	value *string,
+	kind string,
+	marketID string,
+	instrumentID string,
+) error {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return fmt.Errorf(
+			"scan prediction market %q leg %q: %s increment is missing",
+			marketID,
+			instrumentID,
+			kind,
+		)
+	}
+	parsed, err := economic.Parse(*value)
+	if err != nil || parsed.Sign() <= 0 {
+		return fmt.Errorf(
+			"scan prediction market %q leg %q: %s increment %q is invalid",
+			marketID,
+			instrumentID,
+			kind,
+			*value,
+		)
+	}
+	return nil
+}
+
+func validatePredictionVenue(value, kind, identifier string) error {
+	if value != "hyperliquid" && value != "polymarket" && value != "kalshi" {
+		return fmt.Errorf(
+			"scan prediction %s %q: source venue %q is invalid",
+			kind,
+			identifier,
+			value,
+		)
+	}
+	return nil
+}
+
+func validatePredictionStatus(value, kind, identifier string) error {
+	switch value {
+	case "open", "closed", "resolved", "settled":
+		return nil
+	default:
+		return fmt.Errorf(
+			"scan prediction %s %q: status %q is invalid",
+			kind,
+			identifier,
+			value,
+		)
+	}
+}
+
 // Orders returns the account's durable order projection.
 func (store *CompatibilityStore) Orders(
 	ctx context.Context,

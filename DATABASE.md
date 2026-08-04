@@ -1064,12 +1064,13 @@ administrator, credential, session, token, or runtime route.
 mutation boundary. A member login supplies an explicit request ID, SHA-256
 idempotency key hash, canonical lowercase-UUID admin subject, event UUID,
 canonical microsecond UTC logical time, and the expected 32-byte checksum of
-migration 43. The checksum is a deployment precondition and is not part of the
-business idempotency hash. Forward migration 43 advances the exact-tip fence:
-under the journal lock, the function requires the exact 43-row tip, the sole
-successor filename
-`20260731000200_phase3_runtime_authority_acl.up.sql`, the requested exact
-migration-43 checksum, and the canonical ordered checksum of all 42 predecessor
+migration 44. The checksum is a deployment precondition and is not part of the
+business idempotency hash. Migration 43 first advanced this authority to its
+privileged runtime-ACL cutover. Forward migration 44 now advances the exact-tip
+fence again: under the journal lock, the function requires the exact 44-row tip,
+the sole successor filename
+`20260803000100_phase3_prediction_market_catalog.up.sql`, the requested exact
+migration-44 checksum, and the canonical ordered checksum of all 43 predecessor
 rows before any authority write. It
 rejects a null, malformed, or noncanonical input with SQLSTATE `22023`, before
 any authority write. It then derives an exact request hash,
@@ -1145,6 +1146,35 @@ must be temporarily re-elevated for the terminal
 bootstrap because its `SECURITY DEFINER` body takes the protected-catalog
 fences. It remains elevated through unknown-outcome replay and fresh-session
 durable verification, then returns to `NOSUPERUSER`.
+
+Migration `20260803000100_phase3_prediction_market_catalog.up.sql` is the
+ordinary-owner successor from exact tip 43 to tip 44. Unlike migrations 42 and
+43, migration 44 itself runs as the same exact owner after that owner has been
+restored to `NOSUPERUSER`; a superuser, a different role, `SET ROLE`, elevated
+role attributes, or inherited membership is rejected before DDL. The migration
+requires the global maintenance advisory fence. Every privileged role, default
+privilege, schema, function, and event-trigger maintenance tool participating
+in the approved maintenance window must take that same fence. An arbitrary
+non-cooperating superuser is outside this ordinary-owner race boundary and must
+be excluded operationally.
+
+Under owner-safe object locks and engine-compatible lock order, migration 44
+acquires the shard advisory before conflicting relation locks, verifies the
+exact 43-row journal and checksum manifest, the frozen schema/relation/column/
+default ACL graph, runtime-role memberships, index and TOAST ownership, and the
+complete bootstrap-function metadata, body preimage, and execute ACL. It then
+creates only `trading.prediction_events`, `trading.prediction_markets`, and
+`trading.prediction_legs` plus their indexes and foreign keys. It performs no
+backfill and installs no population writer. Existing `trading.instruments`
+rows and relation files are unchanged. The three new relations are owned by
+the exact migration owner; only `platformgo_api` receives non-grantable
+`SELECT`, and every runtime role remains denied prediction-catalog DML.
+Migration 44 replaces only the four terminal bootstrap tip sentinels. It does
+not weaken the protected-catalog fences inside the terminal function, so the
+same exact function owner still requires temporary `SUPERUSER` authority only
+for terminal invocation, uncertain-outcome replay, and fresh-session durable
+verification.
+
 The runtime ledger adapter independently requires exactly one returned ID for
 each expected transaction and entry insert; any zero-row, multi-row, or wrong-ID result
 returns an error and rolls back the enclosing receipt, state, ledger,

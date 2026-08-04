@@ -622,6 +622,53 @@ readiness. Then
 restore the exact owner to `NOSUPERUSER`. Do not run the terminal bootstrap
 until this verification succeeds.
 
+### Phase 3 ordinary-owner prediction catalog successor
+
+Migration `20260803000100_phase3_prediction_market_catalog.up.sql` advances
+exact tip 43 to tip 44. Stop and drain the engine and all schema, role,
+default-privilege, and event-trigger maintenance first. The exact migration-43
+owner must already be `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`,
+`NOREPLICATION`, and `NOBYPASSRLS`, with no membership in either direction. Do
+not elevate it for this migration. A superuser or different owner is an
+expected `55000` failure and must leave tip 43 unchanged.
+
+The production migrator and every cooperating privileged maintenance tool must
+hold advisory key `88288443778895` for the whole attempt. Migration 44 cannot
+lock protected role, event-trigger, or default-ACL catalogs as an ordinary
+owner; safety therefore depends on this exclusive maintenance window. Do not
+run uncoordinated superuser DDL concurrently. The migration takes owner-safe
+object locks, then the configured shard advisory before journal,
+deployment-shard, and instrument relation locks. A clean database with an
+exactly empty `engine.deployment_shard` is classified as having no possible
+runtime writer; any configured shard is rechecked under the retained relation
+fence.
+
+Before DDL, require the exact 43-row predecessor manifest, migration-43
+checksum, frozen ACL/ownership graph, disabled event triggers, safe default
+privileges, and exact bootstrap-function definition and execute ACL. The
+migration creates three additive prediction-catalog relations and no rows or
+population writer. After commit, independently verify:
+
+- migration count 44, the exact migration-44 filename and deployed checksum;
+- the unchanged instrument row digest and relation file;
+- exact owners, columns, constraints, foreign keys, indexes, collations, and
+  raw ACLs for all three prediction relations;
+- `platformgo_api` has only non-grantable `SELECT`, every other runtime role
+  has no prediction relation privilege, and no column or membership grant
+  widens that boundary;
+- the bootstrap function retains its exact owner, `SECURITY DEFINER` metadata,
+  protected settings, body authority, and execute-only ACL while requiring the
+  migration-44 checksum.
+
+For `55P03`, classify the exact unchanged tip-43 state, drain the named object,
+global, shard, or relation blocker, and explicitly retry identical bytes. For
+a lost or uncertain `COMMIT` acknowledgment, do not automatically retry. Close
+the original session, reconnect as the same demoted exact owner, and run
+`VerifyCurrent` plus the complete count/checksum/catalog/owner/ACL/function and
+unchanged-instrument checks above. An exact tip-44 match means the migration
+committed; an exact tip-43 match permits an operator-reviewed retry. Any mixed
+state is an incident requiring forward repair, never migration-history edits.
+
 After migration, verify the exact checksum and tip, the sole built-in
 `platformgo-superadmin` role, its sole `*/*/allow` policy, zero assignments and
 zero bootstrap events, unchanged preexisting identity/API-key/audit digests
@@ -654,7 +701,7 @@ verification in step 4; the operator login receives no superuser authority.
    operator login with the exact `session_user` spelling; that spelling is
    bound into the request hash and immutable receipt and must be reused for
    replay or unknown-commit reconciliation. Record the reviewed
-   SHA-256 checksum of migration 43 from the exact deployed artifact as
+   SHA-256 checksum of migration 44 from the exact deployed artifact as
    `migration_checksum_sha256_hex`; the function uses it as a pre-write
    deployment precondition.
 3. Connect as that login with client-side stop-on-error enabled. Run the
@@ -679,9 +726,9 @@ verification in step 4; the operator login receives no superuser authority.
    ```
 
    Before writing, the function locks and exact-validates the `engine` namespace
-   plus the 43-row migration journal, including the sole exact migration-43
-   successor filename, zero user triggers/rules, the supplied migration-43
-   checksum, and the canonical ordered manifest through migration 42. The
+   plus the 44-row migration journal, including the sole exact migration-44
+   successor filename, zero user triggers/rules, the supplied migration-44
+   checksum, and the canonical ordered manifest through migration 43. The
    returned `created` row is
    provisional until PostgreSQL confirms `COMMIT`. Do not acknowledge success
    or begin credential cleanup from a result observed inside an open

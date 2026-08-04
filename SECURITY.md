@@ -108,8 +108,8 @@ Validate at each boundary. Internal origin does not make a payload valid.
   triggers, rules, indexes, and table/column ACLs before writing. Under the
   migration-journal lock it also
   requires exact `engine` namespace authority, zero journal user triggers or
-  rewrite rules, the exact 43-row tip, the caller-supplied migration-43
-  checksum, and the canonical ordered manifest of the 42 predecessor rows. It
+  rewrite rules, the exact 44-row tip, the caller-supplied migration-44
+  checksum, and the canonical ordered manifest of the 43 predecessor rows. It
   revalidates the
   complete graph and every receipt field after its writes and before returning;
   unexpected
@@ -121,11 +121,15 @@ Validate at each boundary. Internal origin does not make a payload valid.
   one-shot migrations reject enabled database event triggers; the migrator
   skips metadata DDL for an existing journal and revalidates its complete
   manifest under the pending-file transaction lock. Migrations 42 and 43
-  exact-fence journal catalog/data and authority namespace ownership. The
-  migration and definer owner require temporary superuser authority only to
-  acquire those protected-catalog fences during migration and the terminal
-  bootstrap. The owner is demoted after each independently verified boundary;
-  the application and terminal operator login never receive that authority.
+  exact-fence journal catalog/data and authority namespace ownership and are
+  exceptional privileged cutovers. Migration 44 runs as the same exact owner
+  after demotion, under the cooperating global maintenance advisory fence; it
+  rejects a superuser, inherited authority, owner drift, protected-catalog
+  authority drift, and an inexact tip-43 manifest before additive DDL. The
+  terminal function owner still requires temporary superuser authority only
+  while the protected-catalog bootstrap function is invoked, replayed after an
+  uncertain outcome, and independently verified. The application and terminal
+  operator login never receive that authority.
   Before migration the bootstrap role must own nothing and have no
   privilege/default-ACL dependency, and afterward it has only identity schema
   usage plus non-grantable bootstrap-function execution.
@@ -134,6 +138,12 @@ Validate at each boundary. Internal origin does not make a payload valid.
   fenced. Unexpected non-owner `CREATE`, grant options, grantors, missing
   grants, or ownership drift fail with `55000` before the ACL cutover and leave
   the tip-42 incident evidence intact.
+- Migration 44 adds only the prediction catalog read model. It requires the
+  exact demoted owner, owner-safe object locks, shard-before-relation ordering,
+  the frozen tip-43 ACL/ownership/function graph, and the cooperating global
+  maintenance fence. Only `platformgo_api` receives non-grantable `SELECT` on
+  the new relations; no runtime role receives prediction-catalog DML. An
+  uncoordinated superuser is excluded from the approved maintenance window.
 
 ## 6. Input hardening
 

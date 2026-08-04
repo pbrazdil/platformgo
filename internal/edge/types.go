@@ -361,6 +361,44 @@ type InstrumentView struct {
 	Enabled         bool   `json:"enabled"`
 }
 
+// PredictionEventView is the optional event metadata nested in a public
+// prediction-market snapshot. A missing event, series, or other optional
+// source value is represented by omission on the wire rather than JSON null.
+type PredictionEventView struct {
+	EventKey string  `json:"eventKey"`
+	Title    string  `json:"title"`
+	Series   *string `json:"series,omitempty"`
+	Status   string  `json:"status"`
+}
+
+// PredictionLegView is one enabled prediction-market outcome definition.
+// Prices are intentionally absent: this compatibility projection exposes
+// metadata and exact instrument increments only.
+type PredictionLegView struct {
+	Symbol         string `json:"symbol"`
+	DisplayName    string `json:"displayName"`
+	OutcomeIndex   int    `json:"outcomeIndex"`
+	OutcomeLabel   string `json:"outcomeLabel"`
+	PriceIncrement string `json:"priceIncrement"`
+	SizeIncrement  string `json:"sizeIncrement"`
+}
+
+// PredictionMarketView is one public prediction-market snapshot. Its field
+// order follows the pinned source contract; optional pointers are omitted
+// from JSON when the source value is absent.
+type PredictionMarketView struct {
+	SourceVenue       string               `json:"sourceVenue"`
+	MarketKey         string               `json:"marketKey"`
+	Question          string               `json:"question"`
+	ResolutionTime    *string              `json:"resolutionTime,omitempty"`
+	MutuallyExclusive bool                 `json:"mutuallyExclusive"`
+	Status            string               `json:"status"`
+	StageLabel        *string              `json:"stageLabel,omitempty"`
+	StageOrdinal      *int                 `json:"stageOrdinal,omitempty"`
+	Event             *PredictionEventView `json:"event,omitempty"`
+	Legs              []PredictionLegView  `json:"legs"`
+}
+
 // OrderView is the stable client order projection.
 type OrderView struct {
 	OrderID        string  `json:"orderId"`
@@ -456,6 +494,12 @@ type FundingPage struct {
 	NextCursor *string       `json:"nextCursor,omitempty"`
 	PrevCursor *string       `json:"prevCursor,omitempty"`
 	Total      *int64        `json:"total,omitempty"`
+}
+
+// PredictionMarketsReader provides the public catalog read without exposing
+// unrelated trading projections to the edge.
+type PredictionMarketsReader interface {
+	PredictionMarkets(context.Context) ([]PredictionMarketView, error)
 }
 
 // TradingReader provides PostgreSQL-backed compatibility projections.

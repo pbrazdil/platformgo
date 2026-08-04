@@ -55,6 +55,7 @@
     "GET /v1/me/accounts",
     "POST /v1/me/api-keys",
     "GET /v1/instruments",
+    "GET /v1/prediction-markets",
     "POST /v1/me/realtime/token",
     "POST /v1/accounts/{accountId}/orders",
     "GET /v1/accounts/{accountId}/orders",
@@ -86,7 +87,7 @@
   "openAPIArtifacts": {
     "openapi/admin-v1.json": "615e8a49f9e6a71f6a3ea0108bd71353bd5b7050cc79cee6b17d98af84a6aeb3",
     "openapi/broker-v1.json": "3ee2d59078fe751d31c880df1bab6eb53f6d6ab4e0a97189331253acaf04a104",
-    "openapi/client-v1.json": "42461474eb48058875938d75a8b428504ac3613ee41dd87e8157cae0e4dfc810"
+    "openapi/client-v1.json": "8642d4c65b5a6d69c75d602f37fc2beb58acd55e83c2e02f879dad815b11a63b"
   },
   "platformSourceRevision": "50141367492be46ebf5623f6191a14b94af2f2bd",
   "protobufDescriptor": {
