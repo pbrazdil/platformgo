@@ -550,21 +550,21 @@ func (manager *TemplateDatabaseManager) buildTemplate(
 		return fmt.Errorf("open template build pool: %w", err)
 	}
 	defer buildPool.Close()
-	if err := buildPool.Ping(ctx); err != nil {
+	if pingErr := buildPool.Ping(ctx); pingErr != nil {
 		buildPool.Close()
-		return fmt.Errorf("ping template build database: %w", err)
+		return fmt.Errorf("ping template build database: %w", pingErr)
 	}
-	if err := validateTemplate0Build(ctx, buildPool, manager.clusterFacts); err != nil {
+	if validationErr := validateTemplate0Build(ctx, buildPool, manager.clusterFacts); validationErr != nil {
 		buildPool.Close()
-		return err
+		return validationErr
 	}
 	prepareErr := prepare(ctx, buildPool, TemplateBuildPhasePreDemotion)
 	buildPool.Close()
 	if prepareErr != nil {
 		return fmt.Errorf("prepare current template database before owner demotion: %w", prepareErr)
 	}
-	if err := manager.demoteTemplateOwner(ctx); err != nil {
-		return fmt.Errorf("demote current template owner: %w", err)
+	if demoteErr := manager.demoteTemplateOwner(ctx); demoteErr != nil {
+		return fmt.Errorf("demote current template owner: %w", demoteErr)
 	}
 	postPool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
@@ -681,7 +681,7 @@ func (manager *TemplateDatabaseManager) createTemplateOwner(ctx context.Context)
 	manager.templateOwnerCreateAttempted = true
 	ownerIdentifier := pgx.Identifier{manager.templateOwner}.Sanitize()
 	statement := "CREATE ROLE " + ownerIdentifier + " LOGIN SUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD " + quoteLiteral(manager.templateOwnerPassword)
-	if err := manager.applyRoleMutation(
+	if mutationErr := manager.applyRoleMutation(
 		ctx,
 		templateRoleCreateOperation,
 		manager.templateOwner,
@@ -699,8 +699,8 @@ func (manager *TemplateDatabaseManager) createTemplateOwner(ctx context.Context)
 			}
 			return nil
 		},
-	); err != nil {
-		return err
+	); mutationErr != nil {
+		return mutationErr
 	}
 	state, err := readTemplateOwnerRole(ctx, manager.inspectionConn, manager.templateOwner)
 	if err != nil {
@@ -1044,7 +1044,7 @@ func (manager *TemplateDatabaseManager) Close(ctx context.Context) error {
 	if result != nil {
 		return result
 	}
-	finalizeCtx := context.Background()
+	finalizeCtx := context.WithoutCancel(ctx)
 	if manager.advisoryHeld {
 		if _, err := manager.rootConn.Exec(finalizeCtx, `SELECT pg_advisory_unlock($1)`, templateAdvisoryLockKey); err != nil {
 			return fmt.Errorf("release template cluster lock: %w", err)
@@ -1057,13 +1057,15 @@ func (manager *TemplateDatabaseManager) Close(ctx context.Context) error {
 	// even when one close operation reports an error.
 	manager.closed = true
 	var closeErr error
+	closeCtx, cancelClose := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancelClose()
 	if manager.inspectionConn != nil {
-		if err := manager.inspectionConn.Close(finalizeCtx); err != nil {
+		if err := manager.inspectionConn.Close(closeCtx); err != nil {
 			closeErr = errors.Join(closeErr, fmt.Errorf("close template inspection connection: %w", err))
 		}
 	}
 	if manager.rootConn != nil {
-		if err := manager.rootConn.Close(finalizeCtx); err != nil {
+		if err := manager.rootConn.Close(closeCtx); err != nil {
 			closeErr = errors.Join(closeErr, fmt.Errorf("close template cluster connection: %w", err))
 		}
 	}
@@ -1082,7 +1084,7 @@ func (manager *TemplateDatabaseManager) ensureInspectionConn(ctx context.Context
 		if pingErr == nil {
 			return nil
 		}
-		_ = manager.inspectionConn.Close(context.Background())
+		_ = manager.inspectionConn.Close(context.WithoutCancel(ctx))
 		manager.inspectionConn = nil
 	}
 	connectCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -1223,15 +1225,15 @@ func (manager *TemplateDatabaseManager) restoreInitialRoles(ctx context.Context)
 			// never silently repaired while the template is being built.  At
 			// this point cleanup has already torn down the disposable database,
 			// so remove only the manager-owned role's memberships before DROP.
-			if err := removeRoleMembershipsForCleanup(ctx, manager.inspectionConn, name); err != nil {
-				return fmt.Errorf("cleanup template owner memberships: %w", err)
+			if membershipErr := removeRoleMembershipsForCleanup(ctx, manager.inspectionConn, name); membershipErr != nil {
+				return fmt.Errorf("cleanup template owner memberships: %w", membershipErr)
 			}
 		}
 		operation := templateRoleDropRuntimeOperation
 		if name == manager.templateOwner {
 			operation = templateRoleDropOperation
 		}
-		if err := manager.applyRoleMutation(
+		if mutationErr := manager.applyRoleMutation(
 			ctx,
 			operation,
 			name,
@@ -1246,8 +1248,8 @@ func (manager *TemplateDatabaseManager) restoreInitialRoles(ctx context.Context)
 				}
 				return nil
 			},
-		); err != nil {
-			return fmt.Errorf("restore initial template role %q: %w", name, err)
+		); mutationErr != nil {
+			return fmt.Errorf("restore initial template role %q: %w", name, mutationErr)
 		}
 	}
 	final, err := readRoleSnapshot(ctx, manager.inspectionConn)
